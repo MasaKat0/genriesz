@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "generalized-riesz-regression"
+version = "0.1.0"
+description = "Generalized Riesz Regression (GRR): Riesz representer fitting under Bregman divergence"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Masahiro Kato" },
+]
+keywords = ["debiased", "double machine learning", "causal inference", "riesz representer", "bregman divergence"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# PyTorch is optional because some users may only want the RKHS implementation.
+torch = ["torch"]
+
+# Dependencies used by the original notebooks / simulation utilities.
+experiments = [
+  "matplotlib>=3.7",
+  "scikit-learn>=1.3",
+  "joblib>=1.3",
+  "statsmodels>=0.14",
+  "pandas>=2.0",
+]
+
+dev = [
+  "pytest>=7.4",
+  "ruff>=0.4",
+  "jupyter>=1.0",
+  "nbformat>=5.9",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+  # Allow long lines in docstrings / README-style code.
+  "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["grr"]
