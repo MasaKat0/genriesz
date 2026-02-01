@@ -224,80 +224,6 @@ If you have PyTorch installed, you can use a neural network as a **fixed feature
 
 See `src/genriesz/torch_basis.py` for a minimal wrapper.
 
----
-
-## Included estimands
-
-- **ATE**: `grr_ate`, or `m=ATEFunctional(...)`
-- **AME** (average marginal effect / average derivative): `grr_ame`, or `m=AverageDerivativeFunctional(...)`
-- **Average policy effect**: `grr_policy_effect`, or `m=PolicyEffectFunctional(...)`
-
----
-
-## Documentation
-
-The documentation is written in Sphinx and configured for **Read the Docs** via
-`.readthedocs.yaml`.
-
-Build locally:
-
-```bash
-pip install -e ".[docs]"
-sphinx-build -b html docs docs/_build/html
-```
-
-Then open `docs/_build/html/index.html`.
-
-### Publishing to PyPI
-
-This repository is ready for PyPI via **either**:
-
-1. **manual upload** (``python -m build`` + ``twine upload``), or
-2. **GitHub Actions + PyPI Trusted Publishing** (recommended).
-
-The release workflow lives at:
-
-- `.github/workflows/release.yml`
-
-#### Manual upload (recommended first: TestPyPI)
-
-```bash
-python -m pip install -U pip build twine
-
-# Build sdist + wheel
-python -m build
-
-# Sanity check the distributions
-python -m twine check dist/*
-
-# Upload to TestPyPI (recommended for the very first trial)
-python -m twine upload -r testpypi dist/*
-
-# Upload to PyPI
-python -m twine upload dist/*
-```
-
-If you prefer to store credentials in a config file, create ``~/.pypirc``.
-
-#### GitHub Actions (Trusted Publishing)
-
-1. Create your first release tag (example):
-
-   ```bash
-   git tag v0.1.9
-   git push --tags
-   ```
-
-2. On PyPI, add a **Trusted Publisher** pointing to your GitHub repository,
-   using the workflow file ``release.yml``.
-
-After that, pushing a tag ``vX.Y.Z`` will automatically:
-
-- build + check your package,
-- upload it to PyPI, and
-- create a GitHub Release with the artifacts attached.
-
-See `docs/releasing.rst` for a more detailed checklist.
 
 ---
 
@@ -306,16 +232,6 @@ See `docs/releasing.rst` for a more detailed checklist.
 An end-to-end notebook with runnable examples is provided at:
 
 - `notebooks/GRR_end_to_end_examples.ipynb`
-
----
-
-## Development
-
-Run tests:
-
-```bash
-pytest -q
-```
 
 ---
 
