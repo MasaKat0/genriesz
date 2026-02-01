@@ -1,5 +1,7 @@
 # genriesz — Generalized Riesz Regression (GRR)
 
+Document: https://genriesz.readthedocs.io/en/latest/
+
 This repository packages a small Python library for **Generalized Riesz Regression** under **Bregman divergences**.
 
 The key idea is:
