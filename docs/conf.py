@@ -1,6 +1,6 @@
 """Sphinx configuration for the *genriesz* project.
 
-This configuration is designed to build on Read the Docs and locally.
+This configuration is designed to build the docs locally (and on CI/hosted builders).
 """
 
 from __future__ import annotations

@@ -1,7 +1,5 @@
 # genriesz — Generalized Riesz Regression (GRR)
 
-Document: https://genriesz.readthedocs.io/en/latest/
-
 This repository packages a small Python library for **Generalized Riesz Regression** under **Bregman divergences**.
 
 The key idea is:
@@ -226,8 +224,28 @@ If you have PyTorch installed, you can use a neural network as a **fixed feature
 
 See `src/genriesz/torch_basis.py` for a minimal wrapper.
 
+---
+
+## Included estimands
+
+- **ATE**: `grr_ate`, or `m=ATEFunctional(...)`
+- **AME** (average marginal effect / average derivative): `grr_ame`, or `m=AverageDerivativeFunctional(...)`
+- **Average policy effect**: `grr_policy_effect`, or `m=PolicyEffectFunctional(...)`
 
 ---
+
+## Documentation
+
+The documentation is written in Sphinx.
+
+Build locally:
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs docs/_build/html
+```
+
+Then open `docs/_build/html/index.html`.
 
 ## Jupyter notebook
 
@@ -237,6 +255,25 @@ An end-to-end notebook with runnable examples is provided at:
 
 ---
 
+## Development
+
+Run tests:
+
+```bash
+pytest -q
+```
+
+---
+
+## References
+
+If you use **genriesz** in academic work, please cite:
+
+- Masahiro Kato. *Riesz Representer Fitting under Bregman Divergence: A Unified Framework for Debiased Machine Learning*. https://arxiv.org/abs/2601.07752
+  - Note: https://arxiv.org/abs/2601.07752 consolidates earlier related drafts: https://arxiv.org/abs/2509.22122, https://arxiv.org/abs/2510.26783, and https://arxiv.org/abs/2510.23534.
+- Masahiro Kato. *Direct Bias-Correction Term Estimation for Propensity Scores and Average Treatment Effect Estimation*. https://arxiv.org/abs/2509.22122
+- Masahiro Kato. *Nearest Neighbor Matching as Least Squares Density Ratio Estimation and Riesz Regression*. https://arxiv.org/abs/2510.24433
+
 ## License
 
-GNU General Public License v3.0
+GNU General Public License v3.0 (GPL-3.0).

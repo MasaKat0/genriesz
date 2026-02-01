@@ -21,4 +21,5 @@ The central user-facing API is:
    user_guide
    api
    examples
+   references
 

@@ -15,7 +15,7 @@ authors = [
 keywords = ["causal inference", "debiased machine learning", "riesz representer", "bregman divergence"]
 
 classifiers = [
-  "License :: OSI Approved :: MIT License",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
@@ -30,8 +30,6 @@ dependencies = [
 ]
 
 [project.urls]
-# NOTE: Once your Read the Docs project is created with the slug `genriesz`,
-# this link will become valid.
 Documentation = "https://genriesz.readthedocs.io"
 
 [project.optional-dependencies]
@@ -43,7 +41,7 @@ torch = ["torch>=2.0"]
 
 sklearn = ["scikit-learn>=1.2"]
 
-# Documentation (Read the Docs)
+# Documentation
 
 docs = [
   "sphinx>=7",

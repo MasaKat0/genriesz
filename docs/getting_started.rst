@@ -4,7 +4,7 @@ Getting started
 Installation
 ------------
 
-From PyPI (after you publish):
+From PyPI:
 
 .. code-block:: bash
 
