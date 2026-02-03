@@ -232,36 +232,12 @@ See `src/genriesz/torch_basis.py` for a minimal wrapper.
 - **AME** (average marginal effect / average derivative): `grr_ame`, or `m=AverageDerivativeFunctional(...)`
 - **Average policy effect**: `grr_policy_effect`, or `m=PolicyEffectFunctional(...)`
 
----
-
-## Documentation
-
-The documentation is written in Sphinx.
-
-Build locally:
-
-```bash
-pip install -e ".[docs]"
-sphinx-build -b html docs docs/_build/html
-```
-
-Then open `docs/_build/html/index.html`.
 
 ## Jupyter notebook
 
 An end-to-end notebook with runnable examples is provided at:
 
 - `notebooks/GRR_end_to_end_examples.ipynb`
-
----
-
-## Development
-
-Run tests:
-
-```bash
-pytest -q
-```
 
 ---
 
