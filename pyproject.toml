@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "genriesz"
+version = "0.1.10"
+description = "Generalized Riesz Regression under Bregman divergences"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+  {name = "Masahiro Kato"},
+]
+keywords = ["causal inference", "debiased machine learning", "riesz representer", "bregman divergence"]
+
+classifiers = [
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Intended Audience :: Science/Research",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = [
+  "numpy>=1.22",
+  "scipy>=1.9",
+]
+
+[project.urls]
+Documentation = "https://genriesz.readthedocs.io"
+
+[project.optional-dependencies]
+# Neural-network backend
+
+torch = ["torch>=2.0"]
+
+# Tree-based bases / sklearn integrations
+
+sklearn = ["scikit-learn>=1.2"]
+
+# Documentation
+
+docs = [
+  "sphinx>=7",
+  "sphinx-rtd-theme>=2",
+  "sphinx-autodoc-typehints>=2",
+]
+
+# Development dependencies
+
+dev = [
+  "pytest>=7",
+  "ruff>=0.5",
+  "build>=1.2",
+  "twine>=5",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
