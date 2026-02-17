@@ -62,13 +62,13 @@ def main() -> None:
     print("\n[UKL] grr_ate output")
     print(res_ukl.summary_text())
 
-    # --- If you only want the Riesz representer and the pure IPW plug-in ---
+    # --- If you only want the Riesz representer and the pure RW plug-in ---
     m = ATEFunctional(treatment_index=0)
     model = GRR(basis=phi, m=m, generator=ukl, penalty="l2", lam=1e-3)
     model.fit(X)
-    ate_ipw = model.estimate_linear_functional(Y, X)
-    print("\n[UKL] IPW (no outcome model):", float(ate_ipw))
-    print("[UKL] Balance residual (mean):", np.round(model.covariate_balance_residual(), 6))
+    ate_rw = model.estimate_linear_functional(Y, X)
+    print("\n[UKL] RW (no outcome model):", float(ate_rw))
+    print("[UKL] Balance residual (mean):", np.round(model.regressor_balance_residual(), 6))
 
 
 if __name__ == "__main__":

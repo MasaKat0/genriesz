@@ -8,6 +8,8 @@ This module provides a few convenient basis builders:
   random Fourier features.
 - :class:`RBFNystromBasis` for an RBF-kernel (RKHS) approximation via
   Nyström features.
+- :class:`GaussianRKHSBasis` for an explicit Gaussian-kernel RKHS basis
+  (kernel sections at selected centers).
 - :class:`TreatmentInteractionBasis` for the common structure
   ``[1, D, psi(Z), D*psi(Z)]`` in binary-treatment problems.
 
@@ -292,6 +294,134 @@ class RBFNystromBasis:
         return out
 
 
+
+
+
+@dataclass
+class GaussianRKHSBasis:
+    """Gaussian-kernel RKHS basis via kernel sections at selected centers.
+
+    This basis returns features
+
+    .. math::
+
+        \phi(x) = [k(x, c_1), \ldots, k(x, c_m)], \qquad
+        k(x,c) = \exp\{-\|x-c\|^2 /(2\sigma^2)\},
+
+    where the centers :math:`c_j` are either user-specified (via ``centers``)
+    or sampled uniformly without replacement from the data in :meth:`fit`.
+
+    Compared to :class:`RBFNystromBasis`, this class is explicit about the RKHS
+    interpretation and supports passing custom centers (useful for reproducing
+    kernel-based density-ratio estimators such as uLSIF / RuLSIF).
+
+    Parameters
+    ----------
+    n_centers:
+        Number of kernel centers to sample when ``centers`` is ``None``.
+    centers:
+        Optional array of centers of shape ``(m, d)``. If provided, :meth:`fit`
+        will use these centers instead of sampling from the data.
+    sigma:
+        RBF bandwidth (must be > 0).
+    include_bias:
+        If True, append a constant feature 1.
+    standardize:
+        If True, standardize inputs using mean/std estimated in :meth:`fit`.
+        This is off by default because many kernel density-ratio estimators
+        assume raw covariates; you may standardize externally if desired.
+    random_state:
+        Seed for reproducibility when sampling centers.
+    """
+
+    n_centers: int = 200
+    sigma: float = 1.0
+    include_bias: bool = False
+    standardize: bool = False
+    random_state: Optional[int] = None
+    centers: Optional[Array] = None
+
+    centers_: Optional[Array] = None
+    mean_: Optional[Array] = None
+    scale_: Optional[Array] = None
+
+    def fit(self, X: Array) -> "GaussianRKHSBasis":
+        X2 = _as_2d(np.asarray(X, dtype=float))
+        if self.n_centers <= 0 and self.centers is None:
+            raise ValueError("n_centers must be > 0 when centers is None.")
+        if self.sigma <= 0:
+            raise ValueError("sigma must be > 0")
+
+        Xs = X2
+        if self.standardize:
+            self.mean_ = X2.mean(axis=0)
+            scale = X2.std(axis=0, ddof=0)
+            scale[scale == 0] = 1.0
+            self.scale_ = scale
+            Xs = (X2 - self.mean_) / self.scale_
+
+        if self.centers is not None:
+            C = _as_2d(np.asarray(self.centers, dtype=float))
+            if C.shape[1] != X2.shape[1]:
+                raise ValueError(
+                    f"centers must have the same input dimension as X. "
+                    f"Expected {X2.shape[1]}, got {C.shape[1]}."
+                )
+            if self.standardize:
+                assert self.mean_ is not None and self.scale_ is not None
+                C = (C - self.mean_) / self.scale_
+            self.centers_ = C
+            return self
+
+        rng = np.random.default_rng(self.random_state)
+        m = min(int(self.n_centers), len(Xs))
+        idx = rng.choice(len(Xs), size=m, replace=False)
+        self.centers_ = Xs[idx]
+        return self
+
+    def _standardize(self, X2: Array) -> Array:
+        if not self.standardize:
+            return X2
+        if self.mean_ is None or self.scale_ is None:
+            # Lazily fit on first call.
+            self.mean_ = X2.mean(axis=0)
+            scale = X2.std(axis=0, ddof=0)
+            scale[scale == 0] = 1.0
+            self.scale_ = scale
+            # If centers were provided, standardize them now.
+            if self.centers is not None and self.centers_ is None:
+                C = _as_2d(np.asarray(self.centers, dtype=float))
+                self.centers_ = (C - self.mean_) / self.scale_
+        assert self.mean_ is not None and self.scale_ is not None
+        return (X2 - self.mean_) / self.scale_
+
+    @staticmethod
+    def _sq_dists(X: Array, C: Array) -> Array:
+        # ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x c^T
+        x2 = np.sum(X * X, axis=1, keepdims=True)  # (n,1)
+        c2 = np.sum(C * C, axis=1, keepdims=True).T  # (1,m)
+        return x2 + c2 - 2.0 * (X @ C.T)
+
+    def __call__(self, X: Array) -> Array:
+        X_in = np.asarray(X, dtype=float)
+        X2 = _as_2d(X_in)
+
+        if self.centers_ is None:
+            # Fit on the *raw* inputs; fit() handles standardization.
+            self.fit(X2)
+
+        Xs = self._standardize(X2)
+        assert self.centers_ is not None
+
+        d2 = self._sq_dists(Xs, self.centers_)
+        out = np.exp(-d2 / (2.0 * float(self.sigma) ** 2))
+
+        if self.include_bias:
+            out = np.concatenate([out, np.ones((len(out), 1))], axis=1)
+
+        if X_in.ndim == 1:
+            return out.reshape(-1)
+        return out
 @dataclass
 class TreatmentInteractionBasis:
     """Build a (binary) treatment-interaction basis from covariate features.

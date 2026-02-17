@@ -10,7 +10,7 @@ In generalized Riesz regression (GRR), the empirical objective is
 
 where ``g`` is a differentiable and strictly convex *Bregman generator*.
 
-Automatic covariate balancing (ACB) can be enforced by choosing a link function
+Automatic regressor balancing (ARB) can be enforced by choosing a link function
 such that
 
 .. math::
@@ -287,7 +287,7 @@ class UKLGenerator:
     - If ξ(W)=1 ("positive branch"), it returns α = C + exp(v) (> C).
     - If ξ(W)=0 ("negative branch"), it returns α = -C - exp(-v) (< -C).
 
-    This matches the branchwise inverses used for automatic covariate balancing
+    This matches the branchwise inverses used for automatic regressor balancing
     in the paper.
     """
 

@@ -11,7 +11,7 @@ automatic link construction) while still using a neural network:
 2) Freeze psi.
 3) Use psi(Z) as the basis inside :class:`genriesz.glm.GRR`.
 
-This keeps the GRR optimization convex in beta and preserves the ACB structure
+This keeps the GRR optimization convex in beta and preserves the ARB structure
 for the fixed features.
 """
 

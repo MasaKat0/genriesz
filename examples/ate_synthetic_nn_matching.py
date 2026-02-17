@@ -29,7 +29,7 @@ implemented here as :class:`genriesz.KNNCatchmentBasis`.
 
 Notes
 -----
-This example computes the classical matching-style IPW estimate and a naive
+This example computes the classical matching-style RW estimate and a naive
 Wald-style standard error. (The Abadie-Imbens variance correction is not
 implemented here.)
 """

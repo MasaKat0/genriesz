@@ -15,15 +15,17 @@ from .estimate_functional import (
     LinearOutcomeModel,
     grr_ame,
     grr_ate,
+    grr_att,
+    grr_did,
     grr_functional,
-    grr_policy_effect,
 )
 
 __all__ = [
     "grr_functional",
     "grr_ate",
+    "grr_att",
+    "grr_did",
     "grr_ame",
-    "grr_policy_effect",
     "LinearOutcomeModel",
     "FunctionalEstimateResult",
 ]

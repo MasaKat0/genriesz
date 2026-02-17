@@ -4,7 +4,7 @@ This module is only needed if you want to use a neural network as a *feature map
 for :class:`genriesz.glm.GRRGLM`.
 
 The recommended pattern for keeping the GLM solver convex in `beta` (and thus
-preserving the exact ACB structure for the chosen basis) is:
+preserving the exact ARB structure for the chosen basis) is:
 
 1) train an embedding network psi(Z) however you like,
 2) freeze it,

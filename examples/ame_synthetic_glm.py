@@ -57,7 +57,7 @@ def main() -> None:
     est.fit(X, max_iter=300, tol=1e-9)
 
     ame_hat = est.estimate_linear_functional(Y, X)
-    resid = est.covariate_balance_residual()
+    resid = est.regressor_balance_residual()
 
     print("True AME (by construction):", true_ame)
     print("Estimated AME:", float(ame_hat))

@@ -1,6 +1,6 @@
 # genriesz — Generalized Riesz Regression (GRR)
 
-A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic covariate balancing (ACB)** and then report **DM / IPW / AIPW** estimates with inference (optionally via cross-fitting).
+A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing (ARB)** and then report **RA / RW / ARW / TMLE** estimates with inference (optionally via cross-fitting).
 
 - **Docs**: https://genriesz.readthedocs.io/en/latest/
 - **Paper**: [Riesz Representer Fitting under Bregman Divergence: A Unified Framework for Debiased Machine Learning (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
@@ -61,10 +61,10 @@ You specify:
 
 and the library will:
 
-1. build the **ACB link function** induced by `g`,
+1. build the **ARB link function** induced by `g`,
 2. fit a **Riesz representer** `α̂(X)` via GRR,
-3. optionally fit an outcome model `γ̂(X)` (for DM / AIPW),
-4. return **DM / IPW / AIPW** point estimates and inference (SE / CI / p-value), optionally with **cross-fitting**.
+3. optionally fit an outcome model `γ̂(X)` (for RA / ARW / TMLE),
+4. return **RA / RW / ARW / TMLE** point estimates and inference (SE / CI / p-value), optionally with **cross-fitting**.
 
 > **Notation in this library**: the regressor is `X` (shape `(n, d)`) and the outcome is `Y` (shape `(n,)`).
 > If you prefer the paper’s notation, you can think of `X` as the full regressor vector (often `X = [D, Z]`).
@@ -114,7 +114,7 @@ res = grr_ate(
     folds=5,
     riesz_penalty="l2",
     riesz_lam=1e-3,
-    estimators=("dm", "ipw", "aipw"),
+    estimators=("ra", "rw", "arw", "tmle"),
 )
 
 print(res.summary_text())
@@ -202,7 +202,7 @@ res = grr_functional(
     m=m,
     basis=basis,
     generator=generator,
-    estimators=("ipw",),
+    estimators=("rw",),
 )
 
 print(res.summary_text())
@@ -229,10 +229,14 @@ If you omit them, the library falls back to:
 The following convenience wrappers are included:
 
 - **ATE** (average treatment effect): `grr_ate` / `ATEFunctional(...)`
+- **ATT** (average treatment effect on the treated): `grr_att` / `ATTFunctional(...)`
+- **DID** (panel difference-in-differences): `grr_did`  
+  Implemented as **ATT on** `ΔY = Y1 - Y0` for panel data (pre/post observed for the same units).
 - **AME** (average marginal effect / average derivative): `grr_ame` / `AverageDerivativeFunctional(...)`
-- **Average policy effect**: `grr_policy_effect` / `PolicyEffectFunctional(...)`
 
----
+If you need a custom target, use the general API :func:`genriesz.grr_functional`
+and provide your own `m(x, gamma)`.
+
 
 ## Basis functions
 
@@ -300,13 +304,17 @@ See `src/genriesz/torch_basis.py` for a minimal wrapper.
 
 ---
 
-## Jupyter notebook
+## Jupyter notebooks
 
-An end-to-end notebook with runnable examples is provided at:
+Application-specific notebooks (one per estimand) are provided in `notebooks/`:
 
-- `notebooks/GRR_end_to_end_examples.ipynb`
+- `notebooks/ATE_end_to_end.ipynb`
+- `notebooks/AME_end_to_end.ipynb`
+- `notebooks/ATT_simulation_true_value.ipynb`
+- `notebooks/DID_simulation_true_value.ipynb`
 
----
+The corresponding rendered pages are also linked from the documentation.
+
 
 ## References
 

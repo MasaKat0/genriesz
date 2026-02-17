@@ -1,13 +1,13 @@
-"""Generalized Riesz Regression (GRR) with automatic covariate balancing.
+"""Generalized Riesz Regression (GRR) with automatic regressor balancing.
 
 This module implements a *parametric* (linear-in-parameters) GRR solver based on
 
 - a user-provided basis function ``phi(X)`` and
 - a Bregman generator ``g``.
 
-Automatic covariate balancing (ACB)
+Automatic regressor balancing (ARB)
 -----------------------------------
-The ACB linearity condition holds by construction if we parameterize the Riesz
+The ARB linearity condition holds by construction if we parameterize the Riesz
 representer ``alpha`` via the inverse derivative (inverse link) of the Bregman
 generator:
 
@@ -52,14 +52,14 @@ MFunctional = Callable[[np.ndarray, Callable[[np.ndarray], float]], float]
 
 
 @dataclass(frozen=True)
-class ACBLink:
+class ARBLink:
     """Link functions induced by a Bregman generator.
 
     ``link`` is the (branchwise) derivative of ``g`` with respect to the scalar
     argument, and ``inverse`` is its inverse.
 
     These are the link / inverse-link used to parameterize a GLM-style Riesz
-    representer model that automatically satisfies the ACB linearity condition.
+    representer model that automatically satisfies the ARB linearity condition.
     """
 
     generator: BregmanGenerator
@@ -141,7 +141,7 @@ class GRR:
         self.basis = basis
         self.m = m
         self.generator = generator
-        self.link = ACBLink(generator)
+        self.link = ARBLink(generator)
         self.penalty = penalty
         self.lam = float(lam)
         self.penalty_p = penalty_p
@@ -231,7 +231,7 @@ class GRR:
     def predict_gamma(self, X: np.ndarray) -> np.ndarray:
         r"""Evaluate ``\hat\gamma(X) := (\partial g)\circ\hat\alpha(X)``.
 
-        For ACB-parameterized models, this is simply ``phi(X)^T beta``.
+        For ARB-parameterized models, this is simply ``phi(X)^T beta``.
         """
 
         self._check_is_fitted()
@@ -253,8 +253,8 @@ class GRR:
             raise ValueError("Y and X must have the same number of rows.")
         return float(np.mean(alpha * Y1))
 
-    def covariate_balance_residual(self) -> np.ndarray:
-        """Return the sample balancing residual mean_i[alpha_i * phi_i - m_i]."""
+    def regressor_balance_residual(self) -> np.ndarray:
+        """Return the sample regressor-balancing residual mean_i[alpha_i * phi_i - m_i]."""
 
         self._check_is_fitted()
         if self._X_fit is None or self._phi_matrix is None or self._m_basis_matrix is None:
@@ -472,7 +472,7 @@ class GRR:
         return beta
 
 
-def run_grr_glm_acb(
+def run_grr_glm_arb(
     *,
     X: np.ndarray,
     Y: Optional[np.ndarray],
@@ -489,7 +489,7 @@ def run_grr_glm_acb(
     tol: float = 1e-8,
     verbose: bool = False,
 ) -> tuple[GRR, np.ndarray, Optional[float]]:
-    """Convenience wrapper to fit GLM-style GRR with an ACB link.
+    """Convenience wrapper to fit GLM-style GRR with an ARB link.
 
     This helper matches the workflow:
 

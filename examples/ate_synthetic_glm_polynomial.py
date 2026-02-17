@@ -50,7 +50,7 @@ def main() -> None:
     est.fit(X, max_iter=500, tol=1e-10)
 
     ate_hat = est.estimate_linear_functional(Y, X)
-    resid = est.covariate_balance_residual()
+    resid = est.regressor_balance_residual()
 
     print("True ATE (by construction):", tau)
     print("Estimated ATE:", float(ate_hat))

@@ -16,10 +16,10 @@ outcome regression \(\gamma(x) = \mathbb{E}[Y\mid X=x]\), you provide:
 
 The package then:
 
-1. constructs the link function from the generator (automatic covariate balancing),
+1. constructs the link function from the generator (automatic regressor balancing (ARB)),
 2. fits a Riesz representer model \(\hat\alpha(x)\),
 3. optionally fits an outcome model \(\hat\gamma(x)\),
-4. reports DM/IPW/AIPW estimates with standard errors, confidence intervals, and p-values.
+4. reports RA/RW/ARW/TMLE estimates with standard errors, confidence intervals, and p-values.
 
 
 Bases
@@ -60,10 +60,19 @@ For binary-treatment causal estimands, it is common to interact a base basis
 RKHS-style bases (RBF kernel)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-You can approximate an RBF kernel using:
+You can build RBF-kernel (Gaussian-kernel RKHS) features using:
 
-- random Fourier features via :class:`genriesz.RBFRandomFourierBasis`, or
-- a Nyström approximation via :class:`genriesz.RBFNystromBasis`.
+- random Fourier features via :class:`genriesz.RBFRandomFourierBasis`,
+- a Nyström-style center expansion via :class:`genriesz.RBFNystromBasis`, or
+- an explicit kernel-section basis via :class:`genriesz.GaussianRKHSBasis`.
+
+.. code-block:: python
+
+   from genriesz import GaussianRKHSBasis
+
+   # Explicit Gaussian-kernel RKHS basis using m centers.
+   psi = GaussianRKHSBasis(n_centers=300, sigma=1.0, standardize=True, random_state=0)
+   Phi = psi(X)
 
 .. code-block:: python
 
@@ -115,7 +124,7 @@ you can build a flexible tree-induced basis using leaf indicators.
    Phi = leaf_basis(X)
 
 This keeps the GRR optimization *linear in parameters* (convex) while using a
-nonparametric partition of the covariate space.
+nonparametric partition of the regressor space.
 
 
 Neural network feature maps (PyTorch)
@@ -145,11 +154,53 @@ The package includes :class:`genriesz.torch_basis.TorchEmbeddingBasis`.
    phi = TorchEmbeddingBasis(model=net, include_bias=True)
 
 
+
+
+Density ratio estimation
+------------------------
+
+The function :func:`genriesz.grr_density_ratio` estimates the density ratio
+
+.. math::
+
+   r(x) = p(x)/q(x)
+
+from two samples ``X_num ~ p`` and ``X_den ~ q`` using GRR with a Gaussian-kernel
+RKHS basis and the uLSIF objective
+
+.. math::
+
+   \tfrac12\mathbb{E}_q[r(x)^2] - \mathbb{E}_p[r(x)].
+
+You can optionally select the RBF bandwidth ``sigma`` and ridge parameter ``lam``
+via K-fold cross validation.
+
+.. code-block:: python
+
+   import numpy as np
+   from genriesz import grr_density_ratio
+
+   # X_num: (n_num, d) ~ p, X_den: (n_den, d) ~ q
+   res = grr_density_ratio(
+       X_num,
+       X_den,
+       n_centers=200,
+       cv=True,
+       folds=5,
+       sigma_grid=[0.1, 0.3, 1.0, 3.0],
+       lam_grid=[1e-3, 1e-2, 1e-1],
+       random_state=0,
+   )
+
+   # Evaluate r_hat(x) on new points:
+   r_hat = res.predict_ratio(X_test)
+
+
 Generators and automatic links
 ------------------------------
 
 A Bregman generator defines both the loss and the induced link function used for
-automatic covariate balancing.
+automatic regressor balancing (ARB).
 
 The easiest option is to use one of the built-in generator factories:
 
@@ -176,20 +227,21 @@ Estimators, cross-fitting, and outcome models
 The high-level function :func:`genriesz.grr_functional` can report multiple estimators
 at once via ``estimators=(...)``:
 
-- ``"dm"``: direct method (plug-in)
-- ``"ipw"``: weighting only
-- ``"aipw"``: augmented IPW
+- ``"ra"``: regression adjustment (plug-in)
+- ``"rw"``: Riesz weighting (weighting only)
+- ``"arw"``: augmented Riesz weighting
+- ``"tmle"``: targeted minimum loss estimation (one-step fluctuation)
 
 Set ``cross_fit=True`` to use K-fold cross-fitting. The number of folds is
 controlled by ``folds``.
 
-For DM/AIPW you need an outcome regression model \(\hat\gamma\). You can control
+For RA/ARW/TMLE you need an outcome regression model \(\hat\gamma\). You can control
 how it is fitted via ``outcome_models``:
 
 - ``"shared"``: use the same basis and penalty settings as the Riesz model
 - ``"separate"``: use a user-provided outcome model or a separate basis
 - ``"both"``: fit both and report both versions
-- ``"none"``: skip outcome modeling (then only IPW is available)
+- ``"none"``: skip outcome modeling (then only RW is available)
 
 
 Regularization: \(\ell_p\)

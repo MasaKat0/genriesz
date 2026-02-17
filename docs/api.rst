@@ -1,33 +1,38 @@
 API reference
 =============
 
-High-level estimation
----------------------
+High-level functional estimation
+--------------------------------
 
 .. autofunction:: genriesz.grr_functional
-
 .. autofunction:: genriesz.grr_ate
-
+.. autofunction:: genriesz.grr_att
+.. autofunction:: genriesz.grr_did
 .. autofunction:: genriesz.grr_ame
+.. autofunction:: genriesz.grr_density_ratio
 
-.. autofunction:: genriesz.grr_policy_effect
-
-.. autoclass:: genriesz.FunctionalEstimateResult
+.. autoclass:: genriesz.estimate_functional.FunctionalEstimateResult
    :members:
 
-.. autoclass:: genriesz.LinearOutcomeModel
+.. autoclass:: genriesz.estimate_functional.LinearOutcomeModel
+   :members:
+
+.. autoclass:: genriesz.DensityRatioResult
    :members:
 
 
-Core solver
------------
+Core GRR solver
+---------------
 
 .. autoclass:: genriesz.GRR
    :members:
 
+.. autoclass:: genriesz.grr.ARBLink
+   :members:
 
-Generators (Bregman divergences)
---------------------------------
+
+Generators
+----------
 
 .. autoclass:: genriesz.BregmanGenerator
    :members:
@@ -45,13 +50,23 @@ Generators (Bregman divergences)
    :members:
 
 
+Functionals (estimands)
+-----------------------
+
+.. autoclass:: genriesz.ATEFunctional
+   :members:
+
+.. autoclass:: genriesz.ATTFunctional
+   :members:
+
+.. autoclass:: genriesz.AverageDerivativeFunctional
+   :members:
+
+
 Bases
 -----
 
 .. autoclass:: genriesz.PolynomialBasis
-   :members:
-
-.. autoclass:: genriesz.TreatmentInteractionBasis
    :members:
 
 .. autoclass:: genriesz.RBFRandomFourierBasis
@@ -60,18 +75,19 @@ Bases
 .. autoclass:: genriesz.RBFNystromBasis
    :members:
 
+.. autoclass:: genriesz.GaussianRKHSBasis
+   :members:
+
+.. autoclass:: genriesz.TreatmentInteractionBasis
+   :members:
+
 .. autoclass:: genriesz.KNNCatchmentBasis
    :members:
 
+Optional integrations
+---------------------
 
-Common functionals
-------------------
+These require optional dependencies:
 
-.. autoclass:: genriesz.ATEFunctional
-   :members:
-
-.. autoclass:: genriesz.AverageDerivativeFunctional
-   :members:
-
-.. autoclass:: genriesz.PolicyEffectFunctional
-   :members:
+- :class:`genriesz.sklearn_basis.RandomForestLeafBasis` (requires ``scikit-learn``)
+- :class:`genriesz.torch_basis.TorchEmbeddingBasis` (requires ``torch``)

@@ -27,7 +27,7 @@ def phi(X: np.ndarray) -> np.ndarray:
     return np.concatenate([np.ones((len(X), 1)), d, z, d * z], axis=1)
 
 
-def test_grr_functional_dm_ipw_aipw_run():
+def test_grr_functional_ra_rw_arw_tmle_run():
     X, Y, _ = _make_synthetic_ate(n=200, d=2, seed=0)
     gen = SquaredGenerator(C=0.0).as_generator()
 
@@ -40,7 +40,7 @@ def test_grr_functional_dm_ipw_aipw_run():
         cross_fit=True,
         folds=3,
         random_state=0,
-        estimators=("dm", "ipw", "aipw"),
+        estimators=("ra", "rw", "arw", "tmle"),
         outcome_models="shared",
         riesz_penalty="l2",
         riesz_lam=1e-3,
@@ -48,14 +48,14 @@ def test_grr_functional_dm_ipw_aipw_run():
         tol=1e-9,
     )
 
-    assert "ipw" in res.estimates
-    assert "dm_shared" in res.estimates
-    assert "aipw_shared" in res.estimates
+    assert "rw" in res.estimates
+    assert "ra_shared" in res.estimates
+    assert "arw_shared" in res.estimates
 
-    for k in ["ipw", "dm_shared", "aipw_shared"]:
+    for k in ["rw", "ra_shared", "arw_shared", "tmle_shared"]:
         assert np.isfinite(res.estimates[k].theta)
         assert np.isfinite(res.estimates[k].stderr)
 
     s = res.summary_text()
     assert isinstance(s, str)
-    assert "ipw" in s.lower()
+    assert "rw" in s.lower()

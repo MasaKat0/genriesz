@@ -2,19 +2,22 @@
 
 The most general entry point is :func:`grr_functional`.
 
-You provide
+You provide:
 
 - data ``(X, Y)``,
-- a linear functional ``m(X, gamma)``,
+- a linear functional ``m(x, gamma)``,
 - a basis function ``phi(X)``, and
 - a Bregman generator (or equivalently a link via its derivative).
 
-The function fits a Riesz representer model via :class:`genriesz.genriesz.GRR` and returns
-common estimators of the target parameter:
+The function fits a Riesz representer model via :class:`genriesz.GRR` and can
+report common estimators of the target parameter:
 
-- **DM** (direct method / plug-in): ``E[m(X, \hat\gamma)]``
-- **IPW** (weighting only): ``E[\hat\alpha(X) Y]``
-- **AIPW** (augmented): ``E[\hat\alpha(X)(Y-\hat\gamma(X)) + m(X, \hat\gamma)]``
+- **RA** (regression adjustment / plug-in): ``E[m(X, \hat\gamma)]``
+- **RW** (Riesz weighting / weighting only): ``E[\hat\alpha(X)\,Y]``
+- **ARW** (augmented Riesz weighting): ``E[\hat\alpha(X)(Y-\hat\gamma(X)) + m(X, \hat\gamma)]``
+- **TMLE** (targeted minimum loss estimation): construct
+  ``\hat\gamma^{(1)} = \hat\gamma^{(0)} + \hat\epsilon\,\hat\alpha`` and report
+  ``E[m(X, \hat\gamma^{(1)})]``.
 
 Cross-fitting is supported via a simple K-fold splitting.
 
@@ -23,7 +26,9 @@ Convenience wrappers
 For common causal estimands, this module includes thin wrappers that simply set
 ``m``:
 
-- :func:`grr_ate` — average treatment effect
+- :func:`grr_ate` — average treatment effect (ATE)
+- :func:`grr_att` — average treatment effect on the treated (ATT)
+- :func:`grr_did` — difference-in-differences (panel DID implemented as ATT on ``ΔY``)
 - :func:`grr_ame` — average marginal effect (average derivative)
 
 All public docstrings and comments are written in English.
@@ -41,7 +46,7 @@ from scipy import optimize
 from scipy.stats import norm
 
 from .bregman import BregmanGenerator, _as_2d
-from .functionals import ATEFunctional, AverageDerivativeFunctional, PolicyEffectFunctional
+from .functionals import ATEFunctional, ATTFunctional, AverageDerivativeFunctional
 from .grr import GRR, BasisFn
 
 
@@ -49,7 +54,7 @@ Array = np.ndarray
 
 
 class OutcomeModel(Protocol):
-    """Protocol for outcome regression models used by DM/AIPW."""
+    """Protocol for outcome regression models used by RA/ARW/TMLE."""
 
     def fit(self, X: Array, y: Array, **kwargs: Any) -> "OutcomeModel":  # pragma: no cover
         ...
@@ -113,19 +118,23 @@ def _functional_values(m: Any, X: Array, outcome_model: OutcomeModel) -> Array:
             outcome_model.predict(X0), dtype=float
         ).reshape(-1)
 
-    if isinstance(m, PolicyEffectFunctional):
-        z = np.delete(X2, m.treatment_index, axis=1)
-        d1 = np.array([float(m.policy_1(z[i])) for i in range(len(z))], dtype=float)
-        d0 = np.array([float(m.policy_0(z[i])) for i in range(len(z))], dtype=float)
+    if isinstance(m, ATTFunctional):
+        if m.pi is None:
+            raise ValueError(
+                "ATTFunctional requires pi to be set. Use genriesz.grr_att(...) or set m.pi explicitly."
+            )
         X1 = X2.copy()
         X0 = X2.copy()
-        X1[:, m.treatment_index] = d1
-        X0[:, m.treatment_index] = d0
-        return np.asarray(outcome_model.predict(X1), dtype=float).reshape(-1) - np.asarray(
+        X1[:, m.treatment_index] = m.treat_value_1
+        X0[:, m.treatment_index] = m.treat_value_0
+        diff = np.asarray(outcome_model.predict(X1), dtype=float).reshape(-1) - np.asarray(
             outcome_model.predict(X0), dtype=float
         ).reshape(-1)
+        d = X2[:, m.treatment_index].astype(float).reshape(-1)
+        return (d / float(m.pi)) * diff
 
     if isinstance(m, AverageDerivativeFunctional):
+
         Xp = X2.copy()
         Xm = X2.copy()
         Xp[:, m.coordinate] += m.eps
@@ -143,6 +152,61 @@ def _functional_values(m: Any, X: Array, outcome_model: OutcomeModel) -> Array:
     for i in range(len(X2)):
         out[i] = float(m(X2[i], gamma_hat))
     return out
+
+
+def _functional_values_alpha(m: Any, X: Array, riesz_model: GRR) -> Array:
+    """Compute m(X_i, alpha_hat) for all rows X_i, where alpha_hat is the fitted Riesz representer.
+
+    This is used by the TMLE implementation. For built-in functional classes, the
+    computation is vectorized. For a generic callable m(x, gamma), we fall back
+    to a Python loop, treating ``alpha_hat`` as the "gamma" argument.
+    """
+
+    X2 = _as_2d(X)
+
+    if isinstance(m, ATEFunctional):
+        X1 = X2.copy()
+        X0 = X2.copy()
+        X1[:, m.treatment_index] = m.treat_value_1
+        X0[:, m.treatment_index] = m.treat_value_0
+        return np.asarray(riesz_model.predict_alpha(X1), dtype=float).reshape(-1) - np.asarray(
+            riesz_model.predict_alpha(X0), dtype=float
+        ).reshape(-1)
+
+    if isinstance(m, ATTFunctional):
+        if m.pi is None:
+            raise ValueError(
+                "ATTFunctional requires pi to be set. Use genriesz.grr_att(...) or set m.pi explicitly."
+            )
+        X1 = X2.copy()
+        X0 = X2.copy()
+        X1[:, m.treatment_index] = m.treat_value_1
+        X0[:, m.treatment_index] = m.treat_value_0
+        diff = np.asarray(riesz_model.predict_alpha(X1), dtype=float).reshape(-1) - np.asarray(
+            riesz_model.predict_alpha(X0), dtype=float
+        ).reshape(-1)
+        d = X2[:, m.treatment_index].astype(float).reshape(-1)
+        return (d / float(m.pi)) * diff
+
+    if isinstance(m, AverageDerivativeFunctional):
+        Xp = X2.copy()
+        Xm = X2.copy()
+        Xp[:, m.coordinate] += m.eps
+        Xm[:, m.coordinate] -= m.eps
+        return (
+            np.asarray(riesz_model.predict_alpha(Xp), dtype=float).reshape(-1)
+            - np.asarray(riesz_model.predict_alpha(Xm), dtype=float).reshape(-1)
+        ) / (2.0 * float(m.eps))
+
+    def alpha_hat(x: Array) -> float:
+        x2 = _as_2d(x)
+        return float(np.asarray(riesz_model.predict_alpha(x2), dtype=float).reshape(-1)[0])
+
+    out = np.empty(len(X2), dtype=float)
+    for i in range(len(X2)):
+        out[i] = float(m(X2[i], alpha_hat))
+    return out
+
 
 
 @dataclass
@@ -325,8 +389,20 @@ class FunctionalEstimateResult:
             f"n={self.n}, cross_fit={self.cross_fit}, folds={self.folds}, alpha={self.alpha}, null={self.null}"
         )
 
-        # Stable ordering
-        for key in sorted(self.estimates.keys()):
+        # Stable ordering (human-friendly)
+        preferred = [
+            "ra_shared",
+            "ra_separate",
+            "rw",
+            "arw_shared",
+            "arw_separate",
+            "tmle_shared",
+            "tmle_separate",
+        ]
+        keys = [k for k in preferred if k in self.estimates] + [
+            k for k in sorted(self.estimates.keys()) if k not in preferred
+        ]
+        for key in keys:
             e = self.estimates[key]
             lines.append(
                 f"{e.name:>14s}: {e.estimate: .6f}  (se={e.stderr:.6f})  "
@@ -387,14 +463,14 @@ def grr_functional(
     outcome_penalty: Optional[str] = None,
     outcome_lam: Optional[float] = None,
     outcome_p_norm: float | None = None,
-    # How to use outcome models for DM/AIPW
+    # How to use outcome models for RA/ARW/TMLE
     outcome_models: str = "auto",
     # Cross-fitting
     cross_fit: bool = True,
     folds: int = 5,
     random_state: int | None = None,
     # Which estimators to report
-    estimators: Iterable[str] = ("dm", "ipw", "aipw"),
+    estimators: Iterable[str] = ("ra", "rw", "arw", "tmle"),
     alpha: float = 0.05,
     null: float = 0.0,
     # Optimizer controls
@@ -417,19 +493,19 @@ def grr_functional(
     g, g_grad, g_inv_grad:
         If ``generator`` is omitted, these are used to build one.
     outcome_models:
-        Controls which outcome model variants are fitted (relevant for DM/AIPW):
+        Controls which outcome model variants are fitted (relevant for RA/ARW/TMLE):
 
-        - "none": no outcome model; only IPW is returned.
+        - "none": no outcome model; only RW is returned.
         - "shared": outcome model uses the same basis/penalty as the Riesz model.
         - "separate": use the user-provided ``outcome_model`` (or ``outcome_basis``).
         - "both": fit both shared and separate.
-        - "auto" (default): shared is always used when DM/AIPW is requested; if a
+        - "auto" (default): shared is always used when RA/ARW/TMLE is requested; if a
           separate outcome model is provided, it is also used.
 
     Returns
     -------
     FunctionalEstimateResult
-        Contains estimates for DM/IPW/AIPW (as requested), each with a standard
+        Contains estimates for RA/RW/ARW/TMLE (as requested), each with a standard
         error, confidence interval, and p-value.
     """
 
@@ -461,18 +537,26 @@ def grr_functional(
 
     estimators_set = {str(e).lower().strip() for e in estimators}
     if "all" in estimators_set:
-        estimators_set = {"dm", "ipw", "aipw"}
+        estimators_set = {"ra", "rw", "arw", "tmle"}
 
-    want_dm = "dm" in estimators_set or "direct" in estimators_set
-    want_ipw = "ipw" in estimators_set
-    want_aipw = "aipw" in estimators_set
+    want_ra = "ra" in estimators_set
+    want_rw = "rw" in estimators_set
+    want_arw = "arw" in estimators_set
+    want_tmle = "tmle" in estimators_set
+
+    if not (want_ra or want_rw or want_arw or want_tmle):
+        raise ValueError(
+            "estimators must include at least one of {'ra','rw','arw','tmle'} (or 'all')."
+        )
 
     # Outcome model selection.
     outcome_models = str(outcome_models).lower().strip()
     if outcome_models not in {"auto", "none", "shared", "separate", "both"}:
-        raise ValueError("outcome_models must be one of {'auto','none','shared','separate','both'}." )
+        raise ValueError(
+            "outcome_models must be one of {'auto','none','shared','separate','both'}."
+        )
 
-    use_outcome = want_dm or want_aipw
+    use_outcome = want_ra or want_arw or want_tmle
     if not use_outcome:
         outcome_models = "none"
 
@@ -501,6 +585,11 @@ def grr_functional(
             "outcome_models requires a separate outcome model, but neither outcome_model nor outcome_basis was provided."
         )
 
+    if use_outcome and not (fit_shared or fit_separate):
+        raise ValueError(
+            "Requested RA/ARW/TMLE but outcome_models='none'. Set outcome_models to 'shared', 'separate', 'both', or 'auto'."
+        )
+
     # Shared outcome model defaults: use Riesz settings unless the user overrides.
     if outcome_penalty is None:
         outcome_penalty = riesz_penalty
@@ -511,7 +600,8 @@ def grr_functional(
         outcome_basis = basis
 
     # Allocate nuisance arrays.
-    alpha_hat = np.full(n, np.nan, dtype=float) if (want_ipw or want_aipw) else None
+    alpha_hat = np.full(n, np.nan, dtype=float) if (want_rw or want_arw or want_tmle) else None
+    m_alpha_hat = np.full(n, np.nan, dtype=float) if want_tmle else None
 
     gamma_hat_shared = np.full(n, np.nan, dtype=float) if fit_shared else None
     m_hat_shared = np.full(n, np.nan, dtype=float) if fit_shared else None
@@ -547,6 +637,9 @@ def grr_functional(
         if alpha_hat is not None:
             alpha_hat[te] = riesz.predict_alpha(X_te)
 
+        if m_alpha_hat is not None:
+            m_alpha_hat[te] = _functional_values_alpha(m, X_te, riesz)
+
         # Shared outcome model (default linear regression on the same basis).
         if fit_shared:
             out_shared = LinearOutcomeModel(
@@ -574,41 +667,74 @@ def grr_functional(
             gamma_hat_sep[te] = np.asarray(out_sep.predict(X_te), dtype=float).reshape(-1)
             m_hat_sep[te] = _functional_values(m, X_te, out_sep)
 
-    # Sanity check: no NaNs for requested nuisances.
+    # Sanity checks: no NaNs for requested nuisances.
     if alpha_hat is not None and not np.all(np.isfinite(alpha_hat)):
-        raise RuntimeError("alpha_hat contains non-finite values. Consider stronger regularization.")
+        raise RuntimeError(
+            "alpha_hat contains non-finite values. Consider stronger regularization or a different generator."
+        )
+    if m_alpha_hat is not None and not np.all(np.isfinite(m_alpha_hat)):
+        raise RuntimeError(
+            "m_alpha_hat contains non-finite values. This can happen if the functional evaluates alpha_hat outside its domain."
+        )
 
     estimates: dict[str, ScalarEstimate] = {}
 
-    if want_ipw:
+    # --- RW (weighting only)
+    if want_rw:
         if alpha_hat is None:
-            raise RuntimeError("Internal error: alpha_hat not computed.")
+            raise RuntimeError("Internal error: alpha_hat not computed for RW.")
         scores = alpha_hat * Y1
-        estimates["ipw"] = _wald_stats(scores, alpha=alpha, null=null, name="IPW")
+        estimates["rw"] = _wald_stats(scores, alpha=alpha, null=null, name="RW")
 
-    if want_dm and fit_shared:
+    # --- RA (regression adjustment)
+    if want_ra and fit_shared:
         if m_hat_shared is None:
-            raise RuntimeError("Internal error: m_hat_shared not computed.")
-        estimates["dm_shared"] = _wald_stats(m_hat_shared, alpha=alpha, null=null, name="DM (shared)")
+            raise RuntimeError("Internal error: m_hat_shared not computed for RA.")
+        estimates["ra_shared"] = _wald_stats(m_hat_shared, alpha=alpha, null=null, name="RA (shared)")
 
-    if want_dm and fit_separate:
+    if want_ra and fit_separate:
         if m_hat_sep is None:
-            raise RuntimeError("Internal error: m_hat_separate not computed.")
-        estimates["dm_separate"] = _wald_stats(m_hat_sep, alpha=alpha, null=null, name="DM (separate)")
+            raise RuntimeError("Internal error: m_hat_separate not computed for RA.")
+        estimates["ra_separate"] = _wald_stats(m_hat_sep, alpha=alpha, null=null, name="RA (separate)")
 
-    if want_aipw and fit_shared:
+    # --- ARW (augmented)
+    if want_arw and fit_shared:
         if alpha_hat is None or gamma_hat_shared is None or m_hat_shared is None:
-            raise RuntimeError("Internal error: shared nuisances not computed for AIPW.")
+            raise RuntimeError("Internal error: shared nuisances not computed for ARW.")
         scores = alpha_hat * (Y1 - gamma_hat_shared) + m_hat_shared
-        estimates["aipw_shared"] = _wald_stats(scores, alpha=alpha, null=null, name="AIPW (shared)")
+        estimates["arw_shared"] = _wald_stats(scores, alpha=alpha, null=null, name="ARW (shared)")
 
-    if want_aipw and fit_separate:
+    if want_arw and fit_separate:
         if alpha_hat is None or gamma_hat_sep is None or m_hat_sep is None:
-            raise RuntimeError("Internal error: separate nuisances not computed for AIPW.")
+            raise RuntimeError("Internal error: separate nuisances not computed for ARW.")
         scores = alpha_hat * (Y1 - gamma_hat_sep) + m_hat_sep
-        estimates["aipw_separate"] = _wald_stats(scores, alpha=alpha, null=null, name="AIPW (separate)")
+        estimates["arw_separate"] = _wald_stats(scores, alpha=alpha, null=null, name="ARW (separate)")
+
+    # --- TMLE
+    def _tmle_scores(m_hat: Array, gamma_hat: Array) -> Array:
+        if alpha_hat is None or m_alpha_hat is None:
+            raise RuntimeError("Internal error: alpha_hat / m_alpha_hat not computed for TMLE.")
+        num = float(np.mean(alpha_hat * (Y1 - gamma_hat)))
+        den = float(np.mean(alpha_hat ** 2))
+        if not np.isfinite(den) or den <= 0.0:
+            raise RuntimeError("TMLE fluctuation failed: mean(alpha_hat^2) is not positive.")
+        eps_hat = num / den
+        return np.asarray(m_hat, dtype=float).reshape(-1) + float(eps_hat) * np.asarray(m_alpha_hat, dtype=float).reshape(-1)
+
+    if want_tmle and fit_shared:
+        if m_hat_shared is None or gamma_hat_shared is None:
+            raise RuntimeError("Internal error: shared nuisances not computed for TMLE.")
+        scores = _tmle_scores(m_hat_shared, gamma_hat_shared)
+        estimates["tmle_shared"] = _wald_stats(scores, alpha=alpha, null=null, name="TMLE (shared)")
+
+    if want_tmle and fit_separate:
+        if m_hat_sep is None or gamma_hat_sep is None:
+            raise RuntimeError("Internal error: separate nuisances not computed for TMLE.")
+        scores = _tmle_scores(m_hat_sep, gamma_hat_sep)
+        estimates["tmle_separate"] = _wald_stats(scores, alpha=alpha, null=null, name="TMLE (separate)")
 
     return FunctionalEstimateResult(
+
         n=n,
         cross_fit=cross_fit,
         folds=folds,
@@ -621,7 +747,6 @@ def grr_functional(
         m_hat_shared=m_hat_shared,
         m_hat_separate=m_hat_sep,
     )
-
 
 def grr_ate(
     *,
@@ -636,19 +761,6 @@ def grr_ate(
 
     This is equivalent to calling :func:`grr_functional` with
     ``m=ATEFunctional(...)``.
-
-    Parameters
-    ----------
-    X:
-        Regressor, typically ``X=[D,Z]``.
-    Y:
-        Outcome.
-    treatment_index:
-        Column index of the treatment variable in X.
-    treat_value_1, treat_value_0:
-        Counterfactual treatment values.
-    kwargs:
-        Passed through to :func:`grr_functional`.
     """
 
     m = ATEFunctional(
@@ -657,6 +769,81 @@ def grr_ate(
         treat_value_0=float(treat_value_0),
     )
     return grr_functional(X=X, Y=Y, m=m, **kwargs)
+
+
+def grr_att(
+    *,
+    X: Array,
+    Y: Array,
+    treatment_index: int = 0,
+    treat_value_1: float = 1.0,
+    treat_value_0: float = 0.0,
+    pi: float | None = None,
+    **kwargs: Any,
+) -> FunctionalEstimateResult:
+    """Convenience wrapper for the ATT (Average Treatment Effect on the Treated).
+
+    This is equivalent to calling :func:`grr_functional` with
+    ``m=ATTFunctional(...)``.
+
+    Notes
+    -----
+    If ``pi`` is omitted, this function sets it to the sample mean of
+    ``1[D == treat_value_1]``.
+    """
+
+    X2 = _as_2d(X)
+    d = np.asarray(X2[:, int(treatment_index)], dtype=float).reshape(-1)
+    if pi is None:
+        pi_hat = float(np.mean(d == float(treat_value_1)))
+    else:
+        pi_hat = float(pi)
+
+    if not np.isfinite(pi_hat) or pi_hat <= 0.0:
+        raise ValueError(f"ATT requires pi > 0. Got pi={pi_hat}.")
+
+    m = ATTFunctional(
+        treatment_index=int(treatment_index),
+        treat_value_1=float(treat_value_1),
+        treat_value_0=float(treat_value_0),
+        pi=float(pi_hat),
+    )
+    return grr_functional(X=X, Y=Y, m=m, **kwargs)
+
+
+def grr_did(
+    *,
+    X: Array,
+    Y0: Array,
+    Y1: Array,
+    treatment_index: int = 0,
+    treat_value_1: float = 1.0,
+    treat_value_0: float = 0.0,
+    pi: float | None = None,
+    **kwargs: Any,
+) -> FunctionalEstimateResult:
+    """Panel DID implemented as ATT on ``ΔY = Y1 - Y0``.
+
+    Parameters
+    ----------
+    X:
+        Regressor, typically ``X=[D,Z]`` where ``D`` is a binary treatment indicator.
+    Y0, Y1:
+        Pre- and post-period outcomes for the *same* units (panel).
+    """
+
+    Y0a = _as_1d(Y0, n=_as_2d(X).shape[0])
+    Y1a = _as_1d(Y1, n=_as_2d(X).shape[0])
+    dY = Y1a - Y0a
+    return grr_att(
+        X=X,
+        Y=dY,
+        treatment_index=treatment_index,
+        treat_value_1=treat_value_1,
+        treat_value_0=treat_value_0,
+        pi=pi,
+        **kwargs,
+    )
 
 
 def grr_ame(
@@ -670,19 +857,4 @@ def grr_ame(
     """Convenience wrapper for an average marginal effect (average derivative)."""
 
     m = AverageDerivativeFunctional(coordinate=int(coordinate), eps=float(eps))
-    return grr_functional(X=X, Y=Y, m=m, **kwargs)
-
-
-def grr_policy_effect(
-    *,
-    X: Array,
-    Y: Array,
-    policy_1: Callable[[Array], float],
-    policy_0: Callable[[Array], float],
-    treatment_index: int = 0,
-    **kwargs: Any,
-) -> FunctionalEstimateResult:
-    """Convenience wrapper for an average policy effect."""
-
-    m = PolicyEffectFunctional(policy_1=policy_1, policy_0=policy_0, treatment_index=int(treatment_index))
     return grr_functional(X=X, Y=Y, m=m, **kwargs)
