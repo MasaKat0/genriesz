@@ -3,7 +3,7 @@
 A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing (ARB)** and then report **RA / RW / ARW** estimates with inference (optionally via cross-fitting).
 
 - **Docs**: https://genriesz.readthedocs.io/en/latest/
-- **Paper**: [Riesz Representer Fitting under Bregman Divergence: A Unified Framework for Debiased Machine Learning (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
+- **Paper**: [A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
 
 ---
 
@@ -305,14 +305,26 @@ An end-to-end notebook with runnable examples is provided at:
 
 - `notebooks/GRR_end_to_end_examples.ipynb`
 
+
 ---
 
 ## References
 
 If you use **genriesz** in academic work, please cite:
 
-- [Riesz Representer Fitting under Bregman Divergence: A Unified Framework for Debiased Machine Learning (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)  
+- [A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)  
   - Consolidates earlier related drafts: [arXiv:2509.22122](https://arxiv.org/abs/2509.22122), [arXiv:2510.26783](https://arxiv.org/abs/2510.26783), [arXiv:2510.23534](https://arxiv.org/abs/2510.23534).
+
+    Bibtex-entry:
+
+    ```
+    @misc{Kato2026unifiedframework,
+      title={A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence}, 
+      author={Masahiro Kato},
+      year={2026},
+      note={{a}rXiv: 2601.07752},
+    }
+    ```
 - [Direct Bias-Correction Term Estimation for Propensity Scores and Average Treatment Effect Estimation (arXiv:2509.22122)](https://arxiv.org/abs/2509.22122)
 - [Nearest Neighbor Matching as Least Squares Density Ratio Estimation and Riesz Regression (arXiv:2510.24433)](https://arxiv.org/abs/2510.24433)
 
