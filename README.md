@@ -303,7 +303,10 @@ See `src/genriesz/torch_basis.py` for a minimal wrapper.
 
 An end-to-end notebook with runnable examples is provided at:
 
-- `notebooks/GRR_end_to_end_examples.ipynb`
+- `notebooks/ATE_example.ipynb`
+- `notebooks/ATT_example.ipynb`
+- `notebooks/AME_example.ipynb`
+- `notebooks/DID_example.ipynb`
 
 
 ---
@@ -314,8 +317,7 @@ If you use **genriesz** in academic work, please cite:
 
 - [A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)  
   - Consolidates earlier related drafts: [arXiv:2509.22122](https://arxiv.org/abs/2509.22122), [arXiv:2510.26783](https://arxiv.org/abs/2510.26783), [arXiv:2510.23534](https://arxiv.org/abs/2510.23534).
-
-    Bibtex-entry:
+  - Bibtex-entry:
 
     ```
     @misc{Kato2026unifiedframework,
