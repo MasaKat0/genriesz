@@ -1,480 +1,394 @@
-"""Basis-function utilities for :class:`genriesz.glm.GRRGLM`.
+"""Basis / feature-map utilities.
 
-In :class:`genriesz.glm.GRRGLM`, the user supplies a basis function ``phi(W)``.
-This module provides a few convenient basis builders:
+In *genriesz*, Riesz representers and nuisance regressions are typically fit
+in a (possibly high-dimensional) linear model on top of a **basis** / feature
+map ``phi(x)``.
 
-- :class:`PolynomialBasis` for polynomial feature expansions.
-- :class:`RBFRandomFourierBasis` for an RBF-kernel (RKHS) approximation via
-  random Fourier features.
-- :class:`RBFNystromBasis` for an RBF-kernel (RKHS) approximation via
-  Nyström features.
-- :class:`GaussianRKHSBasis` for an explicit Gaussian-kernel RKHS basis
-  (kernel sections at selected centers).
-- :class:`TreatmentInteractionBasis` for the common structure
-  ``[1, D, psi(Z), D*psi(Z)]`` in binary-treatment problems.
+The API is intentionally lightweight:
 
-These classes are intentionally lightweight and depend only on NumPy.
+- ``basis.fit(X, y=None)`` (optional)
+- ``basis(X) -> (n, p)`` feature matrix
+- ``basis.derivative(X, coordinate) -> (n, p)`` (optional; required for AME)
 
-Notes
------
-For very high-dimensional bases, prefer using linear functionals that provide
-a vectorized ``basis_matrix(W, basis)`` implementation (see
-:class:`genriesz.functionals.ATEFunctional`, etc.). This avoids an expensive
-``O(n p^2)`` fallback computation of ``m(W_i, basis_j)``.
+All docstrings and comments are in English as requested.
 """
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
-from itertools import combinations_with_replacement
-from typing import Callable, Optional
+from typing import Protocol
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 
-Array = np.ndarray
+class Basis(Protocol):
+    """Protocol for basis objects."""
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "Basis":
+        ...
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        ...
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        ...
+
+    @property
+    def n_features(self) -> int:
+        ...
+
+    def copy(self) -> "Basis":
+        ...
 
 
-def _as_2d(X: Array) -> Array:
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        return X.reshape(1, -1)
-    if X.ndim != 2:
-        raise ValueError(f"Expected a 1D or 2D array. Got shape {X.shape}.")
-    return X
+class BaseBasis:
+    """Convenience base class implementing ``copy``."""
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "BaseBasis":
+        return self
+
+    def copy(self):
+        return copy.deepcopy(self)
+
+    @property
+    def n_features(self) -> int:
+        raise NotImplementedError
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement derivative()."
+        )
 
 
-@dataclass
-class PolynomialBasis:
-    """Polynomial feature expansion.
+class PolynomialBasis(BaseBasis):
+    """Full polynomial features up to a given total degree.
 
-    This implements a small subset of ``sklearn.preprocessing.PolynomialFeatures``
-    but without any dependency on scikit-learn.
+    This is a small wrapper around ``sklearn.preprocessing.PolynomialFeatures``
+    because it provides a convenient and deterministic enumeration of monomials.
 
-    Parameters
-    ----------
-    degree:
-        Maximum total degree.
-    include_bias:
-        If True, include the constant feature 1.
+    Derivatives are implemented analytically via the monomial exponent table.
+    """
+
+    def __init__(self, degree: int = 2, *, include_bias: bool = True):
+        if int(degree) < 0:
+            raise ValueError("degree must be >= 0")
+        self.degree = int(degree)
+        self.include_bias = bool(include_bias)
+
+        self._poly = None
+        self._powers: NDArray[np.int64] | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "PolynomialBasis":
+        import sklearn.preprocessing
+
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+
+        poly = sklearn.preprocessing.PolynomialFeatures(
+            degree=self.degree,
+            include_bias=self.include_bias,
+            interaction_only=False,
+            order="C",
+        )
+        poly.fit(X_)
+        self._poly = poly
+        self._powers = np.asarray(poly.powers_, dtype=int)
+        return self
+
+    @property
+    def n_features(self) -> int:
+        if self._powers is None:
+            raise RuntimeError("PolynomialBasis must be fit() before use.")
+        return int(self._powers.shape[0])
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        if self._poly is None:
+            # Allow stateless usage by fitting on the fly.
+            self.fit(X)
+        X_ = np.asarray(X, dtype=float)
+        return np.asarray(self._poly.transform(X_), dtype=float)
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        """Derivative of the feature map wrt ``X[:, coordinate]``.
+
+        Returns a matrix of shape (n, p).
+        """
+
+        if self._poly is None or self._powers is None:
+            self.fit(X)
+
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+
+        n, d = X_.shape
+        if coordinate < 0 or coordinate >= d:
+            raise ValueError(f"coordinate must be in [0, {d-1}]. Got {coordinate}.")
+
+        powers = self._powers  # (p, d)
+        p = powers.shape[0]
+        pk = powers[:, coordinate].astype(int)  # (p,)
+
+        # Base monomials
+        Phi = self.__call__(X_)  # (n, p)
+
+        # Default formula: d/dx_k prod x^p = p_k * prod x^p / x_k.
+        xk = X_[:, coordinate].reshape(n, 1)
+        xk_safe = np.where(xk != 0.0, xk, 1.0)
+
+        der = Phi * pk.reshape(1, p) / xk_safe
+
+        # Fix the special case: p_k == 1 and x_k == 0.
+        # In that case, monomial is x_k * rest, derivative is rest.
+        mask_feat = pk == 1
+        if np.any(mask_feat):
+            mask_obs = (xk.reshape(-1) == 0.0)
+            if np.any(mask_obs):
+                # Compute rest = prod_{j!=k} x_j^{p_j} for those features.
+                other_powers = powers[mask_feat].copy()
+                other_powers[:, coordinate] = 0
+                # Compute rest via a stable multiplication.
+                rest = np.ones((mask_obs.sum(), other_powers.shape[0]), dtype=float)
+                X_sub = X_[mask_obs]
+                for j in range(d):
+                    pj = other_powers[:, j]
+                    if np.all(pj == 0):
+                        continue
+                    rest *= np.power(X_sub[:, [j]], pj.reshape(1, -1))
+
+                der[np.ix_(mask_obs, np.where(mask_feat)[0])] = rest
+
+        # Features with pk == 0 should be exactly 0.
+        der[:, pk == 0] = 0.0
+        return der
+
+
+class TreatmentInteractionBasis(BaseBasis):
+    """Interaction basis for binary-treatment functionals.
+
+    Given a base basis on covariates ``Z`` (excluding the treatment), this basis
+    maps ``X = [D, Z]`` to
+
+        phi(X) = [ D * psi(Z) , (1 - D) * psi(Z) ].
+
+    This is a convenient default for ATE/ATT/DID-style functionals.
+    """
+
+    def __init__(self, *, base_basis: BaseBasis, treatment_index: int = 0):
+        self.base_basis = base_basis
+        self.treatment_index = int(treatment_index)
+        self._base_dim: int | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "TreatmentInteractionBasis":
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        if self.treatment_index < 0 or self.treatment_index >= X_.shape[1]:
+            raise ValueError("treatment_index is out of bounds")
+
+        Z = np.delete(X_, self.treatment_index, axis=1)
+        self.base_basis.fit(Z, y=None)
+        self._base_dim = self.base_basis.n_features
+        return self
+
+    @property
+    def n_features(self) -> int:
+        if self._base_dim is None:
+            raise RuntimeError("TreatmentInteractionBasis must be fit() before use.")
+        return 2 * int(self._base_dim)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        if self._base_dim is None:
+            self.fit(X_)
+
+        D = X_[:, self.treatment_index].reshape(-1, 1)
+        if not np.all(np.isin(np.unique(D), [0.0, 1.0])):
+            raise ValueError("Treatment column must be binary (0/1).")
+
+        Z = np.delete(X_, self.treatment_index, axis=1)
+        Psi = np.asarray(self.base_basis(Z), dtype=float)
+
+        return np.concatenate([D * Psi, (1.0 - D) * Psi], axis=1)
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        if self._base_dim is None:
+            self.fit(X_)
+
+        if coordinate == self.treatment_index:
+            raise ValueError(
+                "Derivative w.r.t. the treatment indicator is not supported (binary variable)."
+            )
+
+        d = X_.shape[1]
+        if coordinate < 0 or coordinate >= d:
+            raise ValueError(f"coordinate must be in [0, {d-1}]. Got {coordinate}.")
+
+        # Map full coordinate index -> Z coordinate index
+        z_coord = coordinate - 1 if coordinate > self.treatment_index else coordinate
+
+        D = X_[:, self.treatment_index].reshape(-1, 1)
+        Z = np.delete(X_, self.treatment_index, axis=1)
+        dPsi = self.base_basis.derivative(Z, z_coord)
+
+        return np.concatenate([D * dPsi, (1.0 - D) * dPsi], axis=1)
+
+
+class RBFRandomFourierBasis(BaseBasis):
+    """RBF random Fourier features (Rahimi-Recht) with optional standardization."""
+
+    def __init__(
+        self,
+        *,
+        n_features: int = 500,
+        sigma: float = 1.0,
+        include_bias: bool = True,
+        standardize: bool = True,
+        random_state: int | None = None,
+    ):
+        if int(n_features) <= 0:
+            raise ValueError("n_features must be positive")
+        if float(sigma) <= 0:
+            raise ValueError("sigma must be positive")
+        self.n_features_rff = int(n_features)
+        self.sigma = float(sigma)
+        self.include_bias = bool(include_bias)
+        self.standardize = bool(standardize)
+        self.random_state = random_state
+
+        self._mean: NDArray[np.float64] | None = None
+        self._std: NDArray[np.float64] | None = None
+        self._W: NDArray[np.float64] | None = None
+        self._b: NDArray[np.float64] | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "RBFRandomFourierBasis":
+        X_ = np.asarray(X, dtype=float)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        n, d = X_.shape
+
+        if self.standardize:
+            mean = X_.mean(axis=0)
+            std = X_.std(axis=0, ddof=0)
+            std = np.where(std > 0, std, 1.0)
+        else:
+            mean = np.zeros(d)
+            std = np.ones(d)
+
+        rng = np.random.default_rng(self.random_state)
+        W = rng.normal(loc=0.0, scale=1.0 / self.sigma, size=(d, self.n_features_rff))
+        b = rng.uniform(0.0, 2.0 * np.pi, size=self.n_features_rff)
+
+        self._mean = mean.astype(float)
+        self._std = std.astype(float)
+        self._W = W.astype(float)
+        self._b = b.astype(float)
+        return self
+
+    @property
+    def n_features(self) -> int:
+        if self._W is None:
+            raise RuntimeError("RBFRandomFourierBasis must be fit() before use.")
+        return int(self.n_features_rff + (1 if self.include_bias else 0))
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        if self._W is None or self._b is None or self._mean is None or self._std is None:
+            self.fit(X)
+        X_ = np.asarray(X, dtype=float)
+        Z = (X_ - self._mean) / self._std
+        proj = Z @ self._W + self._b
+        feats = np.sqrt(2.0 / self.n_features_rff) * np.cos(proj)
+        if self.include_bias:
+            feats = np.column_stack([np.ones(len(X_), dtype=float), feats])
+        return feats.astype(float)
+
+
+class KNNCatchmentBasis(BaseBasis):
+    """kNN catchment (Voronoi) basis.
+
+    After fitting on a set of *centers*, evaluating on query points returns a
+    (dense) indicator matrix whose columns correspond to centers.
 
     Notes
     -----
-    The number of output features grows quickly with the input dimension and
-    degree.
+    - This is mainly intended for small-to-medium center sets used in notebooks.
+    - For large-scale matching, prefer the dedicated NN/LSIF utilities.
     """
 
-    degree: int = 2
-    include_bias: bool = True
+    def __init__(
+        self,
+        *,
+        n_neighbors: int = 1,
+        standardize: bool = True,
+        random_state: int | None = None,
+    ):
+        if int(n_neighbors) <= 0:
+            raise ValueError("n_neighbors must be positive")
+        self.n_neighbors = int(n_neighbors)
+        self.standardize = bool(standardize)
+        self.random_state = random_state
 
-    # Internal state built lazily
-    _tuples: Optional[list[tuple[int, ...]]] = None
-    n_input_: Optional[int] = None
+        self._centers: NDArray[np.float64] | None = None
+        self._mean: NDArray[np.float64] | None = None
+        self._std: NDArray[np.float64] | None = None
+        self._nn = None
 
-    def _build(self, n_input: int) -> None:
-        if self.degree < 0:
-            raise ValueError("degree must be >= 0")
-        tuples: list[tuple[int, ...]] = []
-        if self.include_bias:
-            tuples.append(())
+    def fit(self, centers: ArrayLike, y: ArrayLike | None = None) -> "KNNCatchmentBasis":
+        import sklearn.neighbors
 
-        for deg in range(1, int(self.degree) + 1):
-            tuples.extend(combinations_with_replacement(range(n_input), deg))
+        C = np.asarray(centers, dtype=float)
+        if C.ndim != 2:
+            raise ValueError(f"centers must be 2D. Got shape {C.shape}.")
 
-        self._tuples = tuples
-        self.n_input_ = int(n_input)
+        if self.standardize:
+            mean = C.mean(axis=0)
+            std = C.std(axis=0, ddof=0)
+            std = np.where(std > 0, std, 1.0)
+        else:
+            mean = np.zeros(C.shape[1])
+            std = np.ones(C.shape[1])
+
+        C_std = (C - mean) / std
+
+        nn = sklearn.neighbors.NearestNeighbors(n_neighbors=self.n_neighbors, algorithm="auto")
+        nn.fit(C_std)
+
+        self._centers = C
+        self._mean = mean
+        self._std = std
+        self._nn = nn
+        return self
 
     @property
-    def n_output_(self) -> int:
-        if self._tuples is None:
-            raise AttributeError("PolynomialBasis is not initialized yet. Call it once to infer n_input.")
-        return len(self._tuples)
-
-    def __call__(self, X: Array) -> Array:
-        X_in = np.asarray(X, dtype=float)
-        X2 = _as_2d(X_in)
-
-        if self._tuples is None:
-            self._build(X2.shape[1])
-        assert self._tuples is not None
-        assert self.n_input_ is not None
-
-        if X2.shape[1] != self.n_input_:
-            raise ValueError(
-                f"PolynomialBasis expected input dim {self.n_input_}, got {X2.shape[1]}."
-            )
-
-        n = len(X2)
-        out = np.empty((n, len(self._tuples)), dtype=float)
-        for j, idxs in enumerate(self._tuples):
-            if len(idxs) == 0:
-                out[:, j] = 1.0
-            else:
-                out[:, j] = np.prod(X2[:, idxs], axis=1)
-
-        if X_in.ndim == 1:
-            return out.reshape(-1)
-        return out
-
-
-@dataclass
-class RBFRandomFourierBasis:
-    """Random Fourier features for the RBF kernel.
-
-    Approximates the RBF kernel
-
-        k(x,y) = exp(-||x-y||^2 / (2*sigma^2)).
-
-    Parameters
-    ----------
-    n_features:
-        Number of random features.
-    sigma:
-        RBF bandwidth.
-    include_bias:
-        If True, append a constant feature 1.
-    standardize:
-        If True, standardize inputs using mean/std estimated on first call.
-        This is a convenience option; for cross-fitting you may prefer to
-        standardize externally to avoid leakage.
-    random_state:
-        Seed for reproducibility.
-    """
-
-    n_features: int = 200
-    sigma: float = 1.0
-    include_bias: bool = False
-    standardize: bool = True
-    random_state: Optional[int] = None
-
-    # Learned / sampled parameters
-    omega_: Optional[Array] = None  # shape (d, n_features)
-    b_: Optional[Array] = None      # shape (n_features,)
-    mean_: Optional[Array] = None
-    scale_: Optional[Array] = None
-
-    def _init_params(self, d: int) -> None:
-        if self.n_features <= 0:
-            raise ValueError("n_features must be > 0")
-        if self.sigma <= 0:
-            raise ValueError("sigma must be > 0")
-
-        rng = np.random.default_rng(self.random_state)
-        self.omega_ = rng.normal(loc=0.0, scale=1.0 / float(self.sigma), size=(d, self.n_features))
-        self.b_ = rng.uniform(low=0.0, high=2.0 * np.pi, size=(self.n_features,))
-
-    def _maybe_fit_standardizer(self, X2: Array) -> None:
-        if not self.standardize:
-            return
-        if self.mean_ is None or self.scale_ is None:
-            self.mean_ = X2.mean(axis=0)
-            scale = X2.std(axis=0)
-            scale[scale == 0] = 1.0
-            self.scale_ = scale
-
-    def _standardize(self, X2: Array) -> Array:
-        if not self.standardize:
-            return X2
-        assert self.mean_ is not None and self.scale_ is not None
-        return (X2 - self.mean_) / self.scale_
-
-    def __call__(self, X: Array) -> Array:
-        X_in = np.asarray(X, dtype=float)
-        X2 = _as_2d(X_in)
-        d = X2.shape[1]
-
-        if self.omega_ is None or self.b_ is None:
-            self._init_params(d)
-
-        self._maybe_fit_standardizer(X2)
-        Xs = self._standardize(X2)
-
-        assert self.omega_ is not None and self.b_ is not None
-        Z = Xs @ self.omega_ + self.b_[None, :]
-        out = np.sqrt(2.0 / float(self.n_features)) * np.cos(Z)
-
-        if self.include_bias:
-            out = np.concatenate([out, np.ones((len(out), 1))], axis=1)
-
-        if X_in.ndim == 1:
-            return out.reshape(-1)
-        return out
-
-
-@dataclass
-class RBFNystromBasis:
-    """Nyström basis features for the RBF kernel.
-
-    This returns features
-
-        phi(x) = [k(x, c_1), ..., k(x, c_m)]
-
-    where the centers c_j are sampled from the data on first call (or you can
-    call :meth:`fit` explicitly).
-
-    Parameters
-    ----------
-    n_centers:
-        Number of Nyström centers.
-    sigma:
-        RBF bandwidth.
-    include_bias:
-        If True, append a constant feature 1.
-    standardize:
-        If True, standardize inputs using mean/std estimated in :meth:`fit`.
-    random_state:
-        Seed for reproducibility.
-    """
-
-    n_centers: int = 200
-    sigma: float = 1.0
-    include_bias: bool = False
-    standardize: bool = True
-    random_state: Optional[int] = None
-
-    centers_: Optional[Array] = None
-    mean_: Optional[Array] = None
-    scale_: Optional[Array] = None
-
-    def fit(self, X: Array) -> "RBFNystromBasis":
-        X2 = _as_2d(np.asarray(X, dtype=float))
-        if self.n_centers <= 0:
-            raise ValueError("n_centers must be > 0")
-        if self.sigma <= 0:
-            raise ValueError("sigma must be > 0")
-
-        if self.standardize:
-            self.mean_ = X2.mean(axis=0)
-            scale = X2.std(axis=0)
-            scale[scale == 0] = 1.0
-            self.scale_ = scale
-            X2 = (X2 - self.mean_) / self.scale_
-
-        rng = np.random.default_rng(self.random_state)
-        idx = rng.choice(len(X2), size=min(self.n_centers, len(X2)), replace=False)
-        self.centers_ = X2[idx]
-        return self
-
-    def _standardize(self, X2: Array) -> Array:
-        if not self.standardize:
-            return X2
-        if self.mean_ is None or self.scale_ is None:
-            # Fit on first call.
-            self.mean_ = X2.mean(axis=0)
-            scale = X2.std(axis=0)
-            scale[scale == 0] = 1.0
-            self.scale_ = scale
-        return (X2 - self.mean_) / self.scale_
-
-    @staticmethod
-    def _sq_dists(X: Array, C: Array) -> Array:
-        # ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x c^T
-        x2 = np.sum(X * X, axis=1, keepdims=True)  # (n,1)
-        c2 = np.sum(C * C, axis=1, keepdims=True).T  # (1,m)
-        return x2 + c2 - 2.0 * (X @ C.T)
-
-    def __call__(self, X: Array) -> Array:
-        X_in = np.asarray(X, dtype=float)
-        X2 = _as_2d(X_in)
-        if self.centers_ is None:
-            # Fit on the *raw* inputs; fit() handles standardization.
-            self.fit(X2)
-
-        Xs = self._standardize(X2)
-        assert self.centers_ is not None
-
-        d2 = self._sq_dists(Xs, self.centers_)
-        out = np.exp(-d2 / (2.0 * float(self.sigma) ** 2))
-
-        if self.include_bias:
-            out = np.concatenate([out, np.ones((len(out), 1))], axis=1)
-
-        if X_in.ndim == 1:
-            return out.reshape(-1)
-        return out
-
-
-
-
-
-@dataclass
-class GaussianRKHSBasis:
-    """Gaussian-kernel RKHS basis via kernel sections at selected centers.
-
-    This basis returns features
-
-    .. math::
-
-        \phi(x) = [k(x, c_1), \ldots, k(x, c_m)], \qquad
-        k(x,c) = \exp\{-\|x-c\|^2 /(2\sigma^2)\},
-
-    where the centers :math:`c_j` are either user-specified (via ``centers``)
-    or sampled uniformly without replacement from the data in :meth:`fit`.
-
-    Compared to :class:`RBFNystromBasis`, this class is explicit about the RKHS
-    interpretation and supports passing custom centers (useful for reproducing
-    kernel-based density-ratio estimators such as uLSIF / RuLSIF).
-
-    Parameters
-    ----------
-    n_centers:
-        Number of kernel centers to sample when ``centers`` is ``None``.
-    centers:
-        Optional array of centers of shape ``(m, d)``. If provided, :meth:`fit`
-        will use these centers instead of sampling from the data.
-    sigma:
-        RBF bandwidth (must be > 0).
-    include_bias:
-        If True, append a constant feature 1.
-    standardize:
-        If True, standardize inputs using mean/std estimated in :meth:`fit`.
-        This is off by default because many kernel density-ratio estimators
-        assume raw covariates; you may standardize externally if desired.
-    random_state:
-        Seed for reproducibility when sampling centers.
-    """
-
-    n_centers: int = 200
-    sigma: float = 1.0
-    include_bias: bool = False
-    standardize: bool = False
-    random_state: Optional[int] = None
-    centers: Optional[Array] = None
-
-    centers_: Optional[Array] = None
-    mean_: Optional[Array] = None
-    scale_: Optional[Array] = None
-
-    def fit(self, X: Array) -> "GaussianRKHSBasis":
-        X2 = _as_2d(np.asarray(X, dtype=float))
-        if self.n_centers <= 0 and self.centers is None:
-            raise ValueError("n_centers must be > 0 when centers is None.")
-        if self.sigma <= 0:
-            raise ValueError("sigma must be > 0")
-
-        Xs = X2
-        if self.standardize:
-            self.mean_ = X2.mean(axis=0)
-            scale = X2.std(axis=0, ddof=0)
-            scale[scale == 0] = 1.0
-            self.scale_ = scale
-            Xs = (X2 - self.mean_) / self.scale_
-
-        if self.centers is not None:
-            C = _as_2d(np.asarray(self.centers, dtype=float))
-            if C.shape[1] != X2.shape[1]:
-                raise ValueError(
-                    f"centers must have the same input dimension as X. "
-                    f"Expected {X2.shape[1]}, got {C.shape[1]}."
-                )
-            if self.standardize:
-                assert self.mean_ is not None and self.scale_ is not None
-                C = (C - self.mean_) / self.scale_
-            self.centers_ = C
-            return self
-
-        rng = np.random.default_rng(self.random_state)
-        m = min(int(self.n_centers), len(Xs))
-        idx = rng.choice(len(Xs), size=m, replace=False)
-        self.centers_ = Xs[idx]
-        return self
-
-    def _standardize(self, X2: Array) -> Array:
-        if not self.standardize:
-            return X2
-        if self.mean_ is None or self.scale_ is None:
-            # Lazily fit on first call.
-            self.mean_ = X2.mean(axis=0)
-            scale = X2.std(axis=0, ddof=0)
-            scale[scale == 0] = 1.0
-            self.scale_ = scale
-            # If centers were provided, standardize them now.
-            if self.centers is not None and self.centers_ is None:
-                C = _as_2d(np.asarray(self.centers, dtype=float))
-                self.centers_ = (C - self.mean_) / self.scale_
-        assert self.mean_ is not None and self.scale_ is not None
-        return (X2 - self.mean_) / self.scale_
-
-    @staticmethod
-    def _sq_dists(X: Array, C: Array) -> Array:
-        # ||x-c||^2 = ||x||^2 + ||c||^2 - 2 x c^T
-        x2 = np.sum(X * X, axis=1, keepdims=True)  # (n,1)
-        c2 = np.sum(C * C, axis=1, keepdims=True).T  # (1,m)
-        return x2 + c2 - 2.0 * (X @ C.T)
-
-    def __call__(self, X: Array) -> Array:
-        X_in = np.asarray(X, dtype=float)
-        X2 = _as_2d(X_in)
-
-        if self.centers_ is None:
-            # Fit on the *raw* inputs; fit() handles standardization.
-            self.fit(X2)
-
-        Xs = self._standardize(X2)
-        assert self.centers_ is not None
-
-        d2 = self._sq_dists(Xs, self.centers_)
-        out = np.exp(-d2 / (2.0 * float(self.sigma) ** 2))
-
-        if self.include_bias:
-            out = np.concatenate([out, np.ones((len(out), 1))], axis=1)
-
-        if X_in.ndim == 1:
-            return out.reshape(-1)
-        return out
-@dataclass
-class TreatmentInteractionBasis:
-    """Build a (binary) treatment-interaction basis from covariate features.
-
-    Many binary-treatment causal estimands parameterize the regression function
-    as
-
-        gamma(D,Z) = gamma0(Z) + D * (gamma1(Z) - gamma0(Z)).
-
-    A convenient basis for this structure is
-
-        phi(D,Z) = [1, D, psi(Z), D * psi(Z)].
-
-    Parameters
-    ----------
-    base_basis:
-        Callable ``psi(Z)`` returning (p,) or (n,p).
-    include_intercept:
-        If True, include the constant 1.
-    include_treatment:
-        If True, include the raw treatment indicator D as a feature.
-    """
-
-    base_basis: Callable[[Array], Array]
-    include_intercept: bool = True
-    include_treatment: bool = True
-
-    def __call__(self, W: Array) -> Array:
-        W_in = np.asarray(W, dtype=float)
-        if W_in.ndim == 1:
-            d = float(W_in[0])
-            z = W_in[1:]
-            psi = np.asarray(self.base_basis(z), dtype=float).reshape(-1)
-            parts: list[Array] = []
-            if self.include_intercept:
-                parts.append(np.array([1.0]))
-            if self.include_treatment:
-                parts.append(np.array([d]))
-            parts.append(psi)
-            parts.append(d * psi)
-            return np.concatenate(parts)
-
-        d = W_in[:, [0]]
-        z = W_in[:, 1:]
-        psi = np.asarray(self.base_basis(z), dtype=float)
-        if psi.ndim == 1:
-            psi = psi.reshape(len(W_in), -1)
-
-        parts2: list[Array] = []
-        if self.include_intercept:
-            parts2.append(np.ones((len(W_in), 1)))
-        if self.include_treatment:
-            parts2.append(d)
-        parts2.append(psi)
-        parts2.append(d * psi)
-        return np.concatenate(parts2, axis=1)
+    def n_features(self) -> int:
+        if self._centers is None:
+            raise RuntimeError("KNNCatchmentBasis must be fit() before use.")
+        return int(self._centers.shape[0])
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        if self._nn is None or self._centers is None or self._mean is None or self._std is None:
+            raise RuntimeError("KNNCatchmentBasis must be fit() before use.")
+
+        Q = np.asarray(X, dtype=float)
+        if Q.ndim != 2:
+            raise ValueError(f"X must be 2D. Got shape {Q.shape}.")
+
+        Q_std = (Q - self._mean) / self._std
+        _, ind = self._nn.kneighbors(Q_std, return_distance=True)
+
+        n = len(Q)
+        m = self.n_features
+        Phi = np.zeros((n, m), dtype=float)
+
+        # Mark membership in the selected neighbor set.
+        for i in range(n):
+            Phi[i, ind[i]] = 1.0
+        return Phi

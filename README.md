@@ -1,6 +1,6 @@
 # genriesz — Generalized Riesz Regression (GRR)
 
-A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing (ARB)** and then report **RA / RW / ARW / TMLE** estimates with inference (optionally via cross-fitting).
+A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing (ARB)** and then report **RA / RW / ARW** estimates with inference (optionally via cross-fitting).
 
 - **Docs**: https://genriesz.readthedocs.io/en/latest/
 - **Paper**: [Riesz Representer Fitting under Bregman Divergence: A Unified Framework for Debiased Machine Learning (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
@@ -141,7 +141,7 @@ The paper’s **Table 1** summarizes how common choices relate to well-known **d
 | **Dual solution (linear link)** | Kernel mean matching ([Gretton et al., 2009](https://www.gatsby.ucl.ac.uk/~gretton/papers/covariateShiftChapter.pdf)) | Sieve Riesz representer ([Chen & Christensen, 2015](https://www.jstor.org/stable/43616960)); stable balancing weights ([Zubizarreta, 2015](https://www.tandfonline.com/doi/abs/10.1080/01621459.2015.1023805); [Bruns-Smith et al., 2025](https://arxiv.org/abs/2304.14545)); approximate residual balancing ([Athey et al., 2018](https://arxiv.org/abs/1604.07125)); covariate balancing by SVM ([Tarr & Imai, 2025](https://imai.fas.harvard.edu/research/files/causalsvm.pdf)) |
 | $(\lvert\alpha\rvert - C)\log(\lvert\alpha\rvert - C) - \lvert\alpha\rvert$ | UKL divergence minimization ([Nguyen et al., 2010](https://arxiv.org/abs/0809.0853)) | **UKL-Riesz regression** (this library); tailored loss minimization ($\alpha=\beta=-1$; [Zhao, 2019](https://projecteuclid.org/journals/annals-of-statistics/volume-47/issue-2/Covariate-balancing-propensity-score-by-tailored-loss-functions/10.1214/18-AOS1698.full)); calibrated estimation ([Tan, 2020](https://academic.oup.com/biomet/article-abstract/107/1/137/5658668)) |
 | **Dual solution (logistic / log link)** | KLIEP ([Sugiyama et al., 2008](https://www.ism.ac.jp/editsec/aism/60/699.pdf)) | Entropy balancing weights ([Hainmueller, 2012](https://www.cambridge.org/core/journals/political-analysis/article/entropy-balancing-for-causal-effects-a-multivariate-reweighting-method-to-produce-balanced-samples-in-observational-studies/220E4FC838066552B53128E647E4FAA7)) |
-| $(\lvert\alpha\rvert - C)\log(\lvert\alpha\rvert - C) - (\lvert\alpha\rvert + C)\log(\lvert\alpha\rvert + C)$ | BKL divergence minimization ([Qin, 1998](https://academic.oup.com/biomet/article-abstract/85/3/619/229087)); TRE ([Rhodes et al., 2020](https://proceedings.neurips.cc/paper_files/paper/2020/hash/33d3b157ddc0896addfb22fa2a519097-Abstract.html)) | **BKL-Riesz regression** (this library); logistic MLE propensity-score fit (standard approach); tailored loss minimization ($\alpha=\beta=0$; [Zhao, 2019](https://projecteuclid.org/journals/annals-of-statistics/volume-47/issue-2/Covariate-balancing-propensity-score-by-tailored-loss-functions/10.1214/18-AOS1698.full)) |
+| $(\lvert\alpha\rvert - C)\log(\lvert\alpha\rvert - C) - (\lvert\alpha\rvert + C)\log(\lvert\alpha\rvert + C)$ | BKL divergence minimization ([Qin, 1998](https://academic.oup.com/biomet/article-abstract/85/3/619/229087)); TRE ([Rhodes et al., 2020](https://proceedings.neurips.cc/paper_files/paper/2020/hash/33d3b157ddc0896addfb22fa2a519097-Abstract.html)) | **BKL-Riesz regression** (custom generator); logistic MLE propensity-score fit (standard approach); tailored loss minimization ($\alpha=\beta=0$; [Zhao, 2019](https://projecteuclid.org/journals/annals-of-statistics/volume-47/issue-2/Covariate-balancing-propensity-score-by-tailored-loss-functions/10.1214/18-AOS1698.full)) |
 | $\frac{(\lvert\alpha\rvert - C)^{1+\omega} - (\lvert\alpha\rvert - C)}{\omega} - (\lvert\alpha\rvert - C)$, $\omega>0$ | Basu's Power (BP) divergence minimization ([Sugiyama et al., 2012](https://www.cambridge.org/core/books/density-ratio-estimation-in-machine-learning/BCBEA6AEAADD66569B1E85DDDEAA7648)) | **BP-Riesz regression** (this library) |
 | $C\log(1-\lvert\alpha\rvert) + C\lvert\alpha\rvert\bigl(\log\lvert\alpha\rvert - \log(1-\lvert\alpha\rvert)\bigr)$, $\alpha\in(0,1)$ | PU learning / nonnegative PU learning ([du Plessis et al., 2015](https://proceedings.mlr.press/v37/plessis15.html); [Kiryo et al., 2017](https://arxiv.org/abs/1703.00593)) | PU-Riesz regression (custom generator) |
 | General Bregman divergence minimization | Density-ratio matching ([Sugiyama et al., 2012](https://www.cambridge.org/core/books/density-ratio-estimation-in-machine-learning/BCBEA6AEAADD66569B1E85DDDEAA7648)); D3RE ([Kato & Teshima, 2021](https://proceedings.mlr.press/v139/kato21a.html)) | **Generalized Riesz regression** (this library via custom `BregmanGenerator`) |
@@ -156,7 +156,6 @@ For most use-cases you can start from one of the built-ins:
 
 - `SquaredGenerator`  → squared distance / “SQ-Riesz”
 - `UKLGenerator`      → unnormalized KL divergence / “UKL-Riesz”
-- `BKLGenerator`      → binary KL divergence / “BKL-Riesz”
 - `BPGenerator`       → Basu's power divergence　/ “BP-Riesz”
 - `BregmanGenerator`  → bring your own `g`, optionally with `grad` and `inv_grad`
 
@@ -229,14 +228,10 @@ If you omit them, the library falls back to:
 The following convenience wrappers are included:
 
 - **ATE** (average treatment effect): `grr_ate` / `ATEFunctional(...)`
-- **ATT** (average treatment effect on the treated): `grr_att` / `ATTFunctional(...)`
-- **DID** (panel difference-in-differences): `grr_did`  
-  Implemented as **ATT on** `ΔY = Y1 - Y0` for panel data (pre/post observed for the same units).
 - **AME** (average marginal effect / average derivative): `grr_ame` / `AverageDerivativeFunctional(...)`
+- **Average policy effect**: `grr_policy_effect` / `PolicyEffectFunctional(...)`
 
-If you need a custom target, use the general API :func:`genriesz.grr_functional`
-and provide your own `m(x, gamma)`.
-
+---
 
 ## Basis functions
 
@@ -304,17 +299,13 @@ See `src/genriesz/torch_basis.py` for a minimal wrapper.
 
 ---
 
-## Jupyter notebooks
+## Jupyter notebook
 
-Application-specific notebooks (one per estimand) are provided in `notebooks/`:
+An end-to-end notebook with runnable examples is provided at:
 
-- `notebooks/ATE_end_to_end.ipynb`
-- `notebooks/AME_end_to_end.ipynb`
-- `notebooks/ATT_simulation_true_value.ipynb`
-- `notebooks/DID_simulation_true_value.ipynb`
+- `notebooks/GRR_end_to_end_examples.ipynb`
 
-The corresponding rendered pages are also linked from the documentation.
-
+---
 
 ## References
 

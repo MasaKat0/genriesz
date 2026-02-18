@@ -1,105 +1,169 @@
-"""Optional PyTorch-based basis functions.
+"""Optional PyTorch-based bases.
 
-This module is only needed if you want to use a neural network as a *feature map*
-for :class:`genriesz.glm.GRRGLM`.
+Neural networks can be used as flexible feature maps. The GRR solvers remain
+linear in the *final* coefficients, but the basis itself can be learned.
 
-The recommended pattern for keeping the GLM solver convex in `beta` (and thus
-preserving the exact ARB structure for the chosen basis) is:
+This module provides:
 
-1) train an embedding network psi(Z) however you like,
-2) freeze it,
-3) feed its output as a fixed basis into GRRGLM.
+- :class:`MLPEmbeddingNet`  - a simple MLP producing an embedding
+- :class:`TorchEmbeddingBasis` - trains the embedding network (optionally) and
+  exposes the embedding as a NumPy feature map.
 
-If you instead train the embedding network jointly inside the GRR objective, you
-leave the GLM setting and should not expect finite-sample *exact* covariate
-balancing for the network features.
+The implementation is intentionally minimal and is meant for demonstrations / prototypes.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
+
+from .basis import BaseBasis
+
 
 try:
     import torch
     import torch.nn as nn
+    import torch.optim as optim
 except Exception as e:  # pragma: no cover
-    raise ImportError(
-        "PyTorch is required for genriesz.torch_basis. Install with: pip install genriesz[torch]"
-    ) from e
-
-
-Array = np.ndarray
-
-
-@dataclass
-class TorchEmbeddingBasis:
-    """Wrap a PyTorch module as a NumPy-returning basis function.
-
-    Parameters
-    ----------
-    model:
-        A `torch.nn.Module` mapping a tensor of shape (n, d) to (n, p).
-    device:
-        Device on which to run the model. If None, uses CPU.
-    include_bias:
-        If True, append a constant feature 1.
-    """
-
-    model: nn.Module
-    device: Optional[str] = None
-    include_bias: bool = False
-
-    def __post_init__(self) -> None:
-        self.device = self.device or "cpu"
-        self.model.to(self.device)
-        self.model.eval()
-
-    def __call__(self, X: Array) -> Array:
-        X_in = np.asarray(X, dtype=float)
-        if X_in.ndim == 1:
-            X2 = X_in.reshape(1, -1)
-        elif X_in.ndim == 2:
-            X2 = X_in
-        else:
-            raise ValueError(f"X must be 1D or 2D. Got shape {X_in.shape}.")
-
-        with torch.no_grad():
-            xt = torch.tensor(X2, dtype=torch.float32, device=self.device)
-            out = self.model(xt)
-            out_np = out.detach().cpu().numpy()
-
-        if out_np.ndim != 2:
-            raise ValueError(
-                "TorchEmbeddingBasis expects the model to return a 2D tensor (n,p). "
-                f"Got shape {out_np.shape}."
-            )
-
-        if self.include_bias:
-            out_np = np.concatenate([out_np, np.ones((len(out_np), 1))], axis=1)
-
-        if X_in.ndim == 1:
-            return out_np.reshape(-1)
-        return out_np
+    torch = None  # type: ignore
+    nn = None  # type: ignore
+    optim = None  # type: ignore
+    _IMPORT_ERROR = e
+else:
+    _IMPORT_ERROR = None
 
 
 class MLPEmbeddingNet(nn.Module):
-    """A small default MLP for building embeddings.
+    """A simple feed-forward network that outputs an embedding."""
 
-    This is provided only as a convenience for examples.
-    """
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dims: tuple[int, ...] = (32, 16),
+        output_dim: int = 8,
+        activation: str = "relu",
+    ) -> None:
+        if nn is None:  # pragma: no cover
+            raise ImportError("PyTorch is required") from _IMPORT_ERROR
 
-    def __init__(self, input_dim: int, hidden_dim: int = 64, output_dim: int = 32) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, output_dim),
-        )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        act: nn.Module
+        if activation.lower() == "relu":
+            act = nn.ReLU()
+        elif activation.lower() == "tanh":
+            act = nn.Tanh()
+        else:
+            raise ValueError(f"Unknown activation: {activation}")
+
+        layers: list[nn.Module] = []
+        d_in = int(input_dim)
+        for h in hidden_dims:
+            layers.append(nn.Linear(d_in, int(h)))
+            layers.append(act)
+            d_in = int(h)
+        layers.append(nn.Linear(d_in, int(output_dim)))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[name-defined]
         return self.net(x)
+
+
+@dataclass
+class TorchEmbeddingBasis(BaseBasis):
+    """A basis given by a learned PyTorch embedding network."""
+
+    net: "MLPEmbeddingNet"
+    include_bias: bool = True
+    device: str | None = None
+
+    def __post_init__(self) -> None:
+        if torch is None:  # pragma: no cover
+            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
+
+        self._device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.net.to(self._device)
+        self._is_fit = False
+
+    def fit(
+        self,
+        X: ArrayLike,
+        y: ArrayLike | None = None,
+        *,
+        epochs: int = 20,
+        lr: float = 1e-3,
+        batch_size: int = 128,
+        verbose: bool = False,
+    ):
+        """Optionally train the embedding to predict ``y``.
+
+        If ``y`` is None, this method only marks the basis as fit.
+        """
+
+        if torch is None:  # pragma: no cover
+            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
+
+        X_ = np.asarray(X, dtype=float)
+        if y is None:
+            self._is_fit = True
+            return self
+
+        y_ = np.asarray(y, dtype=float).reshape(-1, 1)
+
+        # Simple supervised training with a linear prediction head.
+        head = nn.Linear(self.net.net[-1].out_features, 1).to(self._device)
+        params = list(self.net.parameters()) + list(head.parameters())
+        opt = optim.Adam(params, lr=float(lr))
+        loss_fn = nn.MSELoss()
+
+        ds = torch.utils.data.TensorDataset(
+            torch.tensor(X_, dtype=torch.float32),
+            torch.tensor(y_, dtype=torch.float32),
+        )
+        loader = torch.utils.data.DataLoader(ds, batch_size=int(batch_size), shuffle=True)
+
+        self.net.train()
+        head.train()
+        for ep in range(int(epochs)):
+            total = 0.0
+            for xb, yb in loader:
+                xb = xb.to(self._device)
+                yb = yb.to(self._device)
+
+                opt.zero_grad(set_to_none=True)
+                emb = self.net(xb)
+                pred = head(emb)
+                loss = loss_fn(pred, yb)
+                loss.backward()
+                opt.step()
+                total += float(loss.detach().cpu().item()) * len(xb)
+
+            if verbose:
+                print(f"[TorchEmbeddingBasis] epoch {ep+1}/{epochs} loss={total/len(ds):.6f}")
+
+        self._is_fit = True
+        return self
+
+    @property
+    def n_features(self) -> int:
+        out_dim = int(self.net.net[-1].out_features)
+        return out_dim + (1 if self.include_bias else 0)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        if torch is None:  # pragma: no cover
+            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
+        if not self._is_fit:
+            raise RuntimeError("TorchEmbeddingBasis must be fit before use")
+
+        X_ = np.asarray(X, dtype=float)
+        self.net.eval()
+        with torch.no_grad():
+            xb = torch.tensor(X_, dtype=torch.float32, device=self._device)
+            emb = self.net(xb).detach().cpu().numpy().astype(float)
+
+        if self.include_bias:
+            emb = np.concatenate([np.ones((emb.shape[0], 1), dtype=float), emb], axis=1)
+        return emb

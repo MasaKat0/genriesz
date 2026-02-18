@@ -1,206 +1,182 @@
-"""Common linear functionals (estimands) for GRR.
+"""Built-in linear functionals (estimands).
 
-The core solver :class:`genriesz.GRR` accepts an estimand written as a linear
-functional of an unknown regression function
+The central object in *genriesz* is a (typically) linear functional
 
-    gamma(x) = E[Y | X=x].
+    theta = E[ m(X, gamma0) ],
 
-Concretely, the solver expects a callable
+where ``gamma0(x) = E[Y | X=x]`` is the outcome regression and ``m`` is a
+user-specified linear operator acting on functions.
 
-    m(x, gamma) -> float,
+For models ``v(x) = phi(x)^T beta`` (where ``phi`` is a basis), linearity means
 
-where ``x`` is a single regressor row and ``gamma`` is a callable that maps a
-single row to a scalar.
+    m(X_i, v) = M_i^T beta
 
-Vectorized basis-matrix support
--------------------------------
-For many standard estimands, we can compute the matrix
+for some row vector ``M_i`` that depends on ``X_i`` and the basis.
 
-    M_{ij} = m(X_i, phi_j)
+This module provides built-in functionals used in the notebooks:
 
-in a vectorized way given a basis function ``phi(X)``. This avoids calling ``m``
-for every (i, j) pair and is essential for large bases (RKHS random features,
-tree-leaf bases, neural embeddings, ...).
-
-If you use one of the classes below, :class:`genriesz.GRR` automatically uses its
-vectorized :meth:`basis_matrix` implementation.
+- ATE, ATT, and DID (as ATT on delta outcomes)
+- AME (average marginal effect / average derivative)
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Callable
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
-Array = np.ndarray
-
-
-class SupportsBasisMatrix(Protocol):
-    """Protocol for functionals that support vectorized M-matrix computation."""
-
-    def __call__(self, x: Array, gamma: Callable[[Array], float]) -> float:  # pragma: no cover
-        ...
-
-    def basis_matrix(self, X: Array, basis: Callable[[Array], Array]) -> Array:  # pragma: no cover
-        ...
+from .basis import Basis
 
 
-@dataclass
-class ATEFunctional:
-    r"""Average Treatment Effect (ATE) for a binary treatment.
+def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
+    X_ = np.asarray(X, dtype=float)
+    if X_.ndim != 2:
+        raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+    return X_
 
-    Assume the regressor has the form ``X = [D, Z]``, where ``D`` is a binary
-    treatment indicator and ``Z`` are covariates.
 
-    The ATE target is
+def _toggle_treatment(
+    X: NDArray[np.float64], *, treatment_index: int, value: float
+) -> NDArray[np.float64]:
+    X_cf = X.copy()
+    X_cf[:, treatment_index] = float(value)
+    return X_cf
 
-    .. math::
 
-        \theta = \mathbb{E}\bigl[\gamma(1, Z) - \gamma(0, Z)\bigr],
+PredictFn = Callable[[NDArray[np.float64]], NDArray[np.float64]]
+DerivFn = Callable[[NDArray[np.float64], int], NDArray[np.float64]]
 
-    corresponding to the linear functional
 
-    .. math::
+@dataclass(frozen=True)
+class LinearFunctional:
+    """Base class for linear functionals used by GRR."""
 
-        m(X, \gamma) = \gamma(1, Z) - \gamma(0, Z).
+    name: str
 
-    The vectorized implementation computes
+    def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:  # pragma: no cover
+        raise NotImplementedError
 
-    ``M = basis(X1) - basis(X0)``,
+    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:  # pragma: no cover
+        raise NotImplementedError
 
-    where ``X1`` sets ``D=1`` and ``X0`` sets ``D=0``.
+    def m_from_function(
+        self,
+        X: ArrayLike,
+        *,
+        predict: PredictFn,
+        derivative: DerivFn | None = None,
+    ) -> NDArray[np.float64]:
+        """Apply the functional to a generic function.
+
+        This is mostly used for TMLE updates where we need ``m(X, alpha_hat)``.
+        """
+
+        return self.m_from_predictor(X, predict)
+
+
+@dataclass(frozen=True)
+class ATEFunctional(LinearFunctional):
+    """Average treatment effect: E[ gamma(1,Z) - gamma(0,Z) ]."""
+
+    treatment_index: int = 0
+
+    def __init__(self, treatment_index: int = 0):
+        super().__init__(name="ATE")
+        object.__setattr__(self, "treatment_index", int(treatment_index))
+
+    def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
+        return np.asarray(basis(X1) - basis(X0), dtype=float)
+
+    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
+        return np.asarray(predict(X1) - predict(X0), dtype=float).reshape(-1)
+
+
+@dataclass(frozen=True)
+class ATTFunctional(LinearFunctional):
+    """Average treatment effect on the treated.
+
+    theta = E[ Y(1) - Y(0) | D=1 ]
+          = E[ D * (gamma(1,Z) - gamma(0,Z)) ] / E[D].
+
+    We treat this as a *plug-in linear functional* given a fixed value of
+    ``pi = E[D]`` (estimated from the sample in the wrapper).
     """
 
     treatment_index: int = 0
-    treat_value_1: float = 1.0
-    treat_value_0: float = 0.0
+    pi: float = 0.5
 
-    def __call__(self, x: Array, gamma: Callable[[Array], float]) -> float:
-        x = np.asarray(x, dtype=float).reshape(-1)
-        x1 = x.copy()
-        x0 = x.copy()
-        x1[self.treatment_index] = self.treat_value_1
-        x0[self.treatment_index] = self.treat_value_0
-        return float(gamma(x1) - gamma(x0))
-
-    def basis_matrix(self, X: Array, basis: Callable[[Array], Array]) -> Array:
-        X2 = np.asarray(X, dtype=float)
-        if X2.ndim != 2:
-            raise ValueError("X must be 2D.")
-        X1 = X2.copy()
-        X0 = X2.copy()
-        X1[:, self.treatment_index] = self.treat_value_1
-        X0[:, self.treatment_index] = self.treat_value_0
-        return np.asarray(basis(X1), dtype=float) - np.asarray(basis(X0), dtype=float)
-
-
-@dataclass
-class ATTFunctional:
-    r"""Average Treatment Effect on the Treated (ATT) for a binary treatment.
-
-    Assume the regressor has the form ``X = [D, Z]``, where ``D`` is a binary
-    treatment indicator.
-
-    Let :math:`\pi = \mathbb{P}(D=1)`. The ATT target can be written as
-
-    .. math::
-
-        \theta = \mathbb{E}\bigl[\gamma(1,Z) - \gamma(0,Z) \mid D=1\bigr]
-        = \frac{1}{\pi} \mathbb{E}\bigl[D\,(\gamma(1,Z) - \gamma(0,Z))\bigr].
-
-    This corresponds to the linear functional
-
-    .. math::
-
-        m(X, \gamma) = \frac{D}{\pi}\bigl(\gamma(1,Z) - \gamma(0,Z)\bigr).
-
-    Notes
-    -----
-    In finite samples, a plug-in estimate of :math:`\pi` is often used. The
-    high-level wrapper :func:`genriesz.grr_att` sets ``pi`` to the sample mean
-    of ``D`` (or of ``D == treat_value_1``).
-    """
-
-    treatment_index: int = 0
-    treat_value_1: float = 1.0
-    treat_value_0: float = 0.0
-    pi: float | None = None
-
-    def _check_pi(self) -> float:
-        if self.pi is None:
-            raise ValueError(
-                "ATTFunctional requires 'pi' to be set (pi = P[D=1]). "
-                "Use genriesz.grr_att(...) or set pi explicitly."
-            )
-        pi = float(self.pi)
+    def __init__(self, *, treatment_index: int = 0, pi: float):
         if not np.isfinite(pi) or pi <= 0.0:
-            raise ValueError(f"ATTFunctional requires pi > 0 and finite. Got pi={self.pi}.")
-        return pi
+            raise ValueError("pi must be positive")
+        super().__init__(name="ATT")
+        object.__setattr__(self, "treatment_index", int(treatment_index))
+        object.__setattr__(self, "pi", float(pi))
 
-    def __call__(self, x: Array, gamma: Callable[[Array], float]) -> float:
-        pi = self._check_pi()
-        x = np.asarray(x, dtype=float).reshape(-1)
-        d = float(x[self.treatment_index])
-        x1 = x.copy()
-        x0 = x.copy()
-        x1[self.treatment_index] = self.treat_value_1
-        x0[self.treatment_index] = self.treat_value_0
-        return float((d / pi) * (gamma(x1) - gamma(x0)))
+    def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        D = X_[:, self.treatment_index].reshape(-1, 1)
+        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
+        return (D / self.pi) * (basis(X1) - basis(X0))
 
-    def basis_matrix(self, X: Array, basis: Callable[[Array], Array]) -> Array:
-        pi = self._check_pi()
-        X2 = np.asarray(X, dtype=float)
-        if X2.ndim != 2:
-            raise ValueError("X must be 2D.")
-        d = X2[:, self.treatment_index].astype(float)
-        X1 = X2.copy()
-        X0 = X2.copy()
-        X1[:, self.treatment_index] = self.treat_value_1
-        X0[:, self.treatment_index] = self.treat_value_0
-        M = np.asarray(basis(X1), dtype=float) - np.asarray(basis(X0), dtype=float)
-        return (d[:, None] / float(pi)) * M
+    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        D = X_[:, self.treatment_index].reshape(-1)
+        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
+        return (D / self.pi) * (predict(X1) - predict(X0))
 
 
-@dataclass
-class AverageDerivativeFunctional:
-    r"""Average derivative (average marginal effect) with respect to one coordinate.
-
-    Given a target
-
-    .. math::
-
-        \theta = \mathbb{E}\left[\frac{\partial}{\partial x_k}\gamma(X)\right],
-
-    the linear functional is
-
-    .. math::
-
-        m(X, \gamma) = \frac{\partial}{\partial x_k}\gamma(X).
-
-    This implementation uses a symmetric finite difference with step ``eps``.
-    """
+@dataclass(frozen=True)
+class AMEFunctional(LinearFunctional):
+    """Average marginal effect (average derivative) of gamma wrt x_k."""
 
     coordinate: int = 0
-    eps: float = 1e-4
 
-    def __call__(self, x: Array, gamma: Callable[[Array], float]) -> float:
-        x = np.asarray(x, dtype=float).reshape(-1)
-        xp = x.copy()
-        xm = x.copy()
-        xp[self.coordinate] += self.eps
-        xm[self.coordinate] -= self.eps
-        return float((gamma(xp) - gamma(xm)) / (2.0 * self.eps))
+    def __init__(self, coordinate: int = 0):
+        super().__init__(name=f"AME(coord={int(coordinate)})")
+        object.__setattr__(self, "coordinate", int(coordinate))
 
-    def basis_matrix(self, X: Array, basis: Callable[[Array], Array]) -> Array:
-        X2 = np.asarray(X, dtype=float)
-        if X2.ndim != 2:
-            raise ValueError("X must be 2D.")
+    def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        return np.asarray(basis.derivative(X, self.coordinate), dtype=float)
 
-        Xp = X2.copy()
-        Xm = X2.copy()
-        Xp[:, self.coordinate] += self.eps
-        Xm[:, self.coordinate] -= self.eps
-        return (np.asarray(basis(Xp), dtype=float) - np.asarray(basis(Xm), dtype=float)) / (
-            2.0 * self.eps
+    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
+        raise NotImplementedError(
+            "AME requires a derivative-capable predictor; use m_from_function(..., derivative=...)"
         )
+
+    def m_from_function(
+        self,
+        X: ArrayLike,
+        *,
+        predict: PredictFn,
+        derivative: DerivFn | None = None,
+    ) -> NDArray[np.float64]:
+        if derivative is None:
+            raise ValueError("AME requires derivative()")
+        return np.asarray(derivative(_as_2d(X), self.coordinate), dtype=float).reshape(-1)
+
+
+@dataclass(frozen=True)
+class DIDFunctional(ATTFunctional):
+    """Difference-in-differences as ATT on delta outcomes.
+
+    In the notebooks we treat DID as an ATT estimand on the panel difference
+
+        ΔY = Y_post - Y_pre.
+
+    The functional form is identical to ATT (with the same ``pi``), but we keep
+    a separate name for clarity.
+    """
+
+    def __init__(self, *, treatment_index: int = 0, pi: float):
+        super().__init__(treatment_index=treatment_index, pi=pi)
+        object.__setattr__(self, "name", "DID")

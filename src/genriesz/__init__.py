@@ -1,89 +1,75 @@
-"""genriesz: Generalized Riesz Regression under Bregman divergences.
+"""genriesz
 
-This package provides:
+Generalized Riesz Regression (GRR) and applications to causal inference.
 
-- A general GLM-style GRR solver (:class:`genriesz.GRR`) with **automatic regressor
-  balancing (ARB)** via Bregman-generator-induced link functions.
-- A high-level functional estimation interface (:func:`genriesz.grr_functional`)
-  that can report RA/RW/ARW/TMLE estimates with cross-fitting, confidence intervals,
-  and p-values.
-- Basis functions (polynomial, RKHS-style random features, Nyström, kNN catchment
-  areas, random forest leaves, neural embeddings, ...).
-- Common causal estimands (ATE, ATT, panel DID, AME).
+The package provides:
 
-See the README and the documentation for end-to-end examples.
+- General-purpose estimation of linear functionals via :func:`genriesz.grr_functional`.
+- Convenience wrappers for common causal estimands: ATE / ATT / DID / AME.
+- Built-in Bregman generators (SQ / UKL / BP) that induce **Automatic Regressor Balancing (ARB)**
+  when paired with the canonical link.
+- A small basis/feature-map library, including polynomial features and optional
+  random Fourier features / tree leaves / neural embeddings.
+
+Public API is re-exported here for convenience.
 """
 
-from .grr import ARBLink, GRR, GRRGLM, run_grr_glm_arb
-from .estimate_functional import (
-    FunctionalEstimateResult,
-    LinearOutcomeModel,
-    grr_ame,
-    grr_ate,
-    grr_att,
-    grr_did,
-    grr_functional,
-)
-from .bregman import (
-    BregmanGenerator,
-    BPGenerator,
-    BKLGenerator,
-    SquaredGenerator,
-    UKLGenerator,
-)
-from .basis import (
-    PolynomialBasis,
-    RBFRandomFourierBasis,
-    RBFNystromBasis,
-    GaussianRKHSBasis,
-    TreatmentInteractionBasis,
-)
-from .density_ratio import DensityRatioResult, grr_density_ratio
-from .knn_basis import KNNCatchmentBasis
-from .nnlsif import LocalPolynomialNNLSIF, local_polynomial_nnlsif_weights, nn_matching_weights
-from .functionals import (
-    ATEFunctional,
-    ATTFunctional,
-    AverageDerivativeFunctional,
+from __future__ import annotations
+
+__version__ = "0.2.0"
+
+# High-level estimation
+from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
+
+# Functionals
+from .functionals import AMEFunctional, ATEFunctional, ATTFunctional, DIDFunctional, LinearFunctional
+
+# Bases
+from .basis import BaseBasis, KNNCatchmentBasis, PolynomialBasis, RBFRandomFourierBasis, TreatmentInteractionBasis
+
+# Generators
+from .generators import BPGenerator, BregmanGenerator, SquaredGenerator, UKLGenerator
+
+# Matching (NN / local polynomial NN-LSIF)
+from .matching import (
+    local_polynomial_nn_lsif_density_ratio,
+    local_polynomial_nn_lsif_inverse_propensity_weights,
+    nn_matching_inverse_propensity_weights,
 )
 
+# Results
+from .results import FunctionalEstimate, SingleEstimate
+
 __all__ = [
-    # Core GRR
-    "GRR",
-    "GRRGLM",
-    "ARBLink",
-    "run_grr_glm_arb",
-    # Functional estimation API
+    "__version__",
+    # Estimation
     "grr_functional",
     "grr_ate",
     "grr_att",
     "grr_did",
     "grr_ame",
-    "grr_density_ratio",
-    "DensityRatioResult",
-    "FunctionalEstimateResult",
-    "LinearOutcomeModel",
+    # Functionals
+    "LinearFunctional",
+    "ATEFunctional",
+    "ATTFunctional",
+    "DIDFunctional",
+    "AMEFunctional",
+    # Bases
+    "BaseBasis",
+    "PolynomialBasis",
+    "TreatmentInteractionBasis",
+    "RBFRandomFourierBasis",
+    "KNNCatchmentBasis",
     # Generators
     "BregmanGenerator",
     "SquaredGenerator",
     "UKLGenerator",
-    "BKLGenerator",
     "BPGenerator",
-    # Bases
-    "PolynomialBasis",
-    "RBFRandomFourierBasis",
-    "RBFNystromBasis",
-    "GaussianRKHSBasis",
-    "TreatmentInteractionBasis",
-    "KNNCatchmentBasis",
-    # Matching / NN-LSIF utilities
-    "nn_matching_weights",
-    "LocalPolynomialNNLSIF",
-    "local_polynomial_nnlsif_weights",
-    # Common functionals
-    "ATEFunctional",
-    "ATTFunctional",
-    "AverageDerivativeFunctional",
+    # Matching
+    "nn_matching_inverse_propensity_weights",
+    "local_polynomial_nn_lsif_density_ratio",
+    "local_polynomial_nn_lsif_inverse_propensity_weights",
+    # Results
+    "FunctionalEstimate",
+    "SingleEstimate",
 ]
-
-__version__ = "0.2.6"
