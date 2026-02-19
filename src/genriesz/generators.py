@@ -23,7 +23,9 @@ This module provides:
 - Built-in generator families:
   - :class:`SquaredGenerator` ("SQ")
   - :class:`UKLGenerator` ("UKL")
+  - :class:`BKLGenerator` ("BKL")
   - :class:`BPGenerator` ("BP")
+  - :class:`PUGenerator` ("PU")
 
 - A flexible :class:`BregmanGenerator` that lets users specify an arbitrary
   generator ``g`` and (optionally) its derivatives. If derivatives are omitted,
@@ -419,17 +421,21 @@ class BPGenerator(BregmanGenerator):
     A smooth family interpolating between UKL-like (small power) and squared-like
     (power near 1) behavior.
 
-    We use the parametrization:
+    We use the parametrization, for ``t = |alpha| - C``,
 
-        g(alpha) = (|alpha|-C)^{1+omega} - (|alpha|-C)^omega - |alpha|,
+        g(alpha) = ( t^{1+omega} - (1+omega) t ) / omega,
 
-    with domain |alpha| > C and omega > 0.
+    with domain ``|alpha| > C`` and ``omega > 0``.
 
-    The inverse gradient (branch-wise) is:
+    The derivative is
 
-        k = 1 + 1/omega
-        t = 1 + sign * v / k   (must be > 0)
-        alpha = sign * ( C + t^{1/omega} ).
+        g'(alpha) = sign(alpha) * (1+omega)/omega * ( t^omega - 1 ),
+
+    so the inverse gradient (branch-wise) can be written as
+
+        k = (1+omega)/omega
+        u = 1 + sign * v / k   (must be > 0)
+        alpha = sign * ( C + u^{1/omega} ).
 
     As with UKL, ``branch_fn`` can be supplied to select the sign.
     """
@@ -474,7 +480,15 @@ class BPGenerator(BregmanGenerator):
         a = _as_1d(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
-        return np.power(t, 1.0 + self.omega) - np.power(t, self.omega) - np.abs(a)
+        return (np.power(t, 1.0 + self.omega) - (1.0 + self.omega) * t) / self.omega
+
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t = np.abs(a) - self.C
+        t = np.maximum(t, 1e-12)
+        k = 1.0 + 1.0 / self.omega
+        return np.sign(a) * k * (np.power(t, self.omega) - 1.0)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
@@ -483,3 +497,134 @@ class BPGenerator(BregmanGenerator):
         t = np.maximum(t, 1e-12)
         k = 1.0 + 1.0 / self.omega
         return k * self.omega * np.power(t, self.omega - 1.0)
+
+
+
+class BKLGenerator(BregmanGenerator):
+    """Binary KL generator (BKL-Riesz).
+
+    The generator is
+
+        g(alpha) = (|alpha| - C) log(|alpha| - C) - (|alpha| + C) log(|alpha| + C),
+
+    with domain ``|alpha| > C`` and ``C > 0``.
+
+    Its derivative is
+
+        g'(alpha) = sign(alpha) * log( (|alpha|-C) / (|alpha|+C) ).
+
+    The inverse gradient is branch-wise. Let ``s`` be the desired sign branch
+    (+1 or -1) and let ``u = s * v``. Since the log-ratio is always negative,
+    the theoretical domain is ``u < 0``. In finite samples (and especially
+    out-of-sample, e.g. under cross-fitting), ``u`` may violate this.
+    Instead of raising an exception, we **clip** ``u`` to a small negative
+    value to keep the link well-defined.
+
+    If ``branch_fn`` is provided, it selects the sign branch.
+    """
+
+    def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
+        if float(C) <= 0:
+            raise ValueError("C must be > 0 for BKLGenerator")
+        super().__init__(name="BKL", C=float(C), branch_fn=branch_fn)
+
+    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+
+        # For BKL, the positive branch corresponds to v <= 0.
+        if self.branch_fn is None:
+            s = np.where(v_ <= 0.0, 1.0, -1.0)
+        else:
+            s = self._sign(X_, v_)
+
+        # Enforce u = s*v < 0.
+        u = s * v_
+        u = np.clip(u, -700.0, -1e-8)
+
+        t = np.exp(u)  # in (0, 1)
+        denom = 1.0 - t
+        denom = np.maximum(denom, 1e-12)
+        a = self.C * (1.0 + t) / denom
+        return s * a
+
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t1 = np.abs(a) - self.C
+        t2 = np.abs(a) + self.C
+        t1 = np.maximum(t1, 1e-12)
+        t2 = np.maximum(t2, 1e-12)
+        return t1 * np.log(t1) - t2 * np.log(t2)
+
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t1 = np.abs(a) - self.C
+        t2 = np.abs(a) + self.C
+        t1 = np.maximum(t1, 1e-12)
+        t2 = np.maximum(t2, 1e-12)
+        return np.sign(a) * (np.log(t1) - np.log(t2))
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        abs_a = np.abs(a)
+        denom = abs_a * abs_a - self.C * self.C
+        denom = np.maximum(denom, 1e-12)
+        return (2.0 * self.C) / denom
+
+
+class PUGenerator(BregmanGenerator):
+    """PU generator (PU-Riesz).
+
+    This generator is based on the binary-entropy potential
+
+        g(alpha) = C * [ |alpha| log|alpha| + (1-|alpha|) log(1-|alpha|) ],
+
+    with domain ``|alpha| in (0, 1)`` and ``C > 0``.
+
+    The derivative is
+
+        g'(alpha) = sign(alpha) * C * log( |alpha| / (1-|alpha|) ).
+
+    The inverse gradient is a (scaled) logistic map.
+
+    Notes
+    -----
+    This generator is primarily useful when you want the representer to be
+    bounded (in absolute value) by 1.
+    """
+
+    def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
+        if float(C) <= 0:
+            raise ValueError("C must be > 0 for PUGenerator")
+        super().__init__(name="PU", C=float(C), branch_fn=branch_fn)
+
+    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+
+        z = np.clip(s * v_ / self.C, -700.0, 700.0)
+        a = 1.0 / (1.0 + np.exp(-z))
+        a = np.clip(a, 1e-10, 1.0 - 1e-10)
+        return s * a
+
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
+        return self.C * (t * np.log(t) + (1.0 - t) * np.log(1.0 - t))
+
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
+        return np.sign(a) * self.C * (np.log(t) - np.log(1.0 - t))
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
+        return self.C / (t * (1.0 - t))

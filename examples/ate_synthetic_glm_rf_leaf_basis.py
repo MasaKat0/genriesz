@@ -4,29 +4,33 @@ Run:
 
     python examples/ate_synthetic_glm_rf_leaf_basis.py
 
-This example illustrates how to use a tree-based basis with the *GLM-style*
-GRR solver (:class:`genriesz.glm.GRR`).
+This example illustrates how to use a tree-based basis with the high-level
+:func:`genriesz.grr_ate` interface.
 
 We:
 
 1) fit a random forest to predict D from Z,
 2) map each sample to its leaf index in each tree,
 3) one-hot encode those indices to obtain psi(Z),
-4) form phi(W) = [1, D, psi(Z), D*psi(Z)] via TreatmentInteractionBasis,
-5) run GRR with an automatically constructed link from a Bregman generator.
+4) form phi(X) = [D*psi(Z), (1-D)*psi(Z)] via TreatmentInteractionBasis,
+5) run generalized Riesz regression with an automatically constructed link from
+   a Bregman generator.
 
 This keeps the GRR optimization convex in beta while still using a flexible
 nonparametric representation.
 
-Requires:
-    pip install genriesz[sklearn]
+Notes
+-----
+This example relies on scikit-learn. Install the optional extra:
+
+    pip install "genriesz[sklearn]"
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from genriesz import ATEFunctional, GRR, TreatmentInteractionBasis, UKLGenerator
+from genriesz import TreatmentInteractionBasis, UKLGenerator, grr_ate
 from genriesz.sklearn_basis import RandomForestLeafBasis
 
 
@@ -63,16 +67,26 @@ def main() -> None:
     psi.fit(Z, D)
 
     phi = TreatmentInteractionBasis(base_basis=psi)
-    m = ATEFunctional(treatment_index=0)
-    gen = UKLGenerator(C=1.0, branch_fn=lambda w: int(w[0] == 1)).as_generator()
+    gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1)).as_generator()
 
-    est = GRR(basis=phi, m=m, generator=gen, penalty="l2", lam=1e-3)
-    est.fit(X, max_iter=400, tol=1e-9)
-
-    ate_hat = est.estimate_linear_functional(Y, X)
+    res = grr_ate(
+        X=X,
+        Y=Y,
+        basis=phi,
+        generator=gen,
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("ra", "rw", "arw", "tmle"),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=400,
+        tol=1e-9,
+    )
 
     print("True ATE (by construction):", tau)
-    print("Estimated ATE:", float(ate_hat))
+    print(res.summary_text())
 
 
 if __name__ == "__main__":

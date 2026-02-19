@@ -37,6 +37,7 @@ except Exception:  # pragma: no cover
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "sphinx.ext.mathjax",
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx_autodoc_typehints",
@@ -71,7 +72,3 @@ html_static_path = ["_static"]
 # Misc
 # ---------------------------------------------------------------------------
 nitpicky = False
-
-rst_prolog = r"""
-.. |alpha| replace:: :math:`\alpha`
-"""

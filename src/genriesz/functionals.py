@@ -49,6 +49,14 @@ PredictFn = Callable[[NDArray[np.float64]], NDArray[np.float64]]
 DerivFn = Callable[[NDArray[np.float64], int], NDArray[np.float64]]
 
 
+# A scalar-valued function on a single regressor row.
+GammaFn = Callable[[NDArray[np.float64]], float]
+
+
+def _as_1d_row(x: ArrayLike) -> NDArray[np.float64]:
+    return np.asarray(x, dtype=float).reshape(-1)
+
+
 @dataclass(frozen=True)
 class LinearFunctional:
     """Base class for linear functionals used by GRR."""
@@ -74,6 +82,77 @@ class LinearFunctional:
         """
 
         return self.m_from_predictor(X, predict)
+
+
+class CallableFunctional(LinearFunctional):
+    """Wrap a Python callable ``m(x, gamma)`` as a :class:`LinearFunctional`.
+
+    This adapter is meant for quick experiments and README-style usage.
+    The callable must implement a **linear** map in ``gamma``.
+
+    Parameters
+    ----------
+    m:
+        A callable of the form ``m(x_row, gamma) -> float`` where:
+
+        - ``x_row`` is a 1D regressor vector,
+        - ``gamma`` is a callable that maps a 1D regressor vector to a scalar.
+
+        The callable is assumed to be linear in the function argument ``gamma``.
+        If it is not, the GRR objective will generally be invalid.
+    name:
+        Name used in results.
+
+    Notes
+    -----
+    To solve GRR in a finite-dimensional model ``alpha(x)=phi(x)^T beta``, the solver
+    needs the matrix ``M`` such that ``m(X_i, phi(\\cdot)^T beta)=M_i^T beta``.
+    For a callable functional we construct ``M`` by repeatedly applying ``m`` to each
+    basis coordinate function.
+
+    This is flexible but can be slower than implementing a dedicated
+    :class:`~genriesz.functionals.LinearFunctional`.
+    """
+
+    m: Callable[[NDArray[np.float64], GammaFn], float]
+
+    def __init__(self, m: Callable[[NDArray[np.float64], GammaFn], float], *, name: str = "custom"):
+        super().__init__(name=str(name))
+        object.__setattr__(self, "m", m)
+
+    def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        n = X_.shape[0]
+
+        # Determine the basis dimension without touching unfitted properties.
+        Phi0 = np.asarray(basis(X_[:1]), dtype=float)
+        p = int(Phi0.shape[0] if Phi0.ndim == 1 else Phi0.shape[1])
+
+        M = np.empty((n, p), dtype=float)
+
+        # Build M_{i,j} = m(X_i, phi_j) by applying `m` to each basis coordinate.
+        for j in range(p):
+            def phi_j(x_row: NDArray[np.float64], *, _j: int = j) -> float:
+                x1 = _as_1d_row(x_row)
+                Phi = np.asarray(basis(x1.reshape(1, -1)), dtype=float)
+                return float(Phi[_j] if Phi.ndim == 1 else Phi[0, _j])
+
+            for i in range(n):
+                M[i, j] = float(self.m(_as_1d_row(X_[i]), phi_j))
+
+        return M
+
+    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        out = np.empty(X_.shape[0], dtype=float)
+
+        def gamma(x_row: NDArray[np.float64]) -> float:
+            x1 = _as_1d_row(x_row)
+            return float(np.asarray(predict(x1.reshape(1, -1)), dtype=float).reshape(-1)[0])
+
+        for i in range(X_.shape[0]):
+            out[i] = float(self.m(_as_1d_row(X_[i]), gamma))
+        return out
 
 
 @dataclass(frozen=True)

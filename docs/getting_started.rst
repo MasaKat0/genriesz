@@ -21,13 +21,16 @@ Optional extras:
 
 .. code-block:: bash
 
+   # scikit-learn integrations (tree-based feature maps)
+   pip install "genriesz[sklearn]"
+
    # PyTorch integration (neural network feature maps)
    pip install "genriesz[torch]"
 
 Notes
 -----
 
-- scikit-learn is installed as a default dependency (used by several bases).
+- scikit-learn is optional and only required for ``genriesz.sklearn_basis``.
 - PyTorch is optional and only required for ``genriesz.torch_basis``.
 
 

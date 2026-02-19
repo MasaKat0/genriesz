@@ -9,7 +9,7 @@ automatic link construction) while still using a neural network:
 
 1) Train an embedding network psi(Z) on an auxiliary task (here: predict D).
 2) Freeze psi.
-3) Use psi(Z) as the basis inside :class:`genriesz.glm.GRR`.
+3) Use psi(Z) as the basis inside the high-level :func:`genriesz.grr_ate` API.
 
 This keeps the GRR optimization convex in beta and preserves the ARB structure
 for the fixed features.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from genriesz import ATEFunctional, GRR, TreatmentInteractionBasis, UKLGenerator
+from genriesz import TreatmentInteractionBasis, UKLGenerator, grr_ate
 from genriesz.torch_basis import MLPEmbeddingNet, TorchEmbeddingBasis
 
 
@@ -52,7 +52,7 @@ def train_embedding_on_treatment(Z: np.ndarray, D: np.ndarray, *, seed: int = 0)
     torch.manual_seed(seed)
 
     n, d = Z.shape
-    embed = MLPEmbeddingNet(input_dim=d, hidden_dim=64, output_dim=32)
+    embed = MLPEmbeddingNet(input_dim=d, hidden_dims=(64,), output_dim=32)
     head = nn.Linear(32, 1)
     model = nn.Sequential(embed, head)
 
@@ -88,22 +88,30 @@ def main() -> None:
     # 2) Wrap as a NumPy-returning basis
     psi = TorchEmbeddingBasis(embed, device="cpu")
 
-    # 3) Add treatment interactions so phi(W) is a basis on W=[D,Z]
+    # 3) Add treatment interactions so phi(X) is a basis on X=[D,Z]
     phi = TreatmentInteractionBasis(base_basis=psi)
 
-    # ATE functional (vectorized)
-    m = ATEFunctional(treatment_index=0)
-
     # UKL generator (automatic link)
-    gen = UKLGenerator(C=1.0, branch_fn=lambda w: int(w[0] == 1)).as_generator()
+    gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1)).as_generator()
 
-    est = GRR(basis=phi, m=m, generator=gen, penalty="l2", lam=1e-3)
-    est.fit(X, max_iter=400, tol=1e-9)
-
-    ate_hat = est.estimate_linear_functional(Y, X)
+    res = grr_ate(
+        X=X,
+        Y=Y,
+        basis=phi,
+        generator=gen,
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("ra", "rw", "arw", "tmle"),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=400,
+        tol=1e-9,
+    )
 
     print("True ATE (by construction):", tau)
-    print("Estimated ATE:", float(ate_hat))
+    print(res.summary_text())
 
 
 if __name__ == "__main__":

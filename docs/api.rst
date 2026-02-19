@@ -15,7 +15,7 @@ High-level estimation
 Density ratio / covariate shift
 -------------------------------
 
-.. autofunction:: genriesz.grr_density_ratio
+.. autofunction:: genriesz.fit_density_ratio
 
 .. autoclass:: genriesz.DensityRatioResult
    :members:
@@ -24,6 +24,9 @@ Functionals
 -----------
 
 .. autoclass:: genriesz.LinearFunctional
+   :members:
+
+.. autoclass:: genriesz.CallableFunctional
    :members:
 
 .. autoclass:: genriesz.ATEFunctional
@@ -74,7 +77,13 @@ Generators
 .. autoclass:: genriesz.UKLGenerator
    :members:
 
+.. autoclass:: genriesz.BKLGenerator
+   :members:
+
 .. autoclass:: genriesz.BPGenerator
+   :members:
+
+.. autoclass:: genriesz.PUGenerator
    :members:
 
 Matching helpers

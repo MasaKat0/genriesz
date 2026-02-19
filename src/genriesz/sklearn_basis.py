@@ -1,16 +1,13 @@
-"""Optional scikit-learn based bases.
+"""scikit-learn based bases.
 
-The core *genriesz* package does not require scikit-learn for the GRR solvers,
-but many users will want to use tree-based feature maps.
-
-This module provides wrappers that turn fitted scikit-learn models into linear
+*genriesz* optionally integrates with scikit-learn. This module
+provides additional wrappers that turn fitted scikit-learn models into linear
 feature maps usable by GRR.
 
 Notes
 -----
-This file is imported only when you explicitly use it. The main package
-installation depends on scikit-learn, but keeping this module separate keeps
-optional integrations organized.
+This file is imported only when you explicitly use it. Keeping these wrappers
+in a separate module makes the optional integrations easy to discover.
 """
 
 from __future__ import annotations

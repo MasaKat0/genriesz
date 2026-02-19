@@ -5,7 +5,7 @@ Run:
     python examples/ate_synthetic_glm_rkhs_rff.py
 
 This script uses :class:`genriesz.basis.RBFRandomFourierBasis` to approximate an RBF
-kernel (an RKHS basis) and then fits :class:`genriesz.genriesz.GRR`.
+kernel (an RKHS-style basis) and then estimates the ATE via :func:`genriesz.grr_ate`.
 
 The link function is *not* hand-coded; it is induced automatically by the chosen
 Bregman generator via its inverse derivative.
@@ -15,13 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from genriesz import (
-    ATEFunctional,
-    GRR,
-    RBFRandomFourierBasis,
-    TreatmentInteractionBasis,
-    UKLGenerator,
-)
+from genriesz import RBFRandomFourierBasis, TreatmentInteractionBasis, UKLGenerator, grr_ate
 
 
 def make_synthetic_data(n: int = 2500, d: int = 5, seed: int = 0):
@@ -49,21 +43,27 @@ def main() -> None:
     psi = RBFRandomFourierBasis(n_features=300, sigma=1.0, standardize=True, random_state=0)
     phi = TreatmentInteractionBasis(base_basis=psi)
 
-    # --- Linear functional: ATE (vectorized) ---
-    m = ATEFunctional(treatment_index=0)
-
     # --- Generator: UKL (automatic link) ---
     gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1)).as_generator()
 
-    est = GRR(basis=phi, m=m, generator=gen, penalty="l2", lam=1e-3)
-    est.fit(X, max_iter=300, tol=1e-9)
-
-    ate_hat = est.estimate_linear_functional(Y, X)
-    resid = est.regressor_balance_residual()
+    res = grr_ate(
+        X=X,
+        Y=Y,
+        basis=phi,
+        generator=gen,
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("ra", "rw", "arw", "tmle"),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=300,
+        tol=1e-9,
+    )
 
     print("True ATE (by construction):", tau)
-    print("Estimated ATE:", float(ate_hat))
-    print("Balance residual: mean(|resid|) =", float(np.mean(np.abs(resid))))
+    print(res.summary_text())
 
 
 if __name__ == "__main__":

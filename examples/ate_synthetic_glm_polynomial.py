@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from genriesz import GRR, ATEFunctional, PolynomialBasis, TreatmentInteractionBasis, UKLGenerator
+from genriesz import PolynomialBasis, TreatmentInteractionBasis, UKLGenerator, grr_ate
 
 
 def make_synthetic_data(n: int = 3000, d: int = 3, seed: int = 0):
@@ -40,21 +40,27 @@ def main() -> None:
     psi = PolynomialBasis(degree=2, include_bias=False)
     phi = TreatmentInteractionBasis(base_basis=psi)
 
-    # --- Linear functional: ATE ---
-    m = ATEFunctional(treatment_index=0)
-
     # --- Generator: UKL (automatic link via inverse derivative) ---
     gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1)).as_generator()
 
-    est = GRR(basis=phi, m=m, generator=gen, penalty="l2", lam=1e-3)
-    est.fit(X, max_iter=500, tol=1e-10)
-
-    ate_hat = est.estimate_linear_functional(Y, X)
-    resid = est.regressor_balance_residual()
+    res = grr_ate(
+        X=X,
+        Y=Y,
+        basis=phi,
+        generator=gen,
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("ra", "rw", "arw", "tmle"),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=500,
+        tol=1e-10,
+    )
 
     print("True ATE (by construction):", tau)
-    print("Estimated ATE:", float(ate_hat))
-    print("Balance residual: mean(|resid|) =", float(np.mean(np.abs(resid))))
+    print(res.summary_text())
 
 
 if __name__ == "__main__":

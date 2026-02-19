@@ -161,8 +161,10 @@ class CallableBasis(BaseBasis):
 class PolynomialBasis(BaseBasis):
     """Full polynomial features up to a given total degree.
 
-    This is a small wrapper around ``sklearn.preprocessing.PolynomialFeatures``
-    because it provides a convenient and deterministic enumeration of monomials.
+    This class intentionally implements polynomial features without relying on
+    scikit-learn so that the *core* package can depend only on NumPy and SciPy.
+    The enumeration of monomials is deterministic and ordered by total degree,
+    then lexicographic within each total degree.
 
     Derivatives are implemented analytically via the monomial exponent table.
     """
@@ -173,23 +175,36 @@ class PolynomialBasis(BaseBasis):
         self.degree = int(degree)
         self.include_bias = bool(include_bias)
 
-        self._poly = None
         self._powers: NDArray[np.int64] | None = None
+        self._n_input_features: int | None = None
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "PolynomialBasis":
-        import sklearn.preprocessing
-
         X2, _ = _as_2d_allow_1d(X)
 
-        poly = sklearn.preprocessing.PolynomialFeatures(
-            degree=self.degree,
-            include_bias=self.include_bias,
-            interaction_only=False,
-            order="C",
-        )
-        poly.fit(X2)
-        self._poly = poly
-        self._powers = np.asarray(poly.powers_, dtype=int)
+        d = int(X2.shape[1])
+        self._n_input_features = d
+
+        # Enumerate multi-indices u in Z^d_{>=0} with |u|<=degree.
+        # Ordering: total degree, then lexicographic.
+        powers: list[list[int]] = []
+
+        def rec(pos: int, remaining: int, cur: list[int]) -> None:
+            if pos == d:
+                powers.append(cur.copy())
+                return
+            for e in range(remaining + 1):
+                cur[pos] = e
+                rec(pos + 1, remaining - e, cur)
+
+        cur = [0] * d
+        for total in range(self.degree + 1):
+            rec(0, total, cur)
+
+        P = np.asarray(powers, dtype=int)
+        if not self.include_bias:
+            # Drop the intercept term u=(0,...,0), which is first by construction.
+            P = P[1:, :]
+        self._powers = P
         return self
 
     @property
@@ -200,18 +215,33 @@ class PolynomialBasis(BaseBasis):
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
-        if self._poly is None:
+        if self._powers is None or self._n_input_features is None:
             # Allow stateless usage by fitting on the fly.
             self.fit(X2)
-        out = np.asarray(self._poly.transform(X2), dtype=float)
-        return out[0] if single else out
+        if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
+            raise ValueError("PolynomialBasis received X with a different number of columns than at fit time")
+
+        powers = self._powers
+        n, d = X2.shape
+        p = int(powers.shape[0])
+
+        Phi = np.ones((n, p), dtype=float)
+        for k in range(d):
+            pk = powers[:, k]
+            if np.all(pk == 0):
+                continue
+            Phi *= np.power(X2[:, [k]], pk.reshape(1, -1))
+
+        return Phi[0] if single else Phi
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
         """Derivative of the feature map wrt ``X[:, coordinate]``."""
 
         X2, single = _as_2d_allow_1d(X)
-        if self._poly is None or self._powers is None:
+        if self._powers is None or self._n_input_features is None:
             self.fit(X2)
+        if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
+            raise ValueError("PolynomialBasis received X with a different number of columns than at fit time")
 
         n, d = X2.shape
         coordinate = int(coordinate)
@@ -222,7 +252,7 @@ class PolynomialBasis(BaseBasis):
         p = powers.shape[0]
         pk = powers[:, coordinate].astype(int)  # (p,)
 
-        Phi = np.asarray(self._poly.transform(X2), dtype=float)  # (n, p)
+        Phi = np.asarray(self.__call__(X2), dtype=float)  # (n, p)
 
         # Default formula: d/dx_k prod x^p = p_k * prod x^p / x_k.
         xk = X2[:, coordinate].reshape(n, 1)
@@ -651,7 +681,7 @@ class KNNCatchmentBasis(BaseBasis):
         self._nn = None
 
     def fit(self, centers: ArrayLike, y: ArrayLike | None = None) -> "KNNCatchmentBasis":
-        import sklearn.neighbors
+        from scipy.spatial import cKDTree
 
         C = np.asarray(centers, dtype=float)
         if C.ndim != 2:
@@ -667,13 +697,12 @@ class KNNCatchmentBasis(BaseBasis):
 
         C_std = (C - mean) / std
 
-        nn = sklearn.neighbors.NearestNeighbors(n_neighbors=self.n_neighbors, algorithm="auto")
-        nn.fit(C_std)
+        tree = cKDTree(C_std)
 
         self._centers = C
         self._mean = mean
         self._std = std
-        self._nn = nn
+        self._nn = tree
         return self
 
     @property
@@ -690,7 +719,12 @@ class KNNCatchmentBasis(BaseBasis):
         Q2, single = _as_2d_allow_1d(X)
 
         Q_std = (Q2 - self._mean) / self._std
-        _, ind = self._nn.kneighbors(Q_std, return_distance=True)
+
+        # cKDTree.query returns shape (n,) when k=1 and (n,k) when k>1.
+        _, ind = self._nn.query(Q_std, k=self.n_neighbors)
+        ind = np.asarray(ind)
+        if ind.ndim == 1:
+            ind = ind.reshape(-1, 1)
 
         n = len(Q2)
         m = int(self._centers.shape[0])

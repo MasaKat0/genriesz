@@ -29,10 +29,13 @@ classifiers = [
 dependencies = [
   "numpy>=1.23",
   "scipy>=1.10",
-  "scikit-learn>=1.2",
 ]
 
 [project.optional-dependencies]
+sklearn = [
+  "scikit-learn>=1.2",
+]
+
 data = [
   "pandas>=2.0",
   "pyarrow>=12.0",
@@ -52,15 +55,14 @@ dev = [
 docs = [
   "sphinx>=7.0",
   "sphinx-rtd-theme>=2.0",
+  "sphinx-autodoc-typehints>=2.0",
   "myst-parser>=3.0",
   "nbsphinx>=0.9",
   "ipykernel>=6.0",
-  "sphinx-autodoc-typehints",
 ]
 
 [project.urls]
 Homepage = "https://genriesz.readthedocs.io/"
-Repository = ""
 Documentation = "https://genriesz.readthedocs.io/"
 
 [tool.hatch.version]

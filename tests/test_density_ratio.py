@@ -1,14 +1,14 @@
 import numpy as np
 
-from genriesz import grr_density_ratio
+from genriesz import fit_density_ratio
 
 
-def test_grr_density_ratio_basic_shapes():
+def test_fit_density_ratio_basic_shapes():
     rng = np.random.default_rng(0)
     X_num = rng.normal(loc=0.0, scale=1.0, size=(200, 2))
     X_den = rng.normal(loc=0.5, scale=1.0, size=(200, 2))
 
-    res = grr_density_ratio(
+    res = fit_density_ratio(
         X_num,
         X_den,
         n_centers=50,
@@ -29,12 +29,12 @@ def test_grr_density_ratio_basic_shapes():
     assert np.all(np.isfinite(r_num))
 
 
-def test_grr_density_ratio_cv_runs():
+def test_fit_density_ratio_cv_runs():
     rng = np.random.default_rng(1)
     X_num = rng.normal(loc=0.0, scale=1.0, size=(120, 1))
     X_den = rng.normal(loc=0.7, scale=1.0, size=(120, 1))
 
-    res = grr_density_ratio(
+    res = fit_density_ratio(
         X_num,
         X_den,
         n_centers=30,

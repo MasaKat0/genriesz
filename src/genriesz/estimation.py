@@ -33,7 +33,14 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import optimize
 
 from .basis import BaseBasis, Basis, CallableBasis
-from .functionals import ATEFunctional, AMEFunctional, ATTFunctional, DIDFunctional, LinearFunctional
+from .functionals import (
+    ATEFunctional,
+    AMEFunctional,
+    ATTFunctional,
+    DIDFunctional,
+    CallableFunctional,
+    LinearFunctional,
+)
 from .generators import BregmanGenerator
 from .glm import GRRGLM, OutcomeGLM
 from .matching import (
@@ -176,10 +183,6 @@ def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...
         "rw": "rw",
         "arw": "arw",
         "tmle": "tmle",
-        # Backward-compatible aliases (not documented)
-        "dm": "ra",
-        "ipw": "rw",
-        "aipw": "arw",
     }
     out: list[EstimatorName] = []
     for e in estimators:
@@ -227,6 +230,27 @@ def _coerce_basis(basis: Basis | Callable) -> Basis:
         return CallableBasis(basis)
 
     raise TypeError('basis must be a Basis instance or a callable basis(X)->Phi')
+
+
+def _coerce_functional(m: LinearFunctional | Callable) -> LinearFunctional:
+    """Coerce a functional argument into a :class:`LinearFunctional`.
+
+    The public API supports either:
+
+    - a :class:`~genriesz.functionals.LinearFunctional` instance (recommended), or
+    - a plain callable ``m(x_row, gamma) -> float``.
+
+    The callable case is wrapped in :class:`~genriesz.functionals.CallableFunctional`.
+    """
+
+    if isinstance(m, LinearFunctional):
+        return m
+
+    if callable(m):
+        # Type: user-provided callable; we assume it follows the README signature.
+        return CallableFunctional(m)  # type: ignore[arg-type]
+
+    raise TypeError("m must be a LinearFunctional or a callable m(x_row, gamma)->float")
 
 
 def _logit(p: NDArray[np.float64], eps: float = 1e-6) -> NDArray[np.float64]:
@@ -294,7 +318,7 @@ def grr_functional(
     *,
     X: ArrayLike,
     Y: ArrayLike,
-    m: LinearFunctional,
+    m: LinearFunctional | Callable,
     basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
     g: Callable | None = None,
@@ -306,7 +330,7 @@ def grr_functional(
     riesz_penalty: str | None = "l2",
     riesz_lam: float = 1e-3,
     riesz_p_norm: float | None = None,
-    # Matching-only options (ATE/ATT/DID only)
+    # Matching-only options (ATE only)
     M: int = 1,
     local_poly_degree: int = 1,
     standardize_for_matching: bool = True,
@@ -337,7 +361,8 @@ def grr_functional(
     X, Y:
         Regressors and outcome.
     m:
-        A :class:`~genriesz.functionals.LinearFunctional`.
+        Either a :class:`~genriesz.functionals.LinearFunctional` instance (recommended)
+        or a plain callable ``m(x_row, gamma) -> float``.
     basis:
         Basis used for Riesz regression (and for the outcome regression when
         ``outcome_models='shared'``).
@@ -345,8 +370,11 @@ def grr_functional(
         Bregman generator used for GRR. If None, you can pass a generator function via ``g`` (and optionally ``grad_g``, ``inv_grad_g``, ``grad2_g``).
     riesz_method:
         - "grr"            : solve the GRR optimization problem
-        - "nn_matching"    : NN-matching inverse propensity weights (ATE-only convenience)
-        - "local_poly_nn_lsif" : local polynomial NN-LSIF weights (ATE-only convenience)
+        - "nn_matching"    : NN-matching inverse propensity weights (**ATE-only** convenience)
+        - "local_poly_nn_lsif" : local polynomial NN-LSIF weights (**ATE-only** convenience)
+        Matching-based Riesz methods currently require ``cross_fit=False`` and
+        do not support ``TMLE`` (because they do not provide a function-valued
+        representer that can be evaluated counterfactually).
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link.
@@ -356,6 +384,9 @@ def grr_functional(
     n = X_.shape[0]
     y_ = _as_1d(Y, n=n, name="Y")
 
+    # Coerce raw callables into LinearFunctional (README-friendly)
+    m = _coerce_functional(m)
+
     # Coerce raw callables into Basis objects (README-friendly)
     basis = _coerce_basis(basis)
     if outcome_basis is not None:
@@ -364,6 +395,22 @@ def grr_functional(
     ests = _canonical_estimators(estimators)
 
     riesz_method_ = str(riesz_method).lower()
+
+    # Guard rails: matching-based Riesz methods are currently implemented only
+    # for the ATE and only without cross-fitting.
+    if riesz_method_ in {"nn_matching", "local_poly_nn_lsif"}:
+        if not isinstance(m, ATEFunctional):
+            raise ValueError(
+                "riesz_method='nn_matching'/'local_poly_nn_lsif' is implemented only for ATE. "
+                "Use riesz_method='grr' for other estimands."
+            )
+        if cross_fit:
+            raise ValueError("cross_fit=True is not supported for matching-based Riesz methods.")
+        if "tmle" in ests:
+            raise ValueError(
+                "TMLE requires a functional evaluation m(alpha_hat) and is not supported for "
+                "matching-based Riesz methods. Use riesz_method='grr' for TMLE."
+            )
 
     # ------------------------------------------------------------------
     # Generator inference (either pass `generator` or a raw `g`)
@@ -459,18 +506,23 @@ def grr_functional(
             if "tmle" in ests and outcome_link_ == "logit" and isinstance(
                 m, (ATEFunctional, ATTFunctional, DIDFunctional)
             ):
-                X1 = m._toggle_treatment(X_te, 1.0) if hasattr(m, "_toggle_treatment") else None
-                # We avoid accessing private helpers; construct manually.
+                # Construct counterfactual regressors by toggling the treatment column.
                 t_idx = getattr(m, "treatment_index", 0)
-                X1 = X_te.copy(); X1[:, t_idx] = 1.0
-                X0 = X_te.copy(); X0[:, t_idx] = 0.0
+                X1 = X_te.copy()
+                X1[:, t_idx] = 1.0
+                X0 = X_te.copy()
+                X0[:, t_idx] = 0.0
                 cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X1)
                 cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X0)
 
         elif riesz_method_ in {"nn_matching", "local_poly_nn_lsif"}:
-            # Matching-only: only implemented for treatment-type functionals.
-            if not isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
-                raise ValueError("Matching Riesz methods are only supported for ATE/ATT/DID-type functionals.")
+            # Matching-based Riesz methods: currently implemented only for the ATE.
+            # Guard rails for mis-use are also enforced near the top of grr_functional().
+            if not isinstance(m, ATEFunctional):
+                raise ValueError(
+                    "Matching-based Riesz methods are implemented only for the ATE. "
+                    "Use riesz_method='grr' for other estimands."
+                )
             t_idx = getattr(m, "treatment_index", 0)
             D = X_tr[:, t_idx].astype(int)
             Z_tr = np.delete(X_tr, t_idx, axis=1)
@@ -494,12 +546,16 @@ def grr_functional(
                 )
                 w = wobj2.w
 
-            # alpha(X) = D*w - (1-D)*w, evaluated on the *training* sample.
-            # We then reindex to test points by nearest-neighbor matching in index space.
-            # (This is a convenience path used only in the Lin et al. replication notebook.)
+            # Matching-style Riesz representer for the ATE:
+            #
+            #   alpha_i = (2D_i - 1) * w_i,
+            #
+            # where w_i >= 0 are the matching inverse-propensity weights.
+            # This is currently implemented only without cross-fitting.
             alpha_tr = D * w - (1 - D) * w
 
             # For simplicity, we treat this as a non-cross-fitted method.
+            # (Cross-fitting for matching weights is out of scope here.)
             if cross_fit:
                 raise ValueError("cross_fit=True is not supported for matching-based Riesz methods.")
             alpha_obs[:] = alpha_tr

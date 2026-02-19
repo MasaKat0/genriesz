@@ -10,9 +10,13 @@ Conceptual workflow
 To estimate a target parameter \(\theta\) written as a linear functional of the
 outcome regression \(\gamma(x) = \mathbb{E}[Y\mid X=x]\), you provide:
 
-- a *functional* ``m`` (or one of the built-in functional classes),
+- a *functional* ``m`` (either a built-in :class:`genriesz.LinearFunctional` or a plain callable ``m(x_row, gamma)``),
 - a feature map / basis ``phi(X)``, and
 - either a Bregman generator object ``generator`` **or** a generator function ``g``.
+
+If you pass a plain callable ``m``, :func:`genriesz.grr_functional` wraps it as
+:class:`genriesz.CallableFunctional`. The callable is assumed to be **linear in**
+the function argument ``gamma``.
 
 The package then:
 
@@ -57,7 +61,7 @@ For binary-treatment causal estimands, it is common to interact a base basis
    from genriesz import PolynomialBasis, TreatmentInteractionBasis
 
    psi = PolynomialBasis(degree=2, include_bias=True)   # base basis
-   phi = TreatmentInteractionBasis(base_basis=psi)      # [psi(Z), D*psi(Z)]
+   phi = TreatmentInteractionBasis(base_basis=psi)      # [D*psi(Z), (1-D)*psi(Z)]
 
 
 RKHS-style bases (RBF kernel)
@@ -153,29 +157,35 @@ The package includes :class:`genriesz.torch_basis.TorchEmbeddingBasis`.
 Density ratio estimation
 ------------------------
 
-The function :func:`genriesz.grr_density_ratio` estimates the density ratio
+The function :func:`genriesz.fit_density_ratio` estimates the covariate-shift
+*density ratio*
 
 .. math::
 
    r(x) = p(x)/q(x)
 
-from two samples ``X_num ~ p`` and ``X_den ~ q`` using a Gaussian-kernel RKHS
-basis and the uLSIF objective
+from two samples ``X_num ~ p`` and ``X_den ~ q``.
 
-.. math::
+Unlike classic uLSIF, :func:`genriesz.fit_density_ratio` is written in the same
+**Bregman-divergence / GRR** language used throughout this package:
 
-   \tfrac12\mathbb{E}_q[r(x)^2] - \mathbb{E}_p[r(x)].
+* you choose a generator (either a built-in name like ``generator='ukl'`` or a
+  custom ``g``),
+* the function automatically constructs the corresponding **link function**
+  :math:`(\partial g)^{-1}`,
+* and it fits the ratio by minimizing the induced convex objective.
 
-You can optionally select the RBF bandwidth ``sigma`` and ridge parameter ``lam``
-via K-fold cross validation.
+By default we use a Gaussian-kernel RKHS basis. You can optionally select the
+RBF bandwidth ``sigma`` and regularization ``lam`` via K-fold cross validation.
 
 .. code-block:: python
 
-   from genriesz import grr_density_ratio
+   from genriesz import fit_density_ratio
 
-   res = grr_density_ratio(
+   res = fit_density_ratio(
        X_num,
        X_den,
+       generator="ukl",  # or "sq", "bkl", "bp", "pu", or a generator instance
        n_centers=200,
        cv=True,
        folds=5,
@@ -186,6 +196,14 @@ via K-fold cross validation.
 
    r_hat = res.predict_ratio(X_test)
 
+If you want a custom generator, you can pass ``g`` (and optional derivatives)
+just like in :func:`genriesz.grr_functional`.
+
+.. important::
+
+   For general generators, the ratio fit uses a numerical optimizer.
+   Only the squared generator (``generator='sq'`` / :class:`genriesz.SquaredGenerator`)
+   uses a closed-form ridge solution.
 
 Generators and automatic links
 ------------------------------
@@ -197,7 +215,9 @@ The easiest option is to use one of the built-in generator objects:
 
 - :class:`genriesz.SquaredGenerator` (SQ-Riesz)
 - :class:`genriesz.UKLGenerator` (UKL-Riesz)
+- :class:`genriesz.BKLGenerator` (BKL-Riesz)
 - :class:`genriesz.BPGenerator` (BP-Riesz)
+- :class:`genriesz.PUGenerator` (PU-Riesz)
 
 You can also define a custom generator in two equivalent ways:
 

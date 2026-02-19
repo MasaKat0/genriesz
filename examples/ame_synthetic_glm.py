@@ -9,7 +9,7 @@ average marginal effect (AME)
 
     theta = E[ d/dD mu(D, Z) ]
 
-using the GLM-style GRR solver.
+using the high-level :func:`genriesz.grr_ame` interface.
 
 This is a good example of a linear functional that is not a simple difference
 between two treatment levels.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from genriesz import AverageDerivativeFunctional, GRR, PolynomialBasis, SquaredGenerator
+from genriesz import PolynomialBasis, SquaredGenerator, grr_ame
 
 
 def make_synthetic_data(n: int = 4000, d: int = 3, seed: int = 0):
@@ -44,24 +44,31 @@ def make_synthetic_data(n: int = 4000, d: int = 3, seed: int = 0):
 def main() -> None:
     X, Y, true_ame = make_synthetic_data(n=4000, d=3, seed=0)
 
-    # Basis: polynomial on the full W = [D, Z]
+    # Basis: polynomial on the full X = [D, Z]
     phi = PolynomialBasis(degree=2, include_bias=True)
 
-    # Linear functional: average derivative w.r.t. the treatment coordinate (index 0)
-    m = AverageDerivativeFunctional(coordinate=0, eps=1e-4)
-
-    # Generator: squared (linear inverse link)
+    # Generator: squared loss (linear inverse link)
     gen = SquaredGenerator(C=0.0).as_generator()
 
-    est = GRR(basis=phi, m=m, generator=gen, penalty="l2", lam=1e-3)
-    est.fit(X, max_iter=300, tol=1e-9)
-
-    ame_hat = est.estimate_linear_functional(Y, X)
-    resid = est.regressor_balance_residual()
+    res = grr_ame(
+        X=X,
+        Y=Y,
+        coordinate=0,
+        basis=phi,
+        generator=gen,
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("ra", "rw", "arw", "tmle"),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=300,
+        tol=1e-9,
+    )
 
     print("True AME (by construction):", true_ame)
-    print("Estimated AME:", float(ame_hat))
-    print("Balance residual: mean(|resid|) =", float(np.mean(np.abs(resid))))
+    print(res.summary_text())
 
 
 if __name__ == "__main__":

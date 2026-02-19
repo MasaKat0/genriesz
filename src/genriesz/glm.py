@@ -69,6 +69,17 @@ class _Penalty:
         self.p_norm = 2.0 if p_norm is None else float(p_norm)
         if self.lam < 0:
             raise ValueError("lam must be >= 0")
+
+        # Convenience shorthand: allow strings like "l1.5" to mean an l_p penalty.
+        # This keeps the public API concise while still supporting general l_p.
+        if self.penalty is not None and self.penalty.startswith("l") and self.penalty not in {"l1", "l2", "lp", "l_p"}:
+            try:
+                p = float(self.penalty[1:])
+                self.penalty = "lp"
+                self.p_norm = p
+            except Exception:
+                # Fall through to the standard parser below.
+                pass
         if self.penalty in {"l1", "lasso"}:
             self.p_norm = 1.0
         elif self.penalty in {"l2", "ridge"}:
@@ -272,8 +283,6 @@ class OutcomeGLM:
                 theta = np.linalg.solve(A, b)
             self.theta_ = np.asarray(theta, dtype=float)
             return FitResult(beta=self.theta_, success=True, message="closed_form", n_iter=1)
-
-        big = 1e20
 
         def fun(theta: NDArray[np.float64]) -> float:
             eta = Phi @ theta

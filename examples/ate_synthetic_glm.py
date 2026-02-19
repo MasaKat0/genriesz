@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from genriesz import ATEFunctional, GRR, SquaredGenerator, UKLGenerator, grr_ate
+from genriesz import SquaredGenerator, UKLGenerator, grr_ate
 
 
 def make_synthetic_data(n: int = 2000, d: int = 3, seed: int = 123) -> tuple[np.ndarray, np.ndarray]:
@@ -62,13 +62,10 @@ def main() -> None:
     print("\n[UKL] grr_ate output")
     print(res_ukl.summary_text())
 
-    # --- If you only want the Riesz representer and the pure RW plug-in ---
-    m = ATEFunctional(treatment_index=0)
-    model = GRR(basis=phi, m=m, generator=ukl, penalty="l2", lam=1e-3)
-    model.fit(X)
-    ate_rw = model.estimate_linear_functional(Y, X)
-    print("\n[UKL] RW (no outcome model):", float(ate_rw))
-    print("[UKL] Balance residual (mean):", np.round(model.regressor_balance_residual(), 6))
+    # Diagnostics for balance (love plot) are available via `res_ukl.love_plot_data()`.
+    love = res_ukl.love_plot_data(as_pandas=False)
+    print("\n[UKL] Love-plot diagnostics (first 3 rows):")
+    print(love[:3])
 
 
 if __name__ == "__main__":

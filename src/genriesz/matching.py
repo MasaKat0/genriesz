@@ -36,7 +36,6 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from sklearn.neighbors import NearestNeighbors
 
 
 def _as_2d(x: ArrayLike, name: str) -> NDArray[np.float64]:
@@ -110,7 +109,9 @@ def nn_matching_inverse_propensity_weights(
     standardize:
         If True, standardize X column-wise using the full sample (recommended).
     metric, algorithm, n_jobs:
-        Passed to :class:`sklearn.neighbors.NearestNeighbors`.
+        Parameters for the kNN search. Without scikit-learn, only
+        ``metric="euclidean"`` is supported and ``algorithm`` is ignored.
+        ``n_jobs`` is passed to SciPy's cKDTree as ``workers``.
 
     Returns
     -------
@@ -146,17 +147,30 @@ def nn_matching_inverse_propensity_weights(
     if M > min(n0, n1):
         raise ValueError(f"M={M} is larger than min(n0, n1)={min(n0, n1)}.")
 
+    if metric != "euclidean":
+        raise NotImplementedError(
+            "Only metric='euclidean' is supported without scikit-learn. "
+            "Install genriesz[sklearn] if you need alternative metrics."
+        )
+
+    # SciPy's cKDTree supports Euclidean kNN queries efficiently.
+    from scipy.spatial import cKDTree
+
+    workers = 1
+    if n_jobs is not None:
+        workers = int(n_jobs)
+
     # Treated weights: how many times each treated unit is matched to a control unit.
-    nn1 = NearestNeighbors(n_neighbors=M, metric=metric, algorithm=algorithm, n_jobs=n_jobs)
-    nn1.fit(X1)
-    idx1 = nn1.kneighbors(X0, return_distance=False)
+    tree1 = cKDTree(X1)
+    _, idx1 = tree1.query(X0, k=M, workers=workers)
+    idx1 = np.asarray(idx1)
     counts1 = np.bincount(idx1.reshape(-1), minlength=n1).astype(float)
     K1_over_M = counts1 / float(M)
 
     # Control weights: how many times each control unit is matched to a treated unit.
-    nn0 = NearestNeighbors(n_neighbors=M, metric=metric, algorithm=algorithm, n_jobs=n_jobs)
-    nn0.fit(X0)
-    idx0 = nn0.kneighbors(X1, return_distance=False)
+    tree0 = cKDTree(X0)
+    _, idx0 = tree0.query(X1, k=M, workers=workers)
+    idx0 = np.asarray(idx0)
     counts0 = np.bincount(idx0.reshape(-1), minlength=n0).astype(float)
     K0_over_M = counts0 / float(M)
 
@@ -297,7 +311,9 @@ def local_polynomial_nn_lsif_density_ratio(
     ridge:
         A small ridge term added to H_hat(x) for numerical stability.
     metric, algorithm, n_jobs:
-        Passed to :class:`sklearn.neighbors.NearestNeighbors`.
+        Parameters for the kNN search. Without scikit-learn, only
+        ``metric="euclidean"`` is supported and ``algorithm`` is ignored.
+        ``n_jobs`` is passed to SciPy's cKDTree as ``workers``.
     verbose:
         If True, prints progress every ~500 eval points.
 
@@ -330,17 +346,29 @@ def local_polynomial_nn_lsif_density_ratio(
     N1 = float(len(Z))
     N0 = float(len(X))
 
-    # Trees for neighborhood search.
-    nn_denom = NearestNeighbors(metric=metric, algorithm=algorithm, n_jobs=n_jobs)
-    nn_denom.fit(X)
+    if metric != "euclidean":
+        raise NotImplementedError(
+            "Only metric='euclidean' is supported without scikit-learn. "
+            "Install genriesz[sklearn] if you need alternative metrics."
+        )
 
-    nn_num = NearestNeighbors(metric=metric, algorithm=algorithm, n_jobs=n_jobs)
-    nn_num.fit(Z)
+    from scipy.spatial import cKDTree
+
+    workers = 1
+    if n_jobs is not None:
+        workers = int(n_jobs)
+
+    # Trees for neighborhood search.
+    tree_denom = cKDTree(X)
+    tree_num = cKDTree(Z)
 
     # Precompute the M-th neighbor radius for each eval point.
     # If exclude_self=True, we query M+1 neighbors and (heuristically) drop exact matches.
     k_for_radius = M + 1 if exclude_self else M
-    dist, ind = nn_denom.kneighbors(x_eval, n_neighbors=k_for_radius, return_distance=True)
+    dist, _ = tree_denom.query(x_eval, k=k_for_radius, workers=workers)
+    dist = np.asarray(dist)
+    if dist.ndim == 1:
+        dist = dist.reshape(-1, 1)
 
     r_hat = np.empty(len(x_eval), dtype=float)
 
@@ -349,7 +377,6 @@ def local_polynomial_nn_lsif_density_ratio(
             print(f"[local_polynomial_nn_lsif] eval {i}/{len(x_eval)}")
 
         dists_i = dist[i]
-        inds_i = ind[i]
 
         # Heuristic: if the nearest neighbor is an exact match (distance ~ 0), treat it as 'self'
         # and use the next M neighbors to define the radius.
@@ -365,11 +392,11 @@ def local_polynomial_nn_lsif_density_ratio(
         x0 = x_eval[i]
 
         # Denominator points within radius rho.
-        denom_idx = nn_denom.radius_neighbors(x0.reshape(1, -1), radius=rho, return_distance=False)[0]
+        denom_idx = tree_denom.query_ball_point(x0, r=rho, workers=workers)
         X_loc = X[denom_idx]
 
         # Numerator points within radius rho.
-        num_idx = nn_num.radius_neighbors(x0.reshape(1, -1), radius=rho, return_distance=False)[0]
+        num_idx = tree_num.query_ball_point(x0, r=rho, workers=workers)
         Z_loc = Z[num_idx]
 
         # Feature maps at scaled coordinates.
@@ -378,9 +405,8 @@ def local_polynomial_nn_lsif_density_ratio(
 
         # Empirical H and h (note the normalization by N0 and N1, not by local counts).
         H = (Psi_X.T @ Psi_X) / N0
-        h = Psi_Z.mean(axis=0)  # (1/|Z_loc|) sum Psi over local numerator
-        # Convert mean-over-local to 1/N1 sum by scaling by |Z_loc|/N1.
-        h *= float(len(Z_loc)) / N1
+        # h is (1/N1) sum Psi over local numerator.
+        h = Psi_Z.sum(axis=0) / N1 if len(Z_loc) > 0 else np.zeros(Psi_X.shape[1], dtype=float)
 
         # Solve (H + ridge I) beta = h.
         # Ridge scaling: interpret `ridge` as a multiple of trace(H)/q to be robust across scales.
