@@ -55,6 +55,7 @@ docs = [
   "myst-parser>=3.0",
   "nbsphinx>=0.9",
   "ipykernel>=6.0",
+  "sphinx-autodoc-typehints",
 ]
 
 [project.urls]

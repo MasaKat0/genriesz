@@ -71,3 +71,7 @@ html_static_path = ["_static"]
 # Misc
 # ---------------------------------------------------------------------------
 nitpicky = False
+
+rst_prolog = r"""
+.. |alpha| replace:: :math:`\alpha`
+"""
