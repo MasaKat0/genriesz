@@ -1,39 +1,33 @@
 Examples
 ========
 
-This repository includes runnable example scripts in ``examples/`` and a set of
-application-specific Jupyter notebooks (one per estimand).
+This page lists runnable examples included in the repository.
 
-Runnable scripts
-----------------
+Jupyter notebooks
+-----------------
 
-From the repository root:
+The notebooks below are shipped with the repo (see ``notebooks/``) and are
+mirrored under ``docs/notebooks/`` for documentation builds.
 
-.. code-block:: bash
+.. toctree::
+   :maxdepth: 1
 
-   python examples/ate_synthetic_glm.py
-   python examples/ate_synthetic_glm_polynomial.py
-   python examples/ate_synthetic_glm_rkhs_rff.py
-   python examples/ate_synthetic_glm_rf_leaf_basis.py
-   python examples/ate_synthetic_nn_matching.py
+   notebooks/ATE_example
+   notebooks/ATT_example
+   notebooks/DID_example
+   notebooks/AME_example
 
-   python examples/ame_synthetic_glm.py
-   python examples/att_synthetic_glm.py
-   python examples/did_synthetic_glm.py
+Python scripts
+--------------
 
+The ``examples/`` directory contains small scripts that can be run directly.
 
-Notebooks
----------
-
-The notebooks live in ``notebooks/`` and are also shipped into the docs tree
-under ``docs/notebooks/`` for convenient download:
-
-- :download:`ATE_end_to_end.ipynb <notebooks/ATE_end_to_end.ipynb>`
-- :download:`AME_end_to_end.ipynb <notebooks/AME_end_to_end.ipynb>`
-- :download:`ATT_simulation_true_value.ipynb <notebooks/ATT_simulation_true_value.ipynb>`
-- :download:`DID_simulation_true_value.ipynb <notebooks/DID_simulation_true_value.ipynb>`
-- :download:`LinEtAl_NN_matching_local_polynomial_replication.ipynb <notebooks/LinEtAl_NN_matching_local_polynomial_replication.ipynb>`
-
-If you would like the notebooks rendered as HTML inside the docs, you can enable
-``nbsphinx`` (or ``myst-nb``) in ``docs/conf.py``. The current configuration keeps
-the documentation build lightweight.
+- ``examples/ate_synthetic_glm.py``
+- ``examples/ate_synthetic_glm_polynomial.py``
+- ``examples/ate_synthetic_glm_rkhs_rff.py``
+- ``examples/ate_synthetic_glm_rf_leaf_basis.py``
+- ``examples/ate_synthetic_glm_nn_basis.py``
+- ``examples/ate_synthetic_nn_matching.py``
+- ``examples/att_synthetic_glm.py``
+- ``examples/did_synthetic_glm.py``
+- ``examples/ame_synthetic_glm.py``

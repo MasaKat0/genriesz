@@ -2,7 +2,7 @@ User guide
 ==========
 
 This guide summarizes how to use **Generalized Riesz Regression (GRR)** in this
-package. The high-level interface is :func:`genriesz.grr_functional`.
+package. The main entry point is :func:`genriesz.grr_functional`.
 
 Conceptual workflow
 -------------------
@@ -10,13 +10,13 @@ Conceptual workflow
 To estimate a target parameter \(\theta\) written as a linear functional of the
 outcome regression \(\gamma(x) = \mathbb{E}[Y\mid X=x]\), you provide:
 
-- a *functional* ``m(x, gamma)`` (or one of the built-in functional classes),
+- a *functional* ``m`` (or one of the built-in functional classes),
 - a feature map / basis ``phi(X)``, and
-- a Bregman generator ``g(x, alpha)`` (or a pre-built generator object).
+- either a Bregman generator object ``generator`` **or** a generator function ``g``.
 
 The package then:
 
-1. constructs the link function from the generator (automatic regressor balancing (ARB)),
+1. builds the link function induced by the generator (automatic regressor balancing (ARB)),
 2. fits a Riesz representer model \(\hat\alpha(x)\),
 3. optionally fits an outcome model \(\hat\gamma(x)\),
 4. reports RA/RW/ARW/TMLE estimates with standard errors, confidence intervals, and p-values.
@@ -27,8 +27,8 @@ Bases
 
 All bases in this library implement the same interface:
 
-- batched input: ``basis(X)`` with ``X.shape == (n, d)`` returns a 2D array ``(n, p)``,
-- single-row input: ``basis(x)`` with ``x.shape == (d,)`` returns a 1D array ``(p,)``.
+- batched input: ``basis(X)`` with ``X.shape == (n, d)`` returns ``(n, p)``,
+- single-row input: ``basis(x)`` with ``x.shape == (d,)`` returns ``(p,)``.
 
 Polynomial
 ^^^^^^^^^^
@@ -40,6 +40,9 @@ Use :class:`genriesz.PolynomialBasis` for simple polynomial expansions.
    from genriesz import PolynomialBasis
 
    psi = PolynomialBasis(degree=2, include_bias=True)
+   # Fit is only needed when you call the basis directly.
+   # When passed to grr_* functions, bases are copied and fit internally on each training fold.
+   psi.fit(X)
    Phi = psi(X)
 
 
@@ -54,7 +57,7 @@ For binary-treatment causal estimands, it is common to interact a base basis
    from genriesz import PolynomialBasis, TreatmentInteractionBasis
 
    psi = PolynomialBasis(degree=2, include_bias=True)   # base basis
-   phi = TreatmentInteractionBasis(base_basis=psi)      # [1, D, psi(Z), D*psi(Z)]
+   phi = TreatmentInteractionBasis(base_basis=psi)      # [psi(Z), D*psi(Z)]
 
 
 RKHS-style bases (RBF kernel)
@@ -63,23 +66,16 @@ RKHS-style bases (RBF kernel)
 You can build RBF-kernel (Gaussian-kernel RKHS) features using:
 
 - random Fourier features via :class:`genriesz.RBFRandomFourierBasis`,
-- a Nyström-style center expansion via :class:`genriesz.RBFNystromBasis`, or
+- a Nyström feature map via :class:`genriesz.RBFNystromBasis`, or
 - an explicit kernel-section basis via :class:`genriesz.GaussianRKHSBasis`.
 
 .. code-block:: python
 
    from genriesz import GaussianRKHSBasis
 
-   # Explicit Gaussian-kernel RKHS basis using m centers.
    psi = GaussianRKHSBasis(n_centers=300, sigma=1.0, standardize=True, random_state=0)
+   psi.fit(X)
    Phi = psi(X)
-
-.. code-block:: python
-
-   from genriesz import RBFRandomFourierBasis, TreatmentInteractionBasis
-
-   psi = RBFRandomFourierBasis(n_features=500, sigma=1.0, standardize=True, random_state=0)
-   phi = TreatmentInteractionBasis(base_basis=psi)
 
 
 kNN catchment-area basis (nearest-neighbor matching)
@@ -94,25 +90,22 @@ The class :class:`genriesz.KNNCatchmentBasis` implements features
 
    \phi_j(z) = \mathbf{1}\{c_j \in \mathrm{NN}_k(z)\},
 
-where :math:`\{c_j\}` are fitted centers and :math:`\mathrm{NN}_k(z)` denotes
-the set of :math:`k` nearest centers of :math:`z`.
+where \(\{c_j\}\) are fitted centers and \(\mathrm{NN}_k(z)\) denotes the set of
+\(k\) nearest centers of \(z\).
 
 .. code-block:: python
 
    import numpy as np
    from genriesz import KNNCatchmentBasis
 
-   # centers: (n_centers, d)
-   # queries: (n_queries, d)
    basis = KNNCatchmentBasis(n_neighbors=3).fit(centers)
    Phi = basis(queries)  # dense (n_queries, n_centers)
 
 
-Random forest leaf basis (scikit-learn)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Random forest leaf basis
+^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you install the optional scikit-learn dependency (``pip install genriesz[sklearn]``),
-you can build a flexible tree-induced basis using leaf indicators.
+You can build a flexible tree-induced basis using leaf indicators.
 
 .. code-block:: python
 
@@ -130,8 +123,8 @@ nonparametric partition of the regressor space.
 Neural network feature maps (PyTorch)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you install the optional PyTorch dependency (``pip install genriesz[torch]``), you
-can use a neural network as a **fixed feature map**.
+If you install PyTorch (optional), you can use a neural network as a **fixed
+feature map**.
 
 .. important::
 
@@ -146,14 +139,15 @@ The package includes :class:`genriesz.torch_basis.TorchEmbeddingBasis`.
 
 .. code-block:: python
 
-   import torch
    from genriesz.torch_basis import MLPEmbeddingNet, TorchEmbeddingBasis
 
-   net = MLPEmbeddingNet(input_dim=X.shape[1], hidden_dim=64, output_dim=32)
-   # (train net on a separate task if desired)
-   phi = TorchEmbeddingBasis(model=net, include_bias=True)
+   net = MLPEmbeddingNet(input_dim=X.shape[1], hidden_dims=(64, 32), output_dim=16)
 
+   # Optionally train the embedding to predict y (supervised pretraining).
+   phi = TorchEmbeddingBasis(net=net, include_bias=True)
+   phi.fit(X, y, epochs=10, lr=1e-3, verbose=True)
 
+   Phi = phi(X)
 
 
 Density ratio estimation
@@ -165,8 +159,8 @@ The function :func:`genriesz.grr_density_ratio` estimates the density ratio
 
    r(x) = p(x)/q(x)
 
-from two samples ``X_num ~ p`` and ``X_den ~ q`` using GRR with a Gaussian-kernel
-RKHS basis and the uLSIF objective
+from two samples ``X_num ~ p`` and ``X_den ~ q`` using a Gaussian-kernel RKHS
+basis and the uLSIF objective
 
 .. math::
 
@@ -177,10 +171,8 @@ via K-fold cross validation.
 
 .. code-block:: python
 
-   import numpy as np
    from genriesz import grr_density_ratio
 
-   # X_num: (n_num, d) ~ p, X_den: (n_den, d) ~ q
    res = grr_density_ratio(
        X_num,
        X_den,
@@ -192,7 +184,6 @@ via K-fold cross validation.
        random_state=0,
    )
 
-   # Evaluate r_hat(x) on new points:
    r_hat = res.predict_ratio(X_test)
 
 
@@ -202,23 +193,34 @@ Generators and automatic links
 A Bregman generator defines both the loss and the induced link function used for
 automatic regressor balancing (ARB).
 
-The easiest option is to use one of the built-in generator factories:
+The easiest option is to use one of the built-in generator objects:
 
-- :class:`genriesz.SquaredGenerator`
-- :class:`genriesz.UKLGenerator`
-- :class:`genriesz.BKLGenerator`
-- :class:`genriesz.BPGenerator`
+- :class:`genriesz.SquaredGenerator` (SQ-Riesz)
+- :class:`genriesz.UKLGenerator` (UKL-Riesz)
+- :class:`genriesz.BPGenerator` (BP-Riesz)
 
-Each provides an ``.as_generator()`` method that returns a
-:class:`genriesz.BregmanGenerator` instance.
+You can also define a custom generator in two equivalent ways:
 
-If you want to define your own generator, you can pass:
+1) **Instantiate** a :class:`genriesz.BregmanGenerator` directly.
+2) Pass ``g=...`` (and optional derivatives) to :func:`genriesz.grr_functional`.
 
-- ``g(x, alpha)`` and optionally
-- its derivative ``g_grad(x, alpha)`` and inverse derivative ``g_inv_grad(x, v)``.
+Custom generator call signatures
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If derivatives are not provided, the package falls back to numerical
-finite-differences and scalar root-finding.
+A custom generator can be regressor-dependent:
+
+- ``g(x, alpha)``
+- optional: ``grad_g(x, alpha)`` (first derivative wrt ``alpha``)
+- optional: ``inv_grad_g(x, v)``  (inverse derivative map)
+- optional: ``grad2_g(x, alpha)`` (second derivative wrt ``alpha``)
+
+If derivatives are omitted, the package falls back to finite differences and a
+Newton solver.
+
+.. important::
+
+   For speed and numerical stability, providing ``inv_grad_g`` (and ideally
+   ``grad_g`` / ``grad2_g``) is strongly recommended for custom generators.
 
 
 Estimators, cross-fitting, and outcome models
@@ -239,9 +241,15 @@ For RA/ARW/TMLE you need an outcome regression model \(\hat\gamma\). You can con
 how it is fitted via ``outcome_models``:
 
 - ``"shared"``: use the same basis and penalty settings as the Riesz model
-- ``"separate"``: use a user-provided outcome model or a separate basis
+- ``"separate"``: use a user-provided basis (``outcome_basis``)
 - ``"both"``: fit both and report both versions
 - ``"none"``: skip outcome modeling (then only RW is available)
+
+The outcome link function is specified by ``outcome_link`` (``"identity"`` or
+``"logit"``). TMLE automatically infers the likelihood:
+
+- ``outcome_link="identity"`` => Gaussian targeting
+- ``outcome_link="logit"``    => Bernoulli targeting
 
 
 Regularization: \(\ell_p\)
@@ -254,5 +262,5 @@ For the Riesz model, set:
 - ``riesz_penalty="lp"`` with ``riesz_p_norm=p`` for general \(p\ge 1\), or
 - ``riesz_penalty="l1.5"`` as shorthand.
 
-The outcome model (when using the default linear outcome regression) supports the
-same penalty interface via ``outcome_penalty`` and ``outcome_p_norm``.
+The default outcome model (linear regression / logistic regression on a basis)
+supports the same interface via ``outcome_penalty`` and ``outcome_p_norm``.

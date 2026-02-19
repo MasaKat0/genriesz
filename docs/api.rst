@@ -1,35 +1,66 @@
 API reference
 =============
 
-High-level functional estimation
---------------------------------
+This page lists the main public objects in *genriesz*.
+
+High-level estimation
+---------------------
 
 .. autofunction:: genriesz.grr_functional
 .. autofunction:: genriesz.grr_ate
 .. autofunction:: genriesz.grr_att
 .. autofunction:: genriesz.grr_did
 .. autofunction:: genriesz.grr_ame
+
+Density ratio / covariate shift
+-------------------------------
+
 .. autofunction:: genriesz.grr_density_ratio
-
-.. autoclass:: genriesz.estimate_functional.FunctionalEstimateResult
-   :members:
-
-.. autoclass:: genriesz.estimate_functional.LinearOutcomeModel
-   :members:
 
 .. autoclass:: genriesz.DensityRatioResult
    :members:
 
+Functionals
+-----------
 
-Core GRR solver
----------------
-
-.. autoclass:: genriesz.GRR
+.. autoclass:: genriesz.LinearFunctional
    :members:
 
-.. autoclass:: genriesz.grr.ARBLink
+.. autoclass:: genriesz.ATEFunctional
    :members:
 
+.. autoclass:: genriesz.ATTFunctional
+   :members:
+
+.. autoclass:: genriesz.DIDFunctional
+   :members:
+
+.. autoclass:: genriesz.AMEFunctional
+   :members:
+
+Bases
+-----
+
+.. autoclass:: genriesz.PolynomialBasis
+   :members:
+
+.. autoclass:: genriesz.TreatmentInteractionBasis
+   :members:
+
+.. autoclass:: genriesz.RBFRandomFourierBasis
+   :members:
+
+.. autoclass:: genriesz.GaussianRKHSBasis
+   :members:
+
+.. autoclass:: genriesz.RBFNystromBasis
+   :members:
+
+.. autoclass:: genriesz.KNNCatchmentBasis
+   :members:
+
+.. autoclass:: genriesz.CallableBasis
+   :members:
 
 Generators
 ----------
@@ -43,51 +74,21 @@ Generators
 .. autoclass:: genriesz.UKLGenerator
    :members:
 
-.. autoclass:: genriesz.BKLGenerator
-   :members:
-
 .. autoclass:: genriesz.BPGenerator
    :members:
 
+Matching helpers
+----------------
 
-Functionals (estimands)
------------------------
+.. autofunction:: genriesz.nn_matching_inverse_propensity_weights
+.. autofunction:: genriesz.local_polynomial_nn_lsif_density_ratio
+.. autofunction:: genriesz.local_polynomial_nn_lsif_inverse_propensity_weights
 
-.. autoclass:: genriesz.ATEFunctional
+Results
+-------
+
+.. autoclass:: genriesz.FunctionalEstimate
    :members:
 
-.. autoclass:: genriesz.ATTFunctional
+.. autoclass:: genriesz.SingleEstimate
    :members:
-
-.. autoclass:: genriesz.AverageDerivativeFunctional
-   :members:
-
-
-Bases
------
-
-.. autoclass:: genriesz.PolynomialBasis
-   :members:
-
-.. autoclass:: genriesz.RBFRandomFourierBasis
-   :members:
-
-.. autoclass:: genriesz.RBFNystromBasis
-   :members:
-
-.. autoclass:: genriesz.GaussianRKHSBasis
-   :members:
-
-.. autoclass:: genriesz.TreatmentInteractionBasis
-   :members:
-
-.. autoclass:: genriesz.KNNCatchmentBasis
-   :members:
-
-Optional integrations
----------------------
-
-These require optional dependencies:
-
-- :class:`genriesz.sklearn_basis.RandomForestLeafBasis` (requires ``scikit-learn``)
-- :class:`genriesz.torch_basis.TorchEmbeddingBasis` (requires ``torch``)

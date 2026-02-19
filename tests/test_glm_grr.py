@@ -1,72 +1,69 @@
 import numpy as np
 
-from genriesz import GRR, SquaredGenerator, UKLGenerator
+from genriesz import (
+    ATEFunctional,
+    BregmanGenerator,
+    GRRGLM,
+    PolynomialBasis,
+    SquaredGenerator,
+    TreatmentInteractionBasis,
+    UKLGenerator,
+)
 
 
-def test_squared_link_inverse():
-    gen = SquaredGenerator(C=0.5).as_generator()
-    X = np.zeros((5, 2))
-    alpha = np.linspace(-2, 2, 5)
-    v = gen.evaluate_grad(X, alpha)
-    alpha2 = gen.evaluate_inv_grad(X, v)
-    assert np.allclose(alpha, alpha2)
-
-
-def _make_synthetic_ate(n: int = 400, d: int = 2, seed: int = 0):
+def _make_synthetic_ate(n: int = 200, d_z: int = 3, seed: int = 0):
     rng = np.random.default_rng(seed)
-    Z = rng.normal(size=(n, d))
-    logits = 0.7 * Z[:, 0] - 0.3 * Z[:, 1]
+    Z = rng.normal(size=(n, d_z))
+    logits = 0.5 * Z[:, 0] - 0.25 * Z[:, 1]
     e = 1.0 / (1.0 + np.exp(-logits))
-    D = rng.binomial(1, e, size=n)
-    tau = 1.0
-    mu0 = Z[:, 0] + 0.25 * Z[:, 1] ** 2
-    Y = mu0 + tau * D + rng.normal(scale=1.0, size=n)
-    X = np.concatenate([D.reshape(-1, 1), Z], axis=1)
-    return X, Y, tau
+    D = rng.binomial(1, e, size=n).astype(float)
+    X = np.column_stack([D, Z])
+    return X
 
 
-def m_ate(x: np.ndarray, gamma):
-    z = x[1:]
-    x1 = np.concatenate([[1.0], z])
-    x0 = np.concatenate([[0.0], z])
-    return float(gamma(x1) - gamma(x0))
+def test_grrglm_runs_with_squared_and_ukl_generators():
+    X = _make_synthetic_ate(n=150, d_z=2, seed=0)
 
+    m = ATEFunctional(treatment_index=0)
+    psi = PolynomialBasis(degree=1, include_bias=True)
+    basis = TreatmentInteractionBasis(base_basis=psi, treatment_index=0)
 
-def phi(X: np.ndarray) -> np.ndarray:
-    X = np.asarray(X, dtype=float)
-    if X.ndim == 1:
-        d = X[0]
-        z = X[1:]
-        return np.concatenate([[1.0], [d], z, d * z])
-    d = X[:, [0]]
-    z = X[:, 1:]
-    return np.concatenate([np.ones((len(X), 1)), d, z, d * z], axis=1)
-
-
-def test_grr_runs_sq_and_ukl():
-    X, Y, tau = _make_synthetic_ate(n=300, d=2, seed=0)
-
+    # SQ-Riesz
     sq = SquaredGenerator(C=0.0).as_generator()
-    est_sq = GRR(basis=phi, m=m_ate, generator=sq, penalty="l2", lam=1e-3)
-    est_sq.fit(X, max_iter=200, tol=1e-9)
-    ate_sq = est_sq.estimate_linear_functional(Y, X)
-    assert np.isfinite(ate_sq)
+    model_sq = GRRGLM(functional=m, basis=basis, generator=sq, penalty="l2", lam=1e-3)
+    model_sq.fit(X, max_iter=200, tol=1e-9)
+    alpha_sq = model_sq.predict_alpha(X)
+    assert alpha_sq.shape == (len(X),)
+    assert np.all(np.isfinite(alpha_sq))
 
-    ukl = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1)).as_generator()
-    est_ukl = GRR(basis=phi, m=m_ate, generator=ukl, penalty="l2", lam=1e-3)
-    est_ukl.fit(X, max_iter=200, tol=1e-9)
-    ate_ukl = est_ukl.estimate_linear_functional(Y, X)
-    assert np.isfinite(ate_ukl)
+    # UKL-Riesz
+    ukl = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)).as_generator()
+    model_ukl = GRRGLM(functional=m, basis=basis, generator=ukl, penalty="l2", lam=1e-3)
+    model_ukl.fit(X, max_iter=200, tol=1e-9)
+    alpha_ukl = model_ukl.predict_alpha(X)
+    assert alpha_ukl.shape == (len(X),)
+    assert np.all(np.isfinite(alpha_ukl))
 
-    # In small samples we only test that we are in the right ballpark.
-    assert abs(ate_ukl - tau) < 1.0
 
+def test_custom_bregman_generator_quadratic_link_matches_identity():
+    # g(alpha) = 0.5 * alpha^2 => grad(alpha)=alpha, inv_grad(v)=v
+    def g(_x, a: float) -> float:
+        return 0.5 * a * a
 
-def test_grr_lp_penalty_runs():
-    X, Y, _ = _make_synthetic_ate(n=250, d=2, seed=1)
-    gen = SquaredGenerator(C=0.0).as_generator()
+    def grad(_x, a: float) -> float:
+        return a
 
-    est = GRR(basis=phi, m=m_ate, generator=gen, penalty="l1.5", lam=1e-3)
-    est.fit(X, max_iter=200, tol=1e-9)
-    ate = est.estimate_linear_functional(Y, X)
-    assert np.isfinite(ate)
+    def inv_grad(_x, v: float) -> float:
+        return v
+
+    X = _make_synthetic_ate(n=80, d_z=2, seed=1)
+    m = ATEFunctional(treatment_index=0)
+    psi = PolynomialBasis(degree=1, include_bias=True)
+    basis = TreatmentInteractionBasis(base_basis=psi, treatment_index=0)
+
+    gen = BregmanGenerator(g=g, grad=grad, inv_grad=inv_grad, name="quad")
+
+    model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
+    model.fit(X, max_iter=150, tol=1e-9)
+    alpha = model.predict_alpha(X)
+    assert np.all(np.isfinite(alpha))

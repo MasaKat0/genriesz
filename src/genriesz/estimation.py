@@ -20,19 +20,19 @@ TMLE likelihood is inferred from the *outcome regression link*:
 - ``link='identity'`` => Gaussian targeting
 - ``link='logit'``    => Bernoulli targeting
 
-When ``link`` is not given, we default to identity unless the outcome is binary {0,1}.
+When ``link`` is not given, we default to identity unless the outcome is bounded in [0, 1].
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Literal, Sequence
+from typing import Callable, Iterable, Literal, Sequence
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize
 
-from .basis import Basis
+from .basis import BaseBasis, Basis, CallableBasis
 from .functionals import ATEFunctional, AMEFunctional, ATTFunctional, DIDFunctional, LinearFunctional
 from .generators import BregmanGenerator
 from .glm import GRRGLM, OutcomeGLM
@@ -43,7 +43,7 @@ from .matching import (
     nn_matching_inverse_propensity_weights,
 )
 from .results import FunctionalEstimate, SingleEstimate
-from .utils import is_binary_y, kfold_splits, se_ci_pvalue, Fold
+from .utils import kfold_splits, se_ci_pvalue, Fold
 
 
 EstimatorName = Literal["ra", "rw", "arw", "tmle"]
@@ -192,6 +192,43 @@ def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...
     return tuple(out)
 
 
+def _coerce_basis(basis: Basis | Callable) -> Basis:
+    """Coerce a raw callable into a Basis implementation.
+
+    The public API documents that users may pass either a Basis instance
+    or a plain callable ``basis(X) -> Phi``. The latter is wrapped in
+    :class:`genriesz.CallableBasis`.
+
+    Notes
+    -----
+    Do **not** probe ``basis.n_features`` here. Many bases (e.g.
+    :class:`~genriesz.PolynomialBasis` and
+    :class:`~genriesz.TreatmentInteractionBasis`) expose ``n_features`` as
+    a property that is only valid *after* ``fit()``. Accessing it early
+    would raise, and ``hasattr(obj, 'n_features')`` would inadvertently
+    trigger that property.
+    """
+
+    # If it already behaves like a Basis, keep it.
+    if isinstance(basis, CallableBasis):
+        return basis
+
+    # All built-in bases inherit from BaseBasis.
+    if isinstance(basis, BaseBasis):
+        return basis
+
+    # Accept user-defined basis objects via duck typing, without touching
+    # the potentially-unfitted ``n_features`` property.
+    if hasattr(basis, 'fit') and hasattr(basis, 'copy') and callable(basis):  # type: ignore[arg-type]
+        return basis  # type: ignore[return-value]
+
+    # Otherwise, interpret it as a raw callable feature map.
+    if callable(basis):
+        return CallableBasis(basis)
+
+    raise TypeError('basis must be a Basis instance or a callable basis(X)->Phi')
+
+
 def _logit(p: NDArray[np.float64], eps: float = 1e-6) -> NDArray[np.float64]:
     p = np.clip(p, eps, 1.0 - eps)
     return np.log(p / (1.0 - p))
@@ -258,8 +295,12 @@ def grr_functional(
     X: ArrayLike,
     Y: ArrayLike,
     m: LinearFunctional,
-    basis: Basis,
+    basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
+    g: Callable | None = None,
+    grad_g: Callable | None = None,
+    inv_grad_g: Callable | None = None,
+    grad2_g: Callable | None = None,
     # Riesz estimation options
     riesz_method: RieszMethod = "grr",
     riesz_penalty: str | None = "l2",
@@ -271,7 +312,7 @@ def grr_functional(
     standardize_for_matching: bool = True,
     # Outcome model options
     outcome_models: OutcomeModels = "auto",
-    outcome_basis: Basis | None = None,
+    outcome_basis: Basis | Callable | None = None,
     outcome_link: str | None = None,
     outcome_penalty: str | None = "l2",
     outcome_lam: float = 1e-3,
@@ -301,13 +342,13 @@ def grr_functional(
         Basis used for Riesz regression (and for the outcome regression when
         ``outcome_models='shared'``).
     generator:
-        Bregman generator used for GRR. Required when ``riesz_method='grr'``.
+        Bregman generator used for GRR. If None, you can pass a generator function via ``g`` (and optionally ``grad_g``, ``inv_grad_g``, ``grad2_g``).
     riesz_method:
         - "grr"            : solve the GRR optimization problem
         - "nn_matching"    : NN-matching inverse propensity weights (ATE-only convenience)
         - "local_poly_nn_lsif" : local polynomial NN-LSIF weights (ATE-only convenience)
     outcome_link:
-        If None, inferred as 'logit' for binary outcomes, else 'identity'.
+        If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link.
     """
 
@@ -315,7 +356,26 @@ def grr_functional(
     n = X_.shape[0]
     y_ = _as_1d(Y, n=n, name="Y")
 
+    # Coerce raw callables into Basis objects (README-friendly)
+    basis = _coerce_basis(basis)
+    if outcome_basis is not None:
+        outcome_basis = _coerce_basis(outcome_basis)
+
     ests = _canonical_estimators(estimators)
+
+    riesz_method_ = str(riesz_method).lower()
+
+    # ------------------------------------------------------------------
+    # Generator inference (either pass `generator` or a raw `g`)
+    # ------------------------------------------------------------------
+    if riesz_method_ == "grr":
+        if generator is not None and g is not None:
+            raise ValueError('Pass either generator=... or g=... (not both).')
+        if generator is None:
+            if g is None:
+                raise ValueError("When riesz_method='grr', you must provide generator or g.")
+            generator = BregmanGenerator(g=g, grad=grad_g, inv_grad=inv_grad_g, grad2=grad2_g)
+
 
     # Outcome link inference
     if outcome_link is None:
@@ -366,7 +426,7 @@ def grr_functional(
         X_te, y_te = X_[test_idx], y_[test_idx]
 
         # ----- Riesz representer
-        if riesz_method == "grr":
+        if riesz_method_ == "grr":
             if generator is None:
                 raise ValueError("generator is required when riesz_method='grr'")
 
@@ -407,7 +467,7 @@ def grr_functional(
                 cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X1)
                 cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X0)
 
-        elif riesz_method in {"nn_matching", "local_poly_nn_lsif"}:
+        elif riesz_method_ in {"nn_matching", "local_poly_nn_lsif"}:
             # Matching-only: only implemented for treatment-type functionals.
             if not isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
                 raise ValueError("Matching Riesz methods are only supported for ATE/ATT/DID-type functionals.")
@@ -415,7 +475,7 @@ def grr_functional(
             D = X_tr[:, t_idx].astype(int)
             Z_tr = np.delete(X_tr, t_idx, axis=1)
 
-            if riesz_method == "nn_matching":
+            if riesz_method_ == "nn_matching":
                 wobj: NNMatchingWeights = nn_matching_inverse_propensity_weights(
                     Z_tr,
                     D,
@@ -446,7 +506,7 @@ def grr_functional(
             m_alpha[:] = np.nan
 
         else:
-            raise ValueError(f"Unknown riesz_method: {riesz_method}")
+            raise ValueError(f"Unknown riesz_method: {riesz_method_}")
 
         # ----- Outcome regression(s)
         if not need_outcome:
@@ -639,7 +699,7 @@ def grr_ate(
     X: ArrayLike,
     Y: ArrayLike,
     treatment_index: int = 0,
-    basis: Basis,
+    basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
@@ -654,7 +714,7 @@ def grr_att(
     X: ArrayLike,
     Y: ArrayLike,
     treatment_index: int = 0,
-    basis: Basis,
+    basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
@@ -675,7 +735,7 @@ def grr_did(
     Y0: ArrayLike,
     Y1: ArrayLike,
     treatment_index: int = 0,
-    basis: Basis,
+    basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
@@ -700,7 +760,7 @@ def grr_ame(
     X: ArrayLike,
     Y: ArrayLike,
     coordinate: int = 0,
-    basis: Basis,
+    basis: Basis | Callable,
     generator: BregmanGenerator | None = None,
     **kwargs,
 ) -> FunctionalEstimate:

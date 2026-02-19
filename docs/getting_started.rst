@@ -21,11 +21,14 @@ Optional extras:
 
 .. code-block:: bash
 
-   # scikit-learn integration (random forest leaf basis)
-   pip install "genriesz[sklearn]"
-
    # PyTorch integration (neural network feature maps)
    pip install "genriesz[torch]"
+
+Notes
+-----
+
+- scikit-learn is installed as a default dependency (used by several bases).
+- PyTorch is optional and only required for ``genriesz.torch_basis``.
 
 
 Quickstart: ATE
@@ -56,6 +59,9 @@ The following example assumes your regressor matrix is ``X = [D, Z]`` where
    # Basis on Z, then interact with D (ATE-friendly)
    psi = PolynomialBasis(degree=2, include_bias=True)
    phi = TreatmentInteractionBasis(base_basis=psi)
+
+   # Note: you do not need to call phi.fit(X) manually.
+   # grr_ate / grr_functional will copy and fit the basis inside each training fold.
 
    # UKL generator induces the ARB link automatically
    gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)).as_generator()

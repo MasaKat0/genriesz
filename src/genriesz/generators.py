@@ -1,27 +1,50 @@
-"""Bregman generators used in Generalized Riesz Regression.
+"""Bregman generators for Generalized Riesz Regression.
 
-The GRR objective is expressed in terms of a convex generator ``g`` and its
-convex conjugate ``g*``. For the built-in families we implement a convenient
-interface that provides:
+In *genriesz*, generalized Riesz regression (GRR) fits a finite-dimensional model
 
-- ``alpha = inv_grad(x, v)`` where ``v`` is the linear predictor ``phi(x)^T beta``
-- ``g(alpha)``
-- ``g*(v)`` via ``g*(v) = v*alpha - g(alpha)`` (with ``alpha = inv_grad(v)``)
+    v(x) = phi(x)^T beta,
 
-A **branch function** ``branch_fn`` can be supplied for generators whose link is
-branch-wise (e.g., UKL/BP). It must map a single regressor row ``x`` to either:
+and uses a generator-induced **link** to map the linear predictor ``v`` to a
+Riesz representer ``alpha``.
 
-- ``1`` (positive branch), or
-- ``0`` (negative branch).
+A (possibly regressor-dependent) **Bregman generator** is a convex function
 
-If ``branch_fn`` is not provided, the generator defaults to a data-independent
-sign choice based on the linear predictor (``sign(v)``), which is useful for
-functionals whose Riesz representer can take both signs.
+    g(x, alpha),
+
+with derivative (wrt ``alpha``) ``∂g(x, alpha)/∂alpha``. GRR uses the *canonical*
+(automatic) link
+
+    alpha(x) = (∂g(x, ·))^{-1}( v(x) ),
+
+which is the key mechanism behind **Automatic Regressor Balancing (ARB)**.
+
+This module provides:
+
+- Built-in generator families:
+  - :class:`SquaredGenerator` ("SQ")
+  - :class:`UKLGenerator` ("UKL")
+  - :class:`BPGenerator` ("BP")
+
+- A flexible :class:`BregmanGenerator` that lets users specify an arbitrary
+  generator ``g`` and (optionally) its derivatives. If derivatives are omitted,
+  they are approximated numerically.
+
+Notes
+-----
+The public interface expected by the GRR solvers is:
+
+- ``alpha = inv_grad(X, v)``
+- ``g_val = g(X, alpha)``
+- ``g2 = grad2(X, alpha)`` (second derivative wrt ``alpha``; elementwise)
+- ``(g_star, alpha) = conjugate(X, v)``
+
+All evaluations are row-wise: ``X`` is (n, d) and outputs are 1D arrays of
+length n.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import inspect
 from typing import Callable
 
 import numpy as np
@@ -30,71 +53,286 @@ from numpy.typing import ArrayLike, NDArray
 BranchFn = Callable[[NDArray[np.float64]], int]
 
 
-def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
+def _as_2d(X: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
     X_ = np.asarray(X, dtype=float)
     if X_.ndim != 2:
-        raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        raise ValueError(f"{name} must be 2D. Got shape {X_.shape}.")
     return X_
 
 
-def _as_1d(v: ArrayLike, n: int) -> NDArray[np.float64]:
+def _as_1d(v: ArrayLike, *, n: int, name: str = "v") -> NDArray[np.float64]:
     v_ = np.asarray(v, dtype=float).reshape(-1)
     if v_.shape[0] != n:
-        raise ValueError(f"v must have length {n}. Got {v_.shape}.")
+        raise ValueError(f"{name} must have length {n}. Got shape {v_.shape}.")
     return v_
 
 
-@dataclass
+class _RowwiseScalarFn:
+    """Wrap a scalar function and provide vectorized / rowwise evaluation.
+
+    The wrapped callable can have signature:
+
+    - ``f(alpha)``
+    - ``f(x, alpha)`` where ``x`` is a 1D regressor row
+    - a vectorized form: ``f(alpha_array)`` or ``f(X, alpha_array)``
+
+    The wrapper tries the vectorized call once and caches the outcome.
+    """
+
+    def __init__(self, func: Callable):
+        self.func = func
+
+        # Determine whether the function expects 1 or 2 positional args.
+        try:
+            sig = inspect.signature(func)
+            n_pos = 0
+            for p in sig.parameters.values():
+                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+                    n_pos += 1
+            self._arity = 1 if n_pos <= 1 else 2
+        except Exception:
+            # If we cannot inspect, assume 2-arg form.
+            self._arity = 2
+
+        # None = unknown, True = vectorized works, False = rowwise only
+        self._vectorized: bool | None = None
+
+    def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
+        X = _as_2d(X)
+        a = _as_1d(a, n=len(X), name="a")
+
+        if self._vectorized is not False:
+            try:
+                if self._arity == 1:
+                    out = self.func(a)
+                else:
+                    out = self.func(X, a)
+                out_arr = np.asarray(out, dtype=float).reshape(-1)
+                if out_arr.shape[0] == len(a):
+                    self._vectorized = True
+                    return out_arr
+            except Exception:
+                self._vectorized = False
+
+        out = np.empty(len(a), dtype=float)
+        if self._arity == 1:
+            for i in range(len(a)):
+                out[i] = float(self.func(float(a[i])))
+        else:
+            for i in range(len(a)):
+                out[i] = float(self.func(np.asarray(X[i], dtype=float), float(a[i])))
+        return out
+
+
 class BregmanGenerator:
-    """A concrete Bregman generator with a branch-wise inverse gradient."""
+    """A Bregman generator with an (optional) automatic link.
 
-    name: str
-    C: float
-    branch_fn: BranchFn | None
+    Parameters
+    ----------
+    g:
+        Generator function ``g(x, alpha)`` or ``g(alpha)``.
+    grad:
+        First derivative wrt alpha, ``∂g(x, alpha)/∂alpha``.
+        If omitted, it is approximated by finite differences.
+    inv_grad:
+        Inverse derivative (link) ``alpha = (∂g)^{-1}(x, v)``.
+        If omitted, it is computed by Newton iterations using ``grad`` and
+        ``grad2``.
+    grad2:
+        Second derivative wrt alpha (elementwise). If omitted, it is
+        approximated from ``g`` via a second-order finite difference.
+    name:
+        Display name.
+    C:
+        Optional domain parameter used by some generator families.
+        The generic implementation uses it only as a soft domain guard.
+    branch_fn:
+        Optional branch selector returning 1 (positive) or 0 (negative).
+        Built-in UKL/BP generators use this to choose the sign branch.
 
+    Notes
+    -----
+    The generic (user-specified) generator supports regressor-dependent
+    generators via ``g(x, alpha)``. For performance and numerical stability,
+    providing analytic ``grad`` and especially ``inv_grad`` is strongly
+    recommended.
+    """
+
+    def __init__(
+        self,
+        *,
+        g: Callable | None = None,
+        grad: Callable | None = None,
+        inv_grad: Callable | None = None,
+        grad2: Callable | None = None,
+        name: str = "Custom",
+        C: float = 0.0,
+        branch_fn: BranchFn | None = None,
+        finite_diff_eps: float = 1e-6,
+        newton_max_iter: int = 60,
+        newton_tol: float = 1e-10,
+    ):
+        self.name = str(name)
+        self.C = float(C)
+        self.branch_fn = branch_fn
+
+        self._g = None if g is None else _RowwiseScalarFn(g)
+        self._grad = None if grad is None else _RowwiseScalarFn(grad)
+        self._inv_grad = None if inv_grad is None else _RowwiseScalarFn(inv_grad)
+        self._grad2 = None if grad2 is None else _RowwiseScalarFn(grad2)
+
+        self._eps = float(finite_diff_eps)
+        self._newton_max_iter = int(newton_max_iter)
+        self._newton_tol = float(newton_tol)
+
+    # ------------------------------------------------------------------
+    # Compatibility helpers
+    # ------------------------------------------------------------------
     def as_generator(self) -> "BregmanGenerator":
         """For API compatibility with earlier drafts."""
 
         return self
 
+    def evaluate_g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        return self.g(X, alpha)
+
+    def evaluate_grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        return self.grad(X, alpha)
+
+    def evaluate_inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        return self.inv_grad(X, v)
+
+    # ------------------------------------------------------------------
+    # Internal utilities
+    # ------------------------------------------------------------------
     def _sign(self, X: NDArray[np.float64], v: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Return an array of signs (+1/-1) for branch-wise generators."""
+        """Return +1/-1 sign array for branch-wise generators."""
 
         if self.branch_fn is None:
-            # Default: choose sign by the linear predictor.
             return np.where(v >= 0.0, 1.0, -1.0)
         s = np.empty(len(v), dtype=float)
         for i in range(len(v)):
             s[i] = 1.0 if int(self.branch_fn(X[i])) == 1 else -1.0
         return s
 
-    # The following methods are overridden by subclasses.
-    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    def _require_g(self) -> _RowwiseScalarFn:
+        if self._g is None:
+            raise ValueError("This generator does not define g().")
+        return self._g
 
-    def g(self, alpha: ArrayLike) -> NDArray[np.float64]:  # pragma: no cover
-        raise NotImplementedError
+    # ------------------------------------------------------------------
+    # Public interface required by GRR solvers
+    # ------------------------------------------------------------------
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        """Evaluate g(x, alpha) row-wise."""
 
-    def grad2(self, alpha: ArrayLike) -> NDArray[np.float64]:  # pragma: no cover
-        """Second derivative of g (elementwise). Needed for derivatives of alpha."""
+        X_ = _as_2d(X)
+        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+        gfn = self._require_g()
+        return gfn(X_, a_)
 
-        raise NotImplementedError
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        """Evaluate the derivative ∂g/∂alpha row-wise."""
+
+        X_ = _as_2d(X)
+        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+
+        if self._grad is not None:
+            return self._grad(X_, a_)
+
+        # Finite differences on g
+        eps = self._eps
+        gfn = self._require_g()
+        return (gfn(X_, a_ + eps) - gfn(X_, a_ - eps)) / (2.0 * eps)
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        """Evaluate the second derivative ∂²g/∂alpha² row-wise."""
+
+        X_ = _as_2d(X)
+        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+
+        if self._grad2 is not None:
+            return self._grad2(X_, a_)
+
+        # Second-order finite difference on g
+        eps = self._eps
+        gfn = self._require_g()
+        g_p = gfn(X_, a_ + eps)
+        g_0 = gfn(X_, a_)
+        g_m = gfn(X_, a_ - eps)
+        return (g_p - 2.0 * g_0 + g_m) / (eps * eps)
+
+    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        """Inverse derivative map alpha = (∂g)^{-1}(x, v)."""
+
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+
+        if self._inv_grad is not None:
+            return self._inv_grad(X_, v_)
+
+        # Automatic inversion via Newton iterations.
+        # This is a generic fallback and may be slow / unstable.
+        s = self._sign(X_, v_)
+
+        # Heuristic initialization.
+        alpha = v_.copy()
+        if self.branch_fn is not None:
+            alpha = s * np.abs(alpha)
+
+        # Soft domain guard used by UKL/BP-like generators.
+        if self.C > 0:
+            alpha = s * np.maximum(np.abs(alpha), self.C + 1e-6)
+
+        tol = self._newton_tol
+        for _ in range(self._newton_max_iter):
+            g1 = self.grad(X_, alpha)
+            diff = g1 - v_
+            max_abs = float(np.max(np.abs(diff)))
+            if not np.isfinite(max_abs):
+                break
+            if max_abs < tol:
+                return alpha
+
+            g2 = self.grad2(X_, alpha)
+            g2 = np.asarray(g2, dtype=float)
+            # Guard against non-positive curvature (should not happen for strictly convex g).
+            g2 = np.where(np.isfinite(g2) & (g2 > 1e-12), g2, 1e-12)
+
+            step = diff / g2
+            step = np.clip(step, -50.0, 50.0)
+            alpha = alpha - step
+
+            if self.branch_fn is not None:
+                alpha = s * np.abs(alpha)
+            if self.C > 0:
+                alpha = s * np.maximum(np.abs(alpha), self.C + 1e-6)
+
+        # If we reach here, Newton did not converge reliably.
+        raise RuntimeError(
+            "Failed to numerically invert grad. Provide inv_grad (and preferably grad/grad2) "
+            "for this generator."
+        )
 
     def conjugate(self, X: ArrayLike, v: ArrayLike) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Return (g*(v), alpha) evaluated row-wise."""
 
         X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_))
+        v_ = _as_1d(v, n=len(X_), name="v")
         alpha = self.inv_grad(X_, v_)
-        g_val = self.g(alpha)
+        g_val = self.g(X_, alpha)
         g_star = v_ * alpha - g_val
         return g_star, alpha
 
 
 class SquaredGenerator(BregmanGenerator):
-    """Squared generator: g(alpha) = (alpha - C)^2.
+    """Squared generator (SQ-Riesz).
 
-    This generator has no domain constraints and uses an identity-like link.
+    g(alpha) = (alpha - C)^2.
+
+    This generator has no strict domain constraints and induces a linear link
+
+        alpha = C + 0.5 * v.
     """
 
     def __init__(self, C: float = 0.0):
@@ -102,20 +340,27 @@ class SquaredGenerator(BregmanGenerator):
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_))
+        v_ = _as_1d(v, n=len(X_), name="v")
         return self.C + 0.5 * v_
 
-    def g(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         return np.square(a - self.C)
 
-    def grad2(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        return 2.0 * (a - self.C)
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         return np.full_like(a, 2.0, dtype=float)
 
 
 class UKLGenerator(BregmanGenerator):
-    """Unnormalized KL generator.
+    """Unnormalized KL generator (UKL-Riesz).
 
     g(alpha) = (|alpha| - C) log(|alpha| - C) - |alpha|,  with |alpha| > C.
 
@@ -134,42 +379,42 @@ class UKLGenerator(BregmanGenerator):
         super().__init__(name="UKL", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        """Inverse gradient map alpha = (g')^{-1}(v).
-
-        Notes
-        -----
-        For numerical robustness we clip the exponential term away from zero.
-        Extremely negative linear predictors can underflow ``exp`` to 0 in
-        float64, which would otherwise violate the strict domain constraint
-        ``|alpha| > C``.
-        """
+        """Branch-wise inverse gradient alpha = (g')^{-1}(v)."""
 
         X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_))
+        v_ = _as_1d(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
 
         # exp can underflow to 0 for large negative inputs; clip and floor.
         z = np.clip(s * v_, -700.0, 700.0)
         exp_term = np.exp(z)
         exp_term = np.maximum(exp_term, 1e-12)
-
         return s * (self.C + exp_term)
 
-    def g(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
-        # Numerical guard: treat tiny/negative values as boundary.
         t = np.maximum(t, 1e-12)
         return t * np.log(t) - np.abs(a)
 
-    def grad2(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        t = np.abs(a) - self.C
+        t = np.maximum(t, 1e-12)
+        return np.sign(a) * np.log(t)
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return 1.0 / t
 
+
 class BPGenerator(BregmanGenerator):
-    """Box-Power generator.
+    """Box-Power generator (BP-Riesz).
 
     A smooth family interpolating between UKL-like (small power) and squared-like
     (power near 1) behavior.
@@ -207,36 +452,33 @@ class BPGenerator(BregmanGenerator):
         super().__init__(name=f"BP(omega={self.omega:g})", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        """Inverse gradient map for BP.
+        """Branch-wise inverse gradient map for BP.
 
         The theoretical domain restriction is ``t = 1 + sign*v/k > 0``. In finite
         samples (and especially out-of-sample, e.g. in cross-fitting) the linear
         predictor can violate this constraint. Instead of raising an exception,
-        we **clip** ``t`` to a small positive value. This keeps evaluation of
-        alpha well-defined and avoids hard failures in notebooks.
-
-        This clipping only activates when the predictor is far outside the
-        domain; in typical use it is inactive.
+        we **clip** ``t`` to a small positive value.
         """
 
         X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_))
+        v_ = _as_1d(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
         k = 1.0 + 1.0 / self.omega
 
         t = 1.0 + s * v_ / k
         t = np.maximum(t, 1e-6)
-
         return s * (self.C + np.power(t, 1.0 / self.omega))
 
-    def g(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return np.power(t, 1.0 + self.omega) - np.power(t, self.omega) - np.abs(a)
 
-    def grad2(self, alpha: ArrayLike) -> NDArray[np.float64]:
-        a = np.asarray(alpha, dtype=float).reshape(-1)
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         k = 1.0 + 1.0 / self.omega

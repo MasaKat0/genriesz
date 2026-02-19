@@ -17,6 +17,12 @@ def _make_synthetic_ate(n: int = 300, d: int = 2, seed: int = 0):
 
 
 def phi(X: np.ndarray) -> np.ndarray:
+    """Simple ATE-style interaction features.
+
+    X = [D, Z...]
+    Phi = [1, D, Z, D*Z]
+    """
+
     X = np.asarray(X, dtype=float)
     if X.ndim == 1:
         d = X[0]
@@ -48,13 +54,11 @@ def test_grr_functional_ra_rw_arw_tmle_run():
         tol=1e-9,
     )
 
-    assert "rw" in res.estimates
-    assert "ra_shared" in res.estimates
-    assert "arw_shared" in res.estimates
-
-    for k in ["rw", "ra_shared", "arw_shared", "tmle_shared"]:
-        assert np.isfinite(res.estimates[k].theta)
-        assert np.isfinite(res.estimates[k].stderr)
+    # Keys are canonicalized to 'ra'/'rw'/'arw'/'tmle'.
+    for k in ["rw", "ra", "arw", "tmle"]:
+        assert k in res.estimates
+        assert np.isfinite(res.estimates[k].estimate)
+        assert np.isfinite(res.estimates[k].se)
 
     s = res.summary_text()
     assert isinstance(s, str)

@@ -1,7 +1,4 @@
-"""Sphinx configuration for the *genriesz* project.
-
-This configuration is designed to build the docs locally (and on CI/hosted builders).
-"""
+"""Sphinx configuration for the *genriesz* project."""
 
 from __future__ import annotations
 
@@ -31,7 +28,6 @@ try:
 
     release = importlib_metadata.version("genriesz")
 except Exception:  # pragma: no cover
-    # Fallback for editable/non-installed builds.
     release = "0.0.0"
 
 
@@ -44,6 +40,9 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx_autodoc_typehints",
+    # Optional: notebooks / markdown
+    "nbsphinx",
+    "myst_parser",
 ]
 
 autosummary_generate = True
@@ -54,8 +53,11 @@ autodoc_typehints = "description"
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
 
+# Do not execute notebooks during docs builds.
+nbsphinx_execute = "never"
+
 templates_path = ["_templates"]
-exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
+exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "source"]
 
 
 # ---------------------------------------------------------------------------
@@ -68,5 +70,4 @@ html_static_path = ["_static"]
 # ---------------------------------------------------------------------------
 # Misc
 # ---------------------------------------------------------------------------
-# Keep strictness low by default; we can turn this on later if desired.
 nitpicky = False

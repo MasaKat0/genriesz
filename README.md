@@ -101,6 +101,9 @@ psi = PolynomialBasis(degree=2)
 # ATE-friendly basis: interact the base basis with treatment.
 phi = TreatmentInteractionBasis(base_basis=psi)
 
+# Note: you do not need to call phi.fit(X) manually.
+# grr_ate / grr_functional will copy and fit the basis inside each training fold.
+
 # Unnormalized KL generator with a branch function:
 #   + branch for treated (D=1), - branch for control (D=0)
 gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)).as_generator()
@@ -195,6 +198,9 @@ Y = np.random.randn(200)
 
 generator = BregmanGenerator(g=g)  # grad/inv_grad can be derived numerically if omitted
 
+# Alternatively, you can pass `g` directly (and optionally its derivatives):
+# res = grr_functional(..., g=g, grad_g=..., inv_grad_g=..., grad2_g=...)
+
 res = grr_functional(
     X=X,
     Y=Y,
@@ -219,7 +225,7 @@ BregmanGenerator(g=..., grad=..., inv_grad=...)
 If you omit them, the library falls back to:
 
 - finite differences for $g'$, and
-- scalar root-finding for $(g')^{-1}$.
+- a Newton solver for $(g')^{-1}$ (vectorized, with safeguards).
 
 ---
 
@@ -228,8 +234,9 @@ If you omit them, the library falls back to:
 The following convenience wrappers are included:
 
 - **ATE** (average treatment effect): `grr_ate` / `ATEFunctional(...)`
-- **AME** (average marginal effect / average derivative): `grr_ame` / `AverageDerivativeFunctional(...)`
-- **Average policy effect**: `grr_policy_effect` / `PolicyEffectFunctional(...)`
+- **ATT** (average treatment effect on the treated): `grr_att` / `ATTFunctional(...)`
+- **DID** (panel difference-in-differences as ATT on ΔY): `grr_did` / `DIDFunctional(...)`
+- **AME** (average marginal effect / average derivative): `grr_ame` / `AMEFunctional(...)`
 
 ---
 

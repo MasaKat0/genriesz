@@ -215,7 +215,7 @@ class GRRGLM:
         dPhi = self.basis.derivative(X_, coordinate)
         dv = dPhi @ self.beta_
         alpha = self.predict_alpha(X_)
-        g2 = self.generator.grad2(alpha)
+        g2 = self.generator.grad2(X_, alpha)
         return dv / g2
 
 

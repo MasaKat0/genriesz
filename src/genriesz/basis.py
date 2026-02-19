@@ -17,10 +17,32 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+
+
+def _as_2d(X: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
+    X_ = np.asarray(X, dtype=float)
+    if X_.ndim != 2:
+        raise ValueError(f"{name} must be a 2D array. Got shape {X_.shape}.")
+    return X_
+
+
+def _as_2d_allow_1d(X: ArrayLike, *, name: str = "X") -> tuple[NDArray[np.float64], bool]:
+    """Return (X2d, is_single).
+
+    This helper lets bases support both batch inputs (n, d) and single-row
+    inputs (d,). For single-row inputs, we reshape to (1, d).
+    """
+
+    X_ = np.asarray(X, dtype=float)
+    if X_.ndim == 1:
+        return X_.reshape(1, -1), True
+    if X_.ndim == 2:
+        return X_, False
+    raise ValueError(f"{name} must be 1D or 2D. Got shape {X_.shape}.")
 
 
 class Basis(Protocol):
@@ -44,7 +66,7 @@ class Basis(Protocol):
 
 
 class BaseBasis:
-    """Convenience base class implementing ``copy``."""
+    """Convenience base class implementing ``copy`` and a no-op ``fit``."""
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "BaseBasis":
         return self
@@ -57,9 +79,83 @@ class BaseBasis:
         raise NotImplementedError
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
-        raise NotImplementedError(
-            f"{self.__class__.__name__} does not implement derivative()."
-        )
+        raise NotImplementedError(f"{self.__class__.__name__} does not implement derivative().")
+
+
+class CallableBasis(BaseBasis):
+    """Wrap a Python callable as a basis.
+
+    This is useful when you want to quickly prototype a custom feature map
+    without creating a full class.
+
+    Parameters
+    ----------
+    func:
+        A callable returning a feature matrix. It may accept either a 2D array
+        ``X`` or a 1D array ``x``.
+    derivative:
+        Optional callable implementing the derivative feature map required by
+        AME-type functionals.
+
+    Notes
+    -----
+    We infer ``n_features`` during ``fit`` (or the first call).
+    """
+
+    def __init__(
+        self,
+        func: Callable[[ArrayLike], ArrayLike],
+        *,
+        derivative: Callable[[ArrayLike, int], ArrayLike] | None = None,
+    ):
+        self.func = func
+        self._derivative = derivative
+        self._n_features: int | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "CallableBasis":
+        Phi = np.asarray(self.__call__(X), dtype=float)
+        if Phi.ndim == 1:
+            self._n_features = int(Phi.shape[0])
+        elif Phi.ndim == 2:
+            self._n_features = int(Phi.shape[1])
+        else:
+            raise ValueError("Callable basis must return 1D or 2D array")
+        return self
+
+    @property
+    def n_features(self) -> int:
+        if self._n_features is None:
+            raise RuntimeError("CallableBasis must be fit() before use.")
+        return int(self._n_features)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X2, single = _as_2d_allow_1d(X)
+        out = self.func(X if not single else X2[0])
+        Phi = np.asarray(out, dtype=float)
+
+        if single:
+            if Phi.ndim == 2 and Phi.shape[0] == 1:
+                Phi = Phi[0]
+            if Phi.ndim != 1:
+                raise ValueError("CallableBasis(func) returned an invalid shape for single-row input")
+            if self._n_features is None:
+                self._n_features = int(Phi.shape[0])
+            return Phi
+
+        if Phi.ndim == 1:
+            # If the callable returns (p,) for batch input, treat it as one row.
+            Phi = Phi.reshape(1, -1)
+        if Phi.ndim != 2 or Phi.shape[0] != X2.shape[0]:
+            raise ValueError("CallableBasis(func) must return an array of shape (n, p)")
+        if self._n_features is None:
+            self._n_features = int(Phi.shape[1])
+        return Phi
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        if self._derivative is None:
+            return super().derivative(X, coordinate)
+        out = self._derivative(X, int(coordinate))
+        return np.asarray(out, dtype=float)
 
 
 class PolynomialBasis(BaseBasis):
@@ -83,9 +179,7 @@ class PolynomialBasis(BaseBasis):
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "PolynomialBasis":
         import sklearn.preprocessing
 
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        X2, _ = _as_2d_allow_1d(X)
 
         poly = sklearn.preprocessing.PolynomialFeatures(
             degree=self.degree,
@@ -93,7 +187,7 @@ class PolynomialBasis(BaseBasis):
             interaction_only=False,
             order="C",
         )
-        poly.fit(X_)
+        poly.fit(X2)
         self._poly = poly
         self._powers = np.asarray(poly.powers_, dtype=int)
         return self
@@ -105,26 +199,22 @@ class PolynomialBasis(BaseBasis):
         return int(self._powers.shape[0])
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X2, single = _as_2d_allow_1d(X)
         if self._poly is None:
             # Allow stateless usage by fitting on the fly.
-            self.fit(X)
-        X_ = np.asarray(X, dtype=float)
-        return np.asarray(self._poly.transform(X_), dtype=float)
+            self.fit(X2)
+        out = np.asarray(self._poly.transform(X2), dtype=float)
+        return out[0] if single else out
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
-        """Derivative of the feature map wrt ``X[:, coordinate]``.
+        """Derivative of the feature map wrt ``X[:, coordinate]``."""
 
-        Returns a matrix of shape (n, p).
-        """
-
+        X2, single = _as_2d_allow_1d(X)
         if self._poly is None or self._powers is None:
-            self.fit(X)
+            self.fit(X2)
 
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-
-        n, d = X_.shape
+        n, d = X2.shape
+        coordinate = int(coordinate)
         if coordinate < 0 or coordinate >= d:
             raise ValueError(f"coordinate must be in [0, {d-1}]. Got {coordinate}.")
 
@@ -132,38 +222,33 @@ class PolynomialBasis(BaseBasis):
         p = powers.shape[0]
         pk = powers[:, coordinate].astype(int)  # (p,)
 
-        # Base monomials
-        Phi = self.__call__(X_)  # (n, p)
+        Phi = np.asarray(self._poly.transform(X2), dtype=float)  # (n, p)
 
         # Default formula: d/dx_k prod x^p = p_k * prod x^p / x_k.
-        xk = X_[:, coordinate].reshape(n, 1)
+        xk = X2[:, coordinate].reshape(n, 1)
         xk_safe = np.where(xk != 0.0, xk, 1.0)
 
         der = Phi * pk.reshape(1, p) / xk_safe
 
-        # Fix the special case: p_k == 1 and x_k == 0.
-        # In that case, monomial is x_k * rest, derivative is rest.
+        # Fix special case: p_k == 1 and x_k == 0. Derivative is the product of other factors.
         mask_feat = pk == 1
         if np.any(mask_feat):
             mask_obs = (xk.reshape(-1) == 0.0)
             if np.any(mask_obs):
-                # Compute rest = prod_{j!=k} x_j^{p_j} for those features.
                 other_powers = powers[mask_feat].copy()
                 other_powers[:, coordinate] = 0
-                # Compute rest via a stable multiplication.
                 rest = np.ones((mask_obs.sum(), other_powers.shape[0]), dtype=float)
-                X_sub = X_[mask_obs]
+                X_sub = X2[mask_obs]
                 for j in range(d):
                     pj = other_powers[:, j]
                     if np.all(pj == 0):
                         continue
                     rest *= np.power(X_sub[:, [j]], pj.reshape(1, -1))
-
                 der[np.ix_(mask_obs, np.where(mask_feat)[0])] = rest
 
-        # Features with pk == 0 should be exactly 0.
         der[:, pk == 0] = 0.0
-        return der
+
+        return der[0] if single else der
 
 
 class TreatmentInteractionBasis(BaseBasis):
@@ -183,15 +268,12 @@ class TreatmentInteractionBasis(BaseBasis):
         self._base_dim: int | None = None
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "TreatmentInteractionBasis":
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-        if self.treatment_index < 0 or self.treatment_index >= X_.shape[1]:
+        X2, _ = _as_2d_allow_1d(X)
+        if self.treatment_index < 0 or self.treatment_index >= X2.shape[1]:
             raise ValueError("treatment_index is out of bounds")
-
-        Z = np.delete(X_, self.treatment_index, axis=1)
+        Z = np.delete(X2, self.treatment_index, axis=1)
         self.base_basis.fit(Z, y=None)
-        self._base_dim = self.base_basis.n_features
+        self._base_dim = int(self.base_basis.n_features)
         return self
 
     @property
@@ -201,45 +283,43 @@ class TreatmentInteractionBasis(BaseBasis):
         return 2 * int(self._base_dim)
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        X2, single = _as_2d_allow_1d(X)
         if self._base_dim is None:
-            self.fit(X_)
+            self.fit(X2)
 
-        D = X_[:, self.treatment_index].reshape(-1, 1)
+        D = X2[:, self.treatment_index].reshape(-1, 1)
         if not np.all(np.isin(np.unique(D), [0.0, 1.0])):
             raise ValueError("Treatment column must be binary (0/1).")
 
-        Z = np.delete(X_, self.treatment_index, axis=1)
+        Z = np.delete(X2, self.treatment_index, axis=1)
         Psi = np.asarray(self.base_basis(Z), dtype=float)
-
-        return np.concatenate([D * Psi, (1.0 - D) * Psi], axis=1)
+        out = np.concatenate([D * Psi, (1.0 - D) * Psi], axis=1)
+        return out[0] if single else out
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
+        X2, single = _as_2d_allow_1d(X)
         if self._base_dim is None:
-            self.fit(X_)
+            self.fit(X2)
 
+        coordinate = int(coordinate)
         if coordinate == self.treatment_index:
             raise ValueError(
                 "Derivative w.r.t. the treatment indicator is not supported (binary variable)."
             )
 
-        d = X_.shape[1]
+        d = X2.shape[1]
         if coordinate < 0 or coordinate >= d:
             raise ValueError(f"coordinate must be in [0, {d-1}]. Got {coordinate}.")
 
         # Map full coordinate index -> Z coordinate index
         z_coord = coordinate - 1 if coordinate > self.treatment_index else coordinate
 
-        D = X_[:, self.treatment_index].reshape(-1, 1)
-        Z = np.delete(X_, self.treatment_index, axis=1)
+        D = X2[:, self.treatment_index].reshape(-1, 1)
+        Z = np.delete(X2, self.treatment_index, axis=1)
         dPsi = self.base_basis.derivative(Z, z_coord)
 
-        return np.concatenate([D * dPsi, (1.0 - D) * dPsi], axis=1)
+        out = np.concatenate([D * dPsi, (1.0 - D) * dPsi], axis=1)
+        return out[0] if single else out
 
 
 class RBFRandomFourierBasis(BaseBasis):
@@ -270,14 +350,12 @@ class RBFRandomFourierBasis(BaseBasis):
         self._b: NDArray[np.float64] | None = None
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "RBFRandomFourierBasis":
-        X_ = np.asarray(X, dtype=float)
-        if X_.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-        n, d = X_.shape
+        X2, _ = _as_2d_allow_1d(X)
+        n, d = X2.shape
 
         if self.standardize:
-            mean = X_.mean(axis=0)
-            std = X_.std(axis=0, ddof=0)
+            mean = X2.mean(axis=0)
+            std = X2.std(axis=0, ddof=0)
             std = np.where(std > 0, std, 1.0)
         else:
             mean = np.zeros(d)
@@ -300,15 +378,244 @@ class RBFRandomFourierBasis(BaseBasis):
         return int(self.n_features_rff + (1 if self.include_bias else 0))
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X2, single = _as_2d_allow_1d(X)
         if self._W is None or self._b is None or self._mean is None or self._std is None:
-            self.fit(X)
-        X_ = np.asarray(X, dtype=float)
-        Z = (X_ - self._mean) / self._std
+            self.fit(X2)
+
+        Z = (X2 - self._mean) / self._std
         proj = Z @ self._W + self._b
         feats = np.sqrt(2.0 / self.n_features_rff) * np.cos(proj)
         if self.include_bias:
-            feats = np.column_stack([np.ones(len(X_), dtype=float), feats])
-        return feats.astype(float)
+            feats = np.column_stack([np.ones(len(X2), dtype=float), feats])
+        feats = feats.astype(float)
+        return feats[0] if single else feats
+
+
+def _rbf_kernel(
+    X: NDArray[np.float64],
+    C: NDArray[np.float64],
+    *,
+    sigma: float,
+) -> NDArray[np.float64]:
+    """Compute the Gaussian (RBF) kernel matrix K(X, C)."""
+
+    if float(sigma) <= 0:
+        raise ValueError("sigma must be positive")
+    X = np.asarray(X, dtype=float)
+    C = np.asarray(C, dtype=float)
+
+    x2 = np.sum(X * X, axis=1).reshape(-1, 1)
+    c2 = np.sum(C * C, axis=1).reshape(1, -1)
+    dist2 = x2 + c2 - 2.0 * (X @ C.T)
+    dist2 = np.maximum(dist2, 0.0)
+    return np.exp(-dist2 / (2.0 * sigma * sigma))
+
+
+class GaussianRKHSBasis(BaseBasis):
+    """Explicit Gaussian-kernel RKHS basis using kernel sections.
+
+    The feature map is
+
+        phi_j(x) = K(x, c_j),
+
+    where {c_j} are fitted centers.
+
+    This is a convenient default for RKHS-style GRR in moderate dimensions.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_centers: int = 300,
+        sigma: float = 1.0,
+        include_bias: bool = True,
+        standardize: bool = True,
+        random_state: int | None = None,
+        centers: ArrayLike | None = None,
+    ):
+        if int(n_centers) <= 0:
+            raise ValueError("n_centers must be positive")
+        if float(sigma) <= 0:
+            raise ValueError("sigma must be positive")
+        self.n_centers = int(n_centers)
+        self.sigma = float(sigma)
+        self.include_bias = bool(include_bias)
+        self.standardize = bool(standardize)
+        self.random_state = random_state
+        self._centers_input = centers
+
+        self._centers: NDArray[np.float64] | None = None
+        self._mean: NDArray[np.float64] | None = None
+        self._std: NDArray[np.float64] | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "GaussianRKHSBasis":
+        X2, _ = _as_2d_allow_1d(X)
+        n, d = X2.shape
+
+        if self.standardize:
+            mean = X2.mean(axis=0)
+            std = X2.std(axis=0, ddof=0)
+            std = np.where(std > 0, std, 1.0)
+        else:
+            mean = np.zeros(d)
+            std = np.ones(d)
+
+        Xs = (X2 - mean) / std
+
+        if self._centers_input is not None:
+            C = np.asarray(self._centers_input, dtype=float)
+            if C.ndim != 2 or C.shape[1] != d:
+                raise ValueError("centers must be 2D with the same number of columns as X")
+            Cs = (C - mean) / std
+        else:
+            m = min(self.n_centers, n)
+            rng = np.random.default_rng(self.random_state)
+            idx = rng.choice(n, size=m, replace=False)
+            Cs = Xs[idx]
+
+        self._mean = mean.astype(float)
+        self._std = std.astype(float)
+        self._centers = Cs.astype(float)
+        return self
+
+    @property
+    def centers(self) -> NDArray[np.float64]:
+        if self._centers is None:
+            raise RuntimeError("GaussianRKHSBasis must be fit() before use.")
+        return self._centers
+
+    @property
+    def n_features(self) -> int:
+        if self._centers is None:
+            raise RuntimeError("GaussianRKHSBasis must be fit() before use.")
+        m = int(self._centers.shape[0])
+        return m + (1 if self.include_bias else 0)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X2, single = _as_2d_allow_1d(X)
+        if self._centers is None or self._mean is None or self._std is None:
+            self.fit(X2)
+
+        Xs = (X2 - self._mean) / self._std
+        K = _rbf_kernel(Xs, self._centers, sigma=self.sigma)
+        if self.include_bias:
+            K = np.column_stack([np.ones(len(X2), dtype=float), K])
+        K = K.astype(float)
+        return K[0] if single else K
+
+
+class RBFNystromBasis(BaseBasis):
+    """Nyström feature map for the RBF kernel.
+
+    This class computes a Nyström approximation to the implicit RBF-RKHS feature
+    map. Compared to :class:`GaussianRKHSBasis`, Nyström features apply an
+    additional whitening transform based on the kernel matrix among centers.
+
+    The feature map is
+
+        Phi(x) = K(x, C) (K(C, C) + jitter I)^{-1/2}.
+
+    Notes
+    -----
+    - This is an O(m^3) preprocessing step in the number of centers ``m``.
+    - For large ``m``, consider :class:`RBFRandomFourierBasis`.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_centers: int = 300,
+        sigma: float = 1.0,
+        include_bias: bool = True,
+        standardize: bool = True,
+        random_state: int | None = None,
+        centers: ArrayLike | None = None,
+        jitter: float = 1e-8,
+    ):
+        if int(n_centers) <= 0:
+            raise ValueError("n_centers must be positive")
+        if float(sigma) <= 0:
+            raise ValueError("sigma must be positive")
+        if float(jitter) <= 0:
+            raise ValueError("jitter must be positive")
+
+        self.n_centers = int(n_centers)
+        self.sigma = float(sigma)
+        self.include_bias = bool(include_bias)
+        self.standardize = bool(standardize)
+        self.random_state = random_state
+        self._centers_input = centers
+        self.jitter = float(jitter)
+
+        self._centers: NDArray[np.float64] | None = None
+        self._mean: NDArray[np.float64] | None = None
+        self._std: NDArray[np.float64] | None = None
+        self._inv_sqrt: NDArray[np.float64] | None = None
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "RBFNystromBasis":
+        X2, _ = _as_2d_allow_1d(X)
+        n, d = X2.shape
+
+        if self.standardize:
+            mean = X2.mean(axis=0)
+            std = X2.std(axis=0, ddof=0)
+            std = np.where(std > 0, std, 1.0)
+        else:
+            mean = np.zeros(d)
+            std = np.ones(d)
+
+        Xs = (X2 - mean) / std
+
+        if self._centers_input is not None:
+            C = np.asarray(self._centers_input, dtype=float)
+            if C.ndim != 2 or C.shape[1] != d:
+                raise ValueError("centers must be 2D with the same number of columns as X")
+            Cs = (C - mean) / std
+        else:
+            m = min(self.n_centers, n)
+            rng = np.random.default_rng(self.random_state)
+            idx = rng.choice(n, size=m, replace=False)
+            Cs = Xs[idx]
+
+        Kmm = _rbf_kernel(Cs, Cs, sigma=self.sigma)
+        Kmm = Kmm + self.jitter * np.eye(Kmm.shape[0])
+
+        # Symmetric eigendecomposition
+        evals, evecs = np.linalg.eigh(Kmm)
+        evals = np.maximum(evals, self.jitter)
+        inv_sqrt = evecs @ (np.diag(1.0 / np.sqrt(evals))) @ evecs.T
+
+        self._mean = mean.astype(float)
+        self._std = std.astype(float)
+        self._centers = Cs.astype(float)
+        self._inv_sqrt = inv_sqrt.astype(float)
+        return self
+
+    @property
+    def centers(self) -> NDArray[np.float64]:
+        if self._centers is None:
+            raise RuntimeError("RBFNystromBasis must be fit() before use.")
+        return self._centers
+
+    @property
+    def n_features(self) -> int:
+        if self._centers is None:
+            raise RuntimeError("RBFNystromBasis must be fit() before use.")
+        m = int(self._centers.shape[0])
+        return m + (1 if self.include_bias else 0)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X2, single = _as_2d_allow_1d(X)
+        if self._centers is None or self._mean is None or self._std is None or self._inv_sqrt is None:
+            self.fit(X2)
+
+        Xs = (X2 - self._mean) / self._std
+        Knm = _rbf_kernel(Xs, self._centers, sigma=self.sigma)
+        Phi = Knm @ self._inv_sqrt
+        if self.include_bias:
+            Phi = np.column_stack([np.ones(len(X2), dtype=float), Phi])
+        Phi = Phi.astype(float)
+        return Phi[0] if single else Phi
 
 
 class KNNCatchmentBasis(BaseBasis):
@@ -327,12 +634,14 @@ class KNNCatchmentBasis(BaseBasis):
         self,
         *,
         n_neighbors: int = 1,
+        include_bias: bool = False,
         standardize: bool = True,
         random_state: int | None = None,
     ):
         if int(n_neighbors) <= 0:
             raise ValueError("n_neighbors must be positive")
         self.n_neighbors = int(n_neighbors)
+        self.include_bias = bool(include_bias)
         self.standardize = bool(standardize)
         self.random_state = random_state
 
@@ -371,24 +680,26 @@ class KNNCatchmentBasis(BaseBasis):
     def n_features(self) -> int:
         if self._centers is None:
             raise RuntimeError("KNNCatchmentBasis must be fit() before use.")
-        return int(self._centers.shape[0])
+        m = int(self._centers.shape[0])
+        return m + (1 if self.include_bias else 0)
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         if self._nn is None or self._centers is None or self._mean is None or self._std is None:
             raise RuntimeError("KNNCatchmentBasis must be fit() before use.")
 
-        Q = np.asarray(X, dtype=float)
-        if Q.ndim != 2:
-            raise ValueError(f"X must be 2D. Got shape {Q.shape}.")
+        Q2, single = _as_2d_allow_1d(X)
 
-        Q_std = (Q - self._mean) / self._std
+        Q_std = (Q2 - self._mean) / self._std
         _, ind = self._nn.kneighbors(Q_std, return_distance=True)
 
-        n = len(Q)
-        m = self.n_features
+        n = len(Q2)
+        m = int(self._centers.shape[0])
         Phi = np.zeros((n, m), dtype=float)
 
-        # Mark membership in the selected neighbor set.
         for i in range(n):
             Phi[i, ind[i]] = 1.0
-        return Phi
+
+        if self.include_bias:
+            Phi = np.column_stack([Phi, np.ones(n, dtype=float)])
+
+        return Phi[0] if single else Phi
