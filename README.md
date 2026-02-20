@@ -133,7 +133,7 @@ The paper’s **Table 1** summarizes how common choices relate to well-known **d
 > Convention: `C ∈ ℝ` is a problem-dependent constant; `ω ∈ (0, ∞)`.
 
 <details>
-<summary><strong>Table 1 — Correspondence among Bregman generators, density-ratio estimation, and Riesz representer estimation</strong></summary>
+Table 1 — Correspondence among Bregman generators, density-ratio estimation, and Riesz representer estimation
 
 | Bregman generator $g(\alpha)$ | Density-ratio (DR) estimation view | Riesz representer (RR) estimation view |
 |---|---|---|
