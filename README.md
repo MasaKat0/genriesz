@@ -132,8 +132,7 @@ The paper’s **Table 1** summarizes how common choices relate to well-known **d
 
 > Convention: `C ∈ ℝ` is a problem-dependent constant; `ω ∈ (0, ∞)`.
 
-<details>
-Table 1 — Correspondence among Bregman generators, density-ratio estimation, and Riesz representer estimation
+<summary><strong>Table 1 — Correspondence among Bregman generators, density-ratio estimation, and Riesz representer estimation</strong></summary>
 
 | Bregman generator $g(\alpha)$ | Density-ratio (DR) estimation view | Riesz representer (RR) estimation view |
 |---|---|---|
@@ -147,8 +146,6 @@ Table 1 — Correspondence among Bregman generators, density-ratio estimation, a
 | General Bregman divergence minimization | Density-ratio matching ([Sugiyama et al., 2012](https://www.cambridge.org/core/books/density-ratio-estimation-in-machine-learning/BCBEA6AEAADD66569B1E85DDDEAA7648)); D3RE ([Kato & Teshima, 2021](https://proceedings.mlr.press/v139/kato21a.html)) | **Generalized Riesz regression** (this library via custom `BregmanGenerator`) |
 
 Full bibliography: see [CITATIONS.md](CITATIONS.md).
-
-</details>
 
 ### Built-in generator classes
 
