@@ -1,4 +1,4 @@
-"""Nearest-neighbor matching as LSIF / Riesz regression.
+"""Nearest-neighbor matching as LSIF and Riesz regression.
 
 This module implements:
 

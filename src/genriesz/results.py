@@ -45,7 +45,7 @@ class FunctionalEstimate:
         ----------
         as_pandas:
             If True, return a ``pandas.DataFrame``. If False, return a list of
-            dictionaries. If None, return a DataFrame when pandas is available.
+            row dicts. If None, return a DataFrame when pandas is available.
         """
 
         love = self.diagnostics.get("love_plot")

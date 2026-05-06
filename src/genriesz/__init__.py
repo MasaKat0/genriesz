@@ -22,7 +22,7 @@ from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
 # Low-level solver (advanced)
 from .glm import GRRGLM
 
-# Density ratio / covariate shift
+# Density ratio and covariate shift
 from .density_ratio import DensityRatioResult, fit_density_ratio
 
 # Functionals

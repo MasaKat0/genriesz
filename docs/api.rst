@@ -12,8 +12,8 @@ High-level estimation
 .. autofunction:: genriesz.grr_did
 .. autofunction:: genriesz.grr_ame
 
-Density ratio / covariate shift
--------------------------------
+Density ratio and covariate shift
+---------------------------------
 
 .. autofunction:: genriesz.fit_density_ratio
 
@@ -41,8 +41,21 @@ Functionals
 .. autoclass:: genriesz.AMEFunctional
    :members:
 
+Low-level solvers
+-----------------
+
+.. autoclass:: genriesz.GRRGLM
+   :members:
+
 Bases
 -----
+
+The abstract base class all bases inherit from:
+
+.. autoclass:: genriesz.BaseBasis
+   :members:
+
+Built-in bases:
 
 .. autoclass:: genriesz.PolynomialBasis
    :members:
@@ -63,6 +76,25 @@ Bases
    :members:
 
 .. autoclass:: genriesz.CallableBasis
+   :members:
+
+Optional bases (scikit-learn)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Requires ``pip install "genriesz[sklearn]"``.
+
+.. autoclass:: genriesz.sklearn_basis.RandomForestLeafBasis
+   :members:
+
+Optional bases (PyTorch)
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Requires ``pip install "genriesz[torch]"``.
+
+.. autoclass:: genriesz.torch_basis.MLPEmbeddingNet
+   :members:
+
+.. autoclass:: genriesz.torch_basis.TorchEmbeddingBasis
    :members:
 
 Generators

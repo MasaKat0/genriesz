@@ -20,7 +20,7 @@ with weights
 where K_M(i) is the "matched-times" count: how many times unit i is selected as
 one of the M nearest neighbors for units in the opposite treatment arm.
 
-The matched-times counts can be written using the *catchment-area* indicator
+The matched-times counts can be written using the *nearest-neighbor indicator*
 basis
 
     phi_j(z) = 1[ c_j \in NN_M(z) ],

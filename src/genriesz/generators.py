@@ -71,7 +71,7 @@ def _as_1d(v: ArrayLike, *, n: int, name: str = "v") -> NDArray[np.float64]:
 
 
 class _RowwiseScalarFn:
-    """Wrap a scalar function and provide vectorized / rowwise evaluation.
+    """Wrap a scalar function and provide vectorized or rowwise evaluation.
 
     The wrapped callable can have signature:
 
@@ -275,7 +275,7 @@ class BregmanGenerator:
             return self._inv_grad(X_, v_)
 
         # Automatic inversion via Newton iterations.
-        # This is a generic fallback and may be slow / unstable.
+        # This is a generic fallback and may be slow or unstable.
         s = self._sign(X_, v_)
 
         # Heuristic initialization.

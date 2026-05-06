@@ -23,6 +23,7 @@ The central user-facing API is:
    getting_started
    user_guide
    api
+   diagnostics
    examples
    references
 

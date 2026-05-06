@@ -1,4 +1,4 @@
-"""Basis / feature-map utilities.
+"""Basis and feature-map utilities.
 
 In *genriesz*, Riesz representers and nuisance regressions are typically fit
 in a (possibly high-dimensional) linear model on top of a **basis** / feature
@@ -468,13 +468,13 @@ def _rbf_kernel(
 
 
 class GaussianRKHSBasis(BaseBasis):
-    """Explicit Gaussian-kernel RKHS basis using kernel sections.
+    """Gaussian-kernel RKHS basis using kernel evaluations at fitted center points.
 
     The feature map is
 
         phi_j(x) = K(x, c_j),
 
-    where {c_j} are fitted centers.
+    where {c_j} are fitted centers (one basis function per center).
 
     This is a convenient default for RKHS regression in moderate dimensions.
     """
@@ -675,10 +675,11 @@ class RBFNystromBasis(BaseBasis):
 
 
 class KNNCatchmentBasis(BaseBasis):
-    """kNN catchment (Voronoi) basis.
+    """kNN nearest-neighbor indicator basis.
 
     After fitting on a set of *centers*, evaluating on query points returns a
-    (dense) indicator matrix whose columns correspond to centers.
+    (dense) indicator matrix whose entry (i, j) is 1 if center j is among the
+    k nearest neighbors of query i, and 0 otherwise.
 
     Notes
     -----

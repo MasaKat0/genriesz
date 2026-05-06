@@ -345,7 +345,7 @@ def grr_functional(
     cross_fit: bool = True,
     folds: int = 5,
     random_state: int | None = 0,
-    # Output / inference
+    # Output and inference
     estimators: Sequence[str] = ("ra", "rw", "arw", "tmle"),
     alpha: float = 0.05,
     null: float = 0.0,
@@ -689,7 +689,7 @@ def grr_functional(
                     if isinstance(m, ATEFunctional):
                         m_mu_star = mu1_star - mu0_star
                     else:
-                        # ATT / DID
+                        # ATT and DID
                         D = X_[:, getattr(m, "treatment_index", 0)].astype(float)
                         pi = getattr(m, "pi", float(np.mean(D)))
                         m_mu_star = (D / pi) * (mu1_star - mu0_star)
@@ -706,7 +706,7 @@ def grr_functional(
             compute_for_tag("separate", suffix=" (separate)")
 
     # ------------------------------------------------------------------
-    # Diagnostics (Love plot / balance table)
+    # Diagnostics: Love plot and balance table
     # ------------------------------------------------------------------
     diagnostics: dict[str, object] = {}
 
