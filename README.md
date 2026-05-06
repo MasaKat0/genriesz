@@ -1,6 +1,6 @@
-# genriesz — Generalized Riesz Regression (GRR)
+ra# genriesz — Generalized Riesz Regression (GRR)
 
-A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing (ARB)** and then report **RA / RW / ARW** estimates with inference (optionally via cross-fitting).
+A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing** and then report **RA / RW / ARW** estimates with inference (optionally via cross fitting).
 
 - **Docs**: https://genriesz.readthedocs.io/en/latest/
 - **Paper**: [A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
@@ -9,13 +9,21 @@ A Python library for **Generalized Riesz Regression** (GRR) under **Bregman dive
 
 ## Contents
 
+- [Contents](#contents)
 - [Installation](#installation)
 - [Core idea](#core-idea)
 - [Quickstart: ATE (Average Treatment Effect)](#quickstart-ate-average-treatment-effect)
 - [Choosing a Bregman generator (Table 1 from the paper)](#choosing-a-bregman-generator-table-1-from-the-paper)
+  - [Built-in generator classes](#built-in-generator-classes)
 - [General API: `grr_functional`](#general-api-grr_functional)
+  - [Providing $g'$ and $(g')^{-1}$](#providing-g-and-g-1)
 - [Built-in estimands](#built-in-estimands)
 - [Basis functions](#basis-functions)
+  - [Polynomial basis](#polynomial-basis)
+  - [RKHS bases](#rkhs-bases)
+  - [Nearest-neighbor matching (kNN catchment-area basis)](#nearest-neighbor-matching-knn-catchment-area-basis)
+  - [Random forest leaf encodings (scikit-learn)](#random-forest-leaf-encodings-scikit-learn)
+  - [Neural network features (PyTorch)](#neural-network-features-pytorch)
 - [Jupyter notebook](#jupyter-notebook)
 - [References](#references)
 - [License](#license)
@@ -61,10 +69,10 @@ You specify:
 
 and the library will:
 
-1. build the **ARB link function** induced by `g`,
+1. build the **link function** induced by `g`,
 2. fit a **Riesz representer** `α̂(X)` via GRR,
 3. optionally fit an outcome model `γ̂(X)` (for RA / ARW / TMLE),
-4. return **RA / RW / ARW / TMLE** point estimates and inference (SE / CI / p-value), optionally with **cross-fitting**.
+4. return **RA / RW / ARW / TMLE** point estimates and inference (SE / CI / p-value), optionally with **cross fitting**.
 
 > **Notation in this library**: the regressor is `X` (shape `(n, d)`) and the outcome is `Y` (shape `(n,)`).
 > If you prefer the paper’s notation, you can think of `X` as the full regressor vector (often `X = [D, Z]`).
@@ -264,7 +272,7 @@ psi = PolynomialBasis(degree=3)
 Phi = psi(X)  # (n,p)
 ```
 
-### RKHS-style bases
+### RKHS bases
 
 Approximate an RBF kernel with either **random Fourier features** or a **Nyström** basis:
 
@@ -298,22 +306,23 @@ Phi = basis(queries)               # dense (n_queries, n_centers)
 
 See `examples/ate_synthetic_nn_matching.py` for an end-to-end matching-style ATE estimate.
 
-### Random forest leaves (scikit-learn)
+### Random forest leaf encodings (scikit-learn)
 
-You can use a random forest as a feature map by encoding leaf indices:
+You can use random forest leaf encodings as basis functions:
 
 ```python
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestClassifier
+from genriesz import TreatmentInteractionBasis
 from genriesz.sklearn_basis import RandomForestLeafBasis
 
-rf = RandomForestRegressor(n_estimators=200, random_state=0)
-leaf_basis = RandomForestLeafBasis(rf)
-Phi_rf = leaf_basis(X)
+rf = RandomForestClassifier(n_estimators=30, max_depth=3, random_state=0)
+psi = RandomForestLeafBasis(rf)
+phi = TreatmentInteractionBasis(base_basis=psi)
 ```
 
 ### Neural network features (PyTorch)
 
-If you have PyTorch installed, you can use a neural network as a **fixed feature map**.
+If you have PyTorch installed, you can use a neural network as a **basis function**.
 
 See `src/genriesz/torch_basis.py` for a minimal wrapper.
 

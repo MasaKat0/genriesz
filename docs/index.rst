@@ -4,7 +4,7 @@ genriesz: Generalized Riesz Regression
 ======================================
 
 **genriesz** is a Python package for **Automatic Debiased Machine Learning (ADML)** with **Generalized Riesz Regression (GRR)** under
-**Bregman divergences**, with **Automatic Regressor Balancing (ARB)**.
+**Bregman divergences**, with **automatic regressor balancing**.
 
 The code is available on https://github.com/MasaKat0/genriesz. 
 

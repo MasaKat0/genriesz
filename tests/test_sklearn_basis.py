@@ -25,3 +25,25 @@ def test_random_forest_leaf_basis_shapes():
     z1 = basis(X[0])
     assert z1.ndim == 1
     assert z1.shape[0] == basis.n_output_
+
+
+def test_random_forest_leaf_basis_in_treatment_interaction_basis():
+    pytest.importorskip("sklearn")
+
+    from sklearn.ensemble import RandomForestClassifier
+
+    from genriesz import TreatmentInteractionBasis
+    from genriesz.sklearn_basis import RandomForestLeafBasis
+
+    rng = np.random.default_rng(1)
+    Z = rng.normal(size=(120, 2))
+    D = (Z[:, 0] > 0).astype(float)
+    X = np.column_stack([D, Z])
+
+    rf = RandomForestClassifier(n_estimators=5, max_depth=2, random_state=1)
+    basis = TreatmentInteractionBasis(base_basis=RandomForestLeafBasis(rf), treatment_index=0).fit(X)
+    Phi = basis(X)
+
+    assert Phi.shape[0] == X.shape[0]
+    assert Phi.shape[1] == basis.n_features
+    assert np.all(np.isfinite(Phi))

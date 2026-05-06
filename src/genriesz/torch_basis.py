@@ -1,7 +1,7 @@
 """Optional PyTorch-based bases.
 
 Neural networks can be used as flexible feature maps. The GRR solvers remain
-linear in the *final* coefficients, but the basis itself can be learned.
+linear in the coefficients, but the basis itself can be learned.
 
 This module provides:
 
@@ -9,7 +9,7 @@ This module provides:
 - :class:`TorchEmbeddingBasis` - trains the embedding network (optionally) and
   exposes the embedding as a NumPy feature map.
 
-The implementation is intentionally minimal and is meant for demonstrations / prototypes.
+The implementation is intentionally minimal and is meant for examples.
 """
 
 from __future__ import annotations
@@ -51,19 +51,18 @@ class MLPEmbeddingNet(nn.Module):
 
         super().__init__()
 
-        act: nn.Module
-        if activation.lower() == "relu":
-            act = nn.ReLU()
-        elif activation.lower() == "tanh":
-            act = nn.Tanh()
-        else:
+        activation_lower = activation.lower()
+        if activation_lower not in {"relu", "tanh"}:
             raise ValueError(f"Unknown activation: {activation}")
+
+        def _make_act() -> nn.Module:
+            return nn.ReLU() if activation_lower == "relu" else nn.Tanh()
 
         layers: list[nn.Module] = []
         d_in = int(input_dim)
         for h in hidden_dims:
             layers.append(nn.Linear(d_in, int(h)))
-            layers.append(act)
+            layers.append(_make_act())
             d_in = int(h)
         layers.append(nn.Linear(d_in, int(output_dim)))
         self.net = nn.Sequential(*layers)
@@ -159,6 +158,10 @@ class TorchEmbeddingBasis(BaseBasis):
             raise RuntimeError("TorchEmbeddingBasis must be fit before use")
 
         X_ = np.asarray(X, dtype=float)
+        single = X_.ndim == 1
+        if single:
+            X_ = X_.reshape(1, -1)
+
         self.net.eval()
         with torch.no_grad():
             xb = torch.tensor(X_, dtype=torch.float32, device=self._device)
@@ -166,4 +169,4 @@ class TorchEmbeddingBasis(BaseBasis):
 
         if self.include_bias:
             emb = np.concatenate([np.ones((emb.shape[0], 1), dtype=float), emb], axis=1)
-        return emb
+        return emb[0] if single else emb

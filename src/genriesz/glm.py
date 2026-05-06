@@ -183,13 +183,10 @@ class GRRGLM:
             grad = (alpha[:, None] * Phi - M).mean(axis=0)
             return grad + self.penalty.grad(beta)
 
-        res = optimize.minimize(
-            fun=fun,
-            x0=beta0_,
-            jac=jac,
-            method="L-BFGS-B",
-            options={"maxiter": int(max_iter), "ftol": float(tol), "disp": bool(verbose)},
-        )
+        opts: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
+        if verbose:
+            opts["iprint"] = 1
+        res = optimize.minimize(fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts)
 
         beta_hat = np.asarray(res.x, dtype=float)
         out = FitResult(
@@ -277,6 +274,10 @@ class OutcomeGLM:
             if self.penalty.lam == 0.0:
                 # Ordinary least squares (with pseudo-inverse)
                 theta = np.linalg.pinv(Phi) @ y_
+            elif p > n:
+                # Dual (kernel ridge / Woodbury) form: O(n^3) instead of O(p^3)
+                K = (Phi @ Phi.T) / n
+                theta = (Phi.T @ np.linalg.solve(K + self.penalty.lam * np.eye(n), y_)) / n
             else:
                 A = (Phi.T @ Phi) / n + self.penalty.lam * np.eye(p)
                 b = (Phi.T @ y_) / n
@@ -305,13 +306,10 @@ class OutcomeGLM:
                 grad = (Phi.T @ (p_hat - y_)) / n
             return grad + self.penalty.grad(theta)
 
-        res = optimize.minimize(
-            fun=fun,
-            x0=theta0_,
-            jac=jac,
-            method="L-BFGS-B",
-            options={"maxiter": int(max_iter), "ftol": float(tol), "disp": bool(verbose)},
-        )
+        opts_: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
+        if verbose:
+            opts_["iprint"] = 1
+        res = optimize.minimize(fun=fun, x0=theta0_, jac=jac, method="L-BFGS-B", options=opts_)
 
         theta_hat = np.asarray(res.x, dtype=float)
         self.theta_ = theta_hat

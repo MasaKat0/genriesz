@@ -8,11 +8,11 @@ This example illustrates how to keep the *GLM-style* GRR solver (and its
 automatic link construction) while still using a neural network:
 
 1) Train an embedding network psi(Z) on an auxiliary task (here: predict D).
-2) Freeze psi.
+2) Use psi as a basis function.
 3) Use psi(Z) as the basis inside the high-level :func:`genriesz.grr_ate` API.
 
-This keeps the GRR optimization convex in beta and preserves the ARB structure
-for the fixed features.
+This keeps the GRR optimization convex in beta and preserves the automatic regressor balancing property
+for the basis functions.
 """
 
 from __future__ import annotations
@@ -72,7 +72,7 @@ def train_embedding_on_treatment(Z: np.ndarray, D: np.ndarray, *, seed: int = 0)
             loss.backward()
             opt.step()
 
-    # Freeze the embedding and return it.
+    # Return the embedding.
     embed.eval()
     for p in embed.parameters():
         p.requires_grad_(False)
@@ -80,12 +80,12 @@ def train_embedding_on_treatment(Z: np.ndarray, D: np.ndarray, *, seed: int = 0)
 
 
 def main() -> None:
-    X, Z, D, Y, tau = make_synthetic_data(n=3000, d=5, seed=0)
+    X, Z, D, Y, tau = make_synthetic_data(n=1200, d=5, seed=0)
 
     # 1) Train psi(Z)
     embed = train_embedding_on_treatment(Z, D, seed=0)
 
-    # 2) Wrap as a NumPy-returning basis
+    # 2) Use it as a basis
     psi = TorchEmbeddingBasis(embed, device="cpu")
 
     # 3) Add treatment interactions so phi(X) is a basis on X=[D,Z]
@@ -100,14 +100,14 @@ def main() -> None:
         basis=phi,
         generator=gen,
         cross_fit=True,
-        folds=5,
+        folds=2,
         random_state=0,
-        estimators=("ra", "rw", "arw", "tmle"),
+        estimators=("rw", "arw"),
         outcome_models="shared",
         riesz_penalty="l2",
-        riesz_lam=1e-3,
-        max_iter=400,
-        tol=1e-9,
+        riesz_lam=1e-2,
+        max_iter=120,
+        tol=1e-6,
     )
 
     print("True ATE (by construction):", tau)

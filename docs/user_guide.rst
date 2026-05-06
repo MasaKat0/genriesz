@@ -4,11 +4,11 @@ User guide
 This guide summarizes how to use **Generalized Riesz Regression (GRR)** in this
 package. The main entry point is :func:`genriesz.grr_functional`.
 
-Conceptual workflow
--------------------
+Conceptual procedure
+--------------------
 
-To estimate a target parameter \(\theta\) written as a linear functional of the
-outcome regression \(\gamma(x) = \mathbb{E}[Y\mid X=x]\), you provide:
+To estimate a target parameter :math:`\theta` written as a linear functional of the
+outcome regression :math:`\gamma(x) = \mathbb{E}[Y\mid X=x]`, you provide:
 
 - a *functional* ``m`` (either a built-in :class:`genriesz.LinearFunctional` or a plain callable ``m(x_row, gamma)``),
 - a feature map / basis ``phi(X)``, and
@@ -20,9 +20,9 @@ the function argument ``gamma``.
 
 The package then:
 
-1. builds the link function induced by the generator (automatic regressor balancing (ARB)),
-2. fits a Riesz representer model \(\hat\alpha(x)\),
-3. optionally fits an outcome model \(\hat\gamma(x)\),
+1. builds the link function induced by the generator (automatic regressor balancing),
+2. fits a Riesz representer model :math:`\hat\alpha(x)`,
+3. optionally fits an outcome model :math:`\hat\gamma(x)`,
 4. reports RA/RW/ARW/TMLE estimates with standard errors, confidence intervals, and p-values.
 
 
@@ -54,7 +54,7 @@ Treatment interactions
 ^^^^^^^^^^^^^^^^^^^^^^
 
 For binary-treatment causal estimands, it is common to interact a base basis
-\(\psi(Z)\) with the treatment \(D\). Use :class:`genriesz.TreatmentInteractionBasis`.
+:math:`\psi(Z)` with the treatment :math:`D`. Use :class:`genriesz.TreatmentInteractionBasis`.
 
 .. code-block:: python
 
@@ -64,7 +64,7 @@ For binary-treatment causal estimands, it is common to interact a base basis
    phi = TreatmentInteractionBasis(base_basis=psi)      # [D*psi(Z), (1-D)*psi(Z)]
 
 
-RKHS-style bases (RBF kernel)
+RKHS bases (RBF kernel)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can build RBF-kernel (Gaussian-kernel RKHS) features using:
@@ -94,8 +94,8 @@ The class :class:`genriesz.KNNCatchmentBasis` implements features
 
    \phi_j(z) = \mathbf{1}\{c_j \in \mathrm{NN}_k(z)\},
 
-where \(\{c_j\}\) are fitted centers and \(\mathrm{NN}_k(z)\) denotes the set of
-\(k\) nearest centers of \(z\).
+where :math:`\{c_j\}` are fitted centers and :math:`\mathrm{NN}_k(z)` denotes the set of
+:math:`k` nearest centers of :math:`z`.
 
 .. code-block:: python
 
@@ -113,22 +113,22 @@ You can build a flexible tree-induced basis using leaf indicators.
 
 .. code-block:: python
 
-   from sklearn.ensemble import RandomForestRegressor
+   from sklearn.ensemble import RandomForestClassifier
+   from genriesz import TreatmentInteractionBasis
    from genriesz.sklearn_basis import RandomForestLeafBasis
 
-   rf = RandomForestRegressor(n_estimators=200, max_depth=6, random_state=0)
-   leaf_basis = RandomForestLeafBasis(rf, include_bias=True).fit(X, y)
-   Phi = leaf_basis(X)
+   rf = RandomForestClassifier(n_estimators=30, max_depth=3, random_state=0)
+   psi = RandomForestLeafBasis(rf, include_bias=True)
+   phi = TreatmentInteractionBasis(base_basis=psi)
 
-This keeps the GRR optimization *linear in parameters* (convex) while using a
-nonparametric partition of the regressor space.
+This keeps the generalized Riesz regression problem linear in parameters while using
+a nonparametric partition of the regressor space.
 
 
 Neural network feature maps (PyTorch)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-If you install PyTorch (optional), you can use a neural network as a **fixed
-feature map**.
+If you install PyTorch (optional), you can use a neural network as a **basis function**.
 
 .. important::
 
@@ -136,7 +136,7 @@ feature map**.
    the GLM setting. The recommended approach is:
 
    1) train the embedding network separately,
-   2) freeze it,
+   2) use it as a basis function,
    3) use its output as features in GRR.
 
 The package includes :class:`genriesz.torch_basis.TorchEmbeddingBasis`.
@@ -176,7 +176,7 @@ Unlike classic uLSIF, :func:`genriesz.fit_density_ratio` is written in the same
 * and it fits the ratio by minimizing the induced convex objective.
 
 By default we use a Gaussian-kernel RKHS basis. You can optionally select the
-RBF bandwidth ``sigma`` and regularization ``lam`` via K-fold cross validation.
+RBF bandwidth ``sigma`` and regularization ``lam`` via cross validation.
 
 .. code-block:: python
 
@@ -202,14 +202,15 @@ just like in :func:`genriesz.grr_functional`.
 .. important::
 
    For general generators, the ratio fit uses a numerical optimizer.
-   Only the squared generator (``generator='sq'`` / :class:`genriesz.SquaredGenerator`)
-   uses a closed-form ridge solution.
+   The squared generator (``generator='sq'`` / :class:`genriesz.SquaredGenerator`)
+   uses a closed-form ridge solution. The binary KL generator uses probabilistic
+   classification based density ratio estimation.
 
 Generators and automatic links
 ------------------------------
 
 A Bregman generator defines both the loss and the induced link function used for
-automatic regressor balancing (ARB).
+automatic regressor balancing.
 
 The easiest option is to use one of the built-in generator objects:
 
@@ -243,7 +244,7 @@ Newton solver.
    ``grad_g`` / ``grad2_g``) is strongly recommended for custom generators.
 
 
-Estimators, cross-fitting, and outcome models
+Estimators, cross fitting, and outcome models
 ---------------------------------------------
 
 The high-level function :func:`genriesz.grr_functional` can report multiple estimators
@@ -252,12 +253,12 @@ at once via ``estimators=(...)``:
 - ``"ra"``: regression adjustment (plug-in)
 - ``"rw"``: Riesz weighting (weighting only)
 - ``"arw"``: augmented Riesz weighting
-- ``"tmle"``: targeted minimum loss estimation (one-step fluctuation)
+- ``"tmle"``: targeted maximum likelihood estimation (one-step fluctuation)
 
-Set ``cross_fit=True`` to use K-fold cross-fitting. The number of folds is
+Set ``cross_fit=True`` to use cross fitting. The number of folds is
 controlled by ``folds``.
 
-For RA/ARW/TMLE you need an outcome regression model \(\hat\gamma\). You can control
+For RA/ARW/TMLE you need an outcome regression model :math:`\hat\gamma`. You can control
 how it is fitted via ``outcome_models``:
 
 - ``"shared"``: use the same basis and penalty settings as the Riesz model
@@ -272,14 +273,14 @@ The outcome link function is specified by ``outcome_link`` (``"identity"`` or
 - ``outcome_link="logit"``    => Bernoulli targeting
 
 
-Regularization: \(\ell_p\)
---------------------------
+Regularization: :math:`\ell_p`
+------------------------------
 
 For the Riesz model, set:
 
 - ``riesz_penalty="l2"`` for ridge,
 - ``riesz_penalty="l1"`` for lasso,
-- ``riesz_penalty="lp"`` with ``riesz_p_norm=p`` for general \(p\ge 1\), or
+- ``riesz_penalty="lp"`` with ``riesz_p_norm=p`` for general :math:`p\ge 1`, or
 - ``riesz_penalty="l1.5"`` as shorthand.
 
 The default outcome model (linear regression / logistic regression on a basis)

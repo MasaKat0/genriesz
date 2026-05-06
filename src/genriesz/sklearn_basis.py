@@ -31,7 +31,7 @@ def _as_2d_allow_1d(X: ArrayLike) -> tuple[NDArray[np.float64], bool]:
 
 @dataclass
 class RandomForestLeafBasis(BaseBasis):
-    """One-hot encoding of leaf indices from a fitted RandomForest.
+    """Leaf encodings from a fitted RandomForest.
 
     Parameters
     ----------
@@ -40,6 +40,11 @@ class RandomForestLeafBasis(BaseBasis):
         (e.g., :class:`sklearn.ensemble.RandomForestRegressor`).
     include_bias:
         If True, prepend a constant-1 column.
+    normalize:
+        If True (default), divide each leaf encoding by sqrt(n_estimators) so
+        that the row L2-norm stays O(1) regardless of forest size.  Without
+        this, the norm grows as sqrt(T) and makes the effective regularisation
+        scale T-dependent.
 
     Attributes
     ----------
@@ -49,7 +54,8 @@ class RandomForestLeafBasis(BaseBasis):
     """
 
     model: object
-    include_bias: bool = True
+    include_bias: bool = False
+    normalize: bool = True
 
     def __post_init__(self) -> None:
         self._encoder = None
@@ -81,9 +87,7 @@ class RandomForestLeafBasis(BaseBasis):
     def n_features(self) -> int:
         if self._encoder is None:
             raise RuntimeError("RandomForestLeafBasis must be fit() before use")
-        # Create a dummy row to obtain the encoded dimension.
-        dummy = [[0] * int(self._encoder.n_features_in_)]
-        n = int(self._encoder.transform(dummy).shape[1])
+        n = int(sum(len(cats) for cats in self._encoder.categories_))
         return n + (1 if self.include_bias else 0)
 
     @property
@@ -100,6 +104,10 @@ class RandomForestLeafBasis(BaseBasis):
             leaves = leaves[:, :, 0]
 
         F = self._encoder.transform(leaves).astype(float)
+        if self.normalize:
+            n_trees = int(self._encoder.n_features_in_)
+            if n_trees > 0:
+                F /= np.sqrt(n_trees)
         if self.include_bias:
             F = np.concatenate([np.ones((F.shape[0], 1), dtype=float), F], axis=1)
         return F[0] if single else F

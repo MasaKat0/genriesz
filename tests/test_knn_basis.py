@@ -33,4 +33,4 @@ def test_knn_catchment_basis_include_bias():
     basis = KNNCatchmentBasis(n_neighbors=1, include_bias=True).fit(centers)
     Phi = basis(queries)
     assert Phi.shape == (len(queries), len(centers) + 1)
-    assert np.all(Phi[:, -1] == 1.0)
+    assert np.all(Phi[:, 0] == 1.0)

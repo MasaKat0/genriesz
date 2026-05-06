@@ -50,3 +50,47 @@ def test_fit_density_ratio_cv_runs():
     assert res.sigma in {0.3, 0.6, 1.0}
     assert res.lam in {1e-3, 1e-2}
     assert res.centers.ndim == 2
+
+
+def test_fit_density_ratio_ukl_can_return_values_below_one():
+    rng = np.random.default_rng(2)
+    X_num = rng.normal(loc=0.0, scale=1.0, size=(160, 1))
+    X_den = rng.normal(loc=1.0, scale=1.0, size=(160, 1))
+
+    res = fit_density_ratio(
+        X_num,
+        X_den,
+        generator="ukl",
+        n_centers=40,
+        sigma=1.0,
+        lam=1e-2,
+        cv=False,
+        random_state=2,
+        max_iter=120,
+        tol=1e-6,
+    )
+
+    vals = res.predict_ratio(np.array([[1.5], [2.0]]), clip_nonnegative=True)
+    assert np.any(vals < 1.0)
+
+
+def test_fit_density_ratio_bkl_can_return_values_below_one():
+    rng = np.random.default_rng(3)
+    X_num = rng.normal(loc=0.0, scale=1.0, size=(180, 1))
+    X_den = rng.normal(loc=1.0, scale=1.0, size=(180, 1))
+
+    res = fit_density_ratio(
+        X_num,
+        X_den,
+        generator="bkl",
+        n_centers=40,
+        sigma=1.0,
+        lam=1e-2,
+        cv=False,
+        random_state=3,
+        max_iter=120,
+        tol=1e-6,
+    )
+
+    vals = res.predict_ratio(np.array([[1.5], [2.0]]), clip_nonnegative=True)
+    assert np.any(vals < 1.0)

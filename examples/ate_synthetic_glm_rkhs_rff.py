@@ -1,11 +1,11 @@
-"""Synthetic ATE example with an RKHS-like RBF basis (random Fourier features).
+"""Synthetic ATE example with an RKHS RBF basis (random Fourier features).
 
 Run:
 
     python examples/ate_synthetic_glm_rkhs_rff.py
 
 This script uses :class:`genriesz.basis.RBFRandomFourierBasis` to approximate an RBF
-kernel (an RKHS-style basis) and then estimates the ATE via :func:`genriesz.grr_ate`.
+kernel (an RKHS basis) and then estimates the ATE via :func:`genriesz.grr_ate`.
 
 The link function is *not* hand-coded; it is induced automatically by the chosen
 Bregman generator via its inverse derivative.
@@ -35,12 +35,12 @@ def make_synthetic_data(n: int = 2500, d: int = 5, seed: int = 0):
 
 
 def main() -> None:
-    X, Y, tau = make_synthetic_data(n=2500, d=5, seed=0)
+    X, Y, tau = make_synthetic_data(n=800, d=5, seed=0)
 
-    # --- Basis: RKHS-like RBF features on Z, plus treatment interactions ---
+    # --- Basis: RKHS RBF features on Z, plus treatment interactions ---
     # psi(Z) is high-dimensional, but m provides a vectorized basis_matrix()
-    # implementation so GRR remains fast.
-    psi = RBFRandomFourierBasis(n_features=300, sigma=1.0, standardize=True, random_state=0)
+    # implementation so generalized Riesz regression remains stable.
+    psi = RBFRandomFourierBasis(n_features=80, sigma=1.0, standardize=True, random_state=0)
     phi = TreatmentInteractionBasis(base_basis=psi)
 
     # --- Generator: UKL (automatic link) ---
@@ -52,14 +52,14 @@ def main() -> None:
         basis=phi,
         generator=gen,
         cross_fit=True,
-        folds=5,
+        folds=2,
         random_state=0,
-        estimators=("ra", "rw", "arw", "tmle"),
+        estimators=("rw", "arw"),
         outcome_models="shared",
         riesz_penalty="l2",
-        riesz_lam=1e-3,
-        max_iter=300,
-        tol=1e-9,
+        riesz_lam=1e-2,
+        max_iter=100,
+        tol=1e-6,
     )
 
     print("True ATE (by construction):", tau)

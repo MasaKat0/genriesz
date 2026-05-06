@@ -80,3 +80,42 @@ def test_grr_ame_accepts_unfitted_polynomial_basis():
     for key in ["rw", "ra", "arw", "tmle"]:
         assert key in res.estimates
         assert np.isfinite(res.estimates[key].estimate)
+
+
+def test_polynomial_basis_feature_count_and_unique_powers():
+    import math
+
+    X = np.zeros((2, 3))
+    for degree in range(4):
+        basis = PolynomialBasis(degree=degree, include_bias=True).fit(X)
+        expected = math.comb(X.shape[1] + degree, degree)
+        assert basis.n_features == expected
+        assert len({tuple(row) for row in basis._powers}) == expected
+
+
+class _TreatmentTargetBasis:
+    def __init__(self):
+        self.y_seen = None
+        self._n_features = 1
+
+    def fit(self, X, y=None):
+        self.y_seen = None if y is None else np.asarray(y).copy()
+        return self
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.ones((X.shape[0], 1), dtype=float)
+
+    @property
+    def n_features(self):
+        return self._n_features
+
+    def copy(self):
+        return _TreatmentTargetBasis()
+
+
+def test_treatment_interaction_basis_uses_treatment_for_base_basis_fit():
+    X, _ = _make_synthetic_ate(n=20, d_z=2, seed=3)
+    base = _TreatmentTargetBasis()
+    basis = TreatmentInteractionBasis(base_basis=base, treatment_index=0).fit(X)
+    assert np.array_equal(basis.base_basis.y_seen, X[:, 0])

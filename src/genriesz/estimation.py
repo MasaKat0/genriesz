@@ -551,13 +551,7 @@ def grr_functional(
             #   alpha_i = (2D_i - 1) * w_i,
             #
             # where w_i >= 0 are the matching inverse-propensity weights.
-            # This is currently implemented only without cross-fitting.
             alpha_tr = D * w - (1 - D) * w
-
-            # For simplicity, we treat this as a non-cross-fitted method.
-            # (Cross-fitting for matching weights is out of scope here.)
-            if cross_fit:
-                raise ValueError("cross_fit=True is not supported for matching-based Riesz methods.")
             alpha_obs[:] = alpha_tr
             m_alpha[:] = np.nan
 
@@ -570,15 +564,24 @@ def grr_functional(
 
         variants: dict[str, Basis] = {}
         if outcome_models_ == "shared":
-            variants = {"shared": basis.copy().fit(X_tr, y_tr)}
+            if riesz_method_ == "grr":
+                variants = {"shared": basis_r}
+            else:
+                variants = {"shared": basis.copy().fit(X_tr, y_tr)}
         elif outcome_models_ == "separate":
             ob = basis if outcome_basis is None else outcome_basis
             variants = {"separate": ob.copy().fit(X_tr, y_tr)}
         elif outcome_models_ == "both":
-            variants = {
-                "shared": basis.copy().fit(X_tr, y_tr),
-                "separate": (basis if outcome_basis is None else outcome_basis).copy().fit(X_tr, y_tr),
-            }
+            if riesz_method_ == "grr":
+                variants = {
+                    "shared": basis_r,
+                    "separate": (basis if outcome_basis is None else outcome_basis).copy().fit(X_tr, y_tr),
+                }
+            else:
+                variants = {
+                    "shared": basis.copy().fit(X_tr, y_tr),
+                    "separate": (basis if outcome_basis is None else outcome_basis).copy().fit(X_tr, y_tr),
+                }
         else:
             raise ValueError(f"Unknown outcome_models: {outcome_models}")
 
@@ -706,6 +709,11 @@ def grr_functional(
     # Diagnostics (Love plot / balance table)
     # ------------------------------------------------------------------
     diagnostics: dict[str, object] = {}
+
+    alpha_abs = np.abs(alpha_obs)
+    diagnostics["alpha_abs_mean"] = float(np.mean(alpha_abs))
+    diagnostics["alpha_abs_p95"] = float(np.percentile(alpha_abs, 95))
+    diagnostics["alpha_abs_max"] = float(np.max(alpha_abs))
 
     if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
         t_idx = getattr(m, "treatment_index", 0)

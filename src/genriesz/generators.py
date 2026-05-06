@@ -4,7 +4,7 @@ In *genriesz*, generalized Riesz regression (GRR) fits a finite-dimensional mode
 
     v(x) = phi(x)^T beta,
 
-and uses a generator-induced **link** to map the linear predictor ``v`` to a
+and uses a **link function** to map the linear predictor ``v`` to a
 Riesz representer ``alpha``.
 
 A (possibly regressor-dependent) **Bregman generator** is a convex function
@@ -16,7 +16,7 @@ with derivative (wrt ``alpha``) ``∂g(x, alpha)/∂alpha``. GRR uses the *canon
 
     alpha(x) = (∂g(x, ·))^{-1}( v(x) ),
 
-which is the key mechanism behind **Automatic Regressor Balancing (ARB)**.
+which is the key mechanism behind **automatic regressor balancing**.
 
 This module provides:
 
@@ -33,7 +33,7 @@ This module provides:
 
 Notes
 -----
-The public interface expected by the GRR solvers is:
+The public interface expected by the generalized Riesz regression solvers is:
 
 - ``alpha = inv_grad(X, v)``
 - ``g_val = g(X, alpha)``
@@ -47,6 +47,7 @@ length n.
 from __future__ import annotations
 
 import inspect
+import warnings
 from typing import Callable
 
 import numpy as np
@@ -223,7 +224,7 @@ class BregmanGenerator:
         return self._g
 
     # ------------------------------------------------------------------
-    # Public interface required by GRR solvers
+    # Public interface required by generalized Riesz regression solvers
     # ------------------------------------------------------------------
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Evaluate g(x, alpha) row-wise."""
@@ -378,6 +379,15 @@ class UKLGenerator(BregmanGenerator):
     def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
         if float(C) < 0:
             raise ValueError("C must be >= 0")
+        if branch_fn is None:
+            warnings.warn(
+                "UKLGenerator without branch_fn uses sign(v) to select the alpha branch. "
+                "This is correct only when |alpha| > C + 1. "
+                "For GRR with functionals that require negative alpha (e.g. ATE/ATT), "
+                "provide branch_fn or use SquaredGenerator instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         super().__init__(name="UKL", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
@@ -455,13 +465,22 @@ class BPGenerator(BregmanGenerator):
         if float(omega) <= 0:
             raise ValueError("omega must be > 0")
         self.omega = float(omega)
+        if branch_fn is None:
+            warnings.warn(
+                "BPGenerator without branch_fn uses sign(v) to select the alpha branch. "
+                "This is correct only when |alpha| - C > 1. "
+                "For GRR with functionals that require negative alpha (e.g. ATE/ATT), "
+                "provide branch_fn or use SquaredGenerator instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         super().__init__(name=f"BP(omega={self.omega:g})", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Branch-wise inverse gradient map for BP.
 
         The theoretical domain restriction is ``t = 1 + sign*v/k > 0``. In finite
-        samples (and especially out-of-sample, e.g. in cross-fitting) the linear
+        samples (and especially under cross fitting) the linear
         predictor can violate this constraint. Instead of raising an exception,
         we **clip** ``t`` to a small positive value.
         """
@@ -516,7 +535,7 @@ class BKLGenerator(BregmanGenerator):
     The inverse gradient is branch-wise. Let ``s`` be the desired sign branch
     (+1 or -1) and let ``u = s * v``. Since the log-ratio is always negative,
     the theoretical domain is ``u < 0``. In finite samples (and especially
-    out-of-sample, e.g. under cross-fitting), ``u`` may violate this.
+    under cross fitting), ``u`` may violate this.
     Instead of raising an exception, we **clip** ``u`` to a small negative
     value to keep the link well-defined.
 

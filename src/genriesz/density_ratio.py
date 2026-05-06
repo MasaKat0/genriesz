@@ -28,7 +28,7 @@ where ``g*`` is the convex conjugate of ``g`` and ``p``/``q`` correspond to the
 numerator/denominator samples.
 
 By default we use a Gaussian-kernel RKHS basis. You can optionally select the
-RBF bandwidth ``sigma`` and regularization ``lam`` via K-fold cross validation.
+RBF bandwidth ``sigma`` and regularization ``lam`` via cross validation.
 
 Notes
 -----
@@ -67,6 +67,15 @@ def _as_2d(X: ArrayLike, *, name: str) -> NDArray[np.float64]:
     return X_
 
 
+def _sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
+    out = np.empty_like(z)
+    pos = z >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    expz = np.exp(z[~pos])
+    out[~pos] = expz / (1.0 + expz)
+    return out
+
+
 def _coerce_basis(basis: BaseBasis | CallableBasis | Callable) -> BaseBasis | CallableBasis:
     if isinstance(basis, (BaseBasis, CallableBasis)):
         return basis
@@ -99,11 +108,11 @@ def _coerce_generator(
         if key in {'sq', 'squared', 'lsif'}:
             return SquaredGenerator(C=0.0)
         if key in {'ukl'}:
-            return UKLGenerator(C=1.0, branch_fn=pos_branch)
+            return UKLGenerator(C=0.0, branch_fn=pos_branch)
         if key in {'bkl'}:
             return BKLGenerator(C=1.0, branch_fn=pos_branch)
         if key in {'bp', 'power'}:
-            return BPGenerator(C=1.0, omega=0.5, branch_fn=pos_branch)
+            return BPGenerator(C=0.0, omega=0.5, branch_fn=pos_branch)
         if key in {'pu'}:
             return PUGenerator(C=1.0, branch_fn=pos_branch)
         raise ValueError(
@@ -146,6 +155,7 @@ class DensityRatioResult:
     centers: NDArray[np.float64] | None = None
     sigma: float | None = None
     standardize: bool | None = None
+    class_prior_ratio: float | None = None
 
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
         """Predict the linear score v(x) = phi(x)^T beta."""
@@ -168,7 +178,11 @@ class DensityRatioResult:
 
         X_ = _as_2d(X, name='X')
         v = self.predict_v(X_)
-        r = self.generator.inv_grad(X_, v)
+        if self.class_prior_ratio is not None:
+            z = np.clip(v, -700.0, 700.0)
+            r = float(self.class_prior_ratio) * np.exp(z)
+        else:
+            r = self.generator.inv_grad(X_, v)
         r = np.asarray(r, dtype=float).reshape(-1)
         if clip_nonnegative:
             r = np.maximum(r, 0.0)
@@ -212,6 +226,48 @@ def _solve_squared_closed_form(
     b = h - float(C) * m
 
     return np.linalg.solve(A, b)
+
+
+def _fit_bkl_classification(
+    *,
+    Phi_num: NDArray[np.float64],
+    Phi_den: NDArray[np.float64],
+    penalty: _Penalty,
+    max_iter: int,
+    tol: float,
+    verbose: bool,
+) -> NDArray[np.float64]:
+    """Fit the probabilistic classification model for BKL density-ratio estimation."""
+
+    Phi_num = np.asarray(Phi_num, dtype=float)
+    Phi_den = np.asarray(Phi_den, dtype=float)
+    Phi = np.vstack([Phi_num, Phi_den])
+    y = np.concatenate([np.ones(Phi_num.shape[0], dtype=float), np.zeros(Phi_den.shape[0], dtype=float)])
+
+    p = Phi.shape[1]
+    beta0 = np.zeros(p, dtype=float)
+    n = float(Phi.shape[0])
+
+    def fun(beta: NDArray[np.float64]) -> float:
+        eta = Phi @ beta
+        loss = float(np.mean(np.logaddexp(0.0, eta) - y * eta))
+        return loss + penalty.value(beta)
+
+    def jac(beta: NDArray[np.float64]) -> NDArray[np.float64]:
+        eta = Phi @ beta
+        phat = _sigmoid(eta)
+        grad = (Phi.T @ (phat - y)) / n
+        return grad + penalty.grad(beta)
+
+    opts_bkl: dict = {'maxiter': int(max_iter), 'ftol': float(tol)}
+    if verbose:
+        opts_bkl['iprint'] = 1
+    res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_bkl)
+
+    if not bool(res.success):
+        raise RuntimeError(f"Density-ratio optimization failed: {res.message}")
+
+    return np.asarray(res.x, dtype=float)
 
 
 def _fit_numeric(
@@ -259,13 +315,10 @@ def _fit_numeric(
         grad = (alpha_den[:, None] * Phi_den).mean(axis=0) - Phi_num_mean
         return grad + penalty.grad(beta)
 
-    res = optimize.minimize(
-        fun=fun,
-        x0=beta0,
-        jac=jac,
-        method='L-BFGS-B',
-        options={'maxiter': int(max_iter), 'ftol': float(tol), 'disp': bool(verbose)},
-    )
+    opts_num: dict = {'maxiter': int(max_iter), 'ftol': float(tol)}
+    if verbose:
+        opts_num['iprint'] = 1
+    res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num)
 
     if not bool(res.success):
         raise RuntimeError(f"Density-ratio optimization failed: {res.message}")
@@ -323,7 +376,7 @@ def fit_density_ratio(
     penalty, lam, p_norm:
         Regularization on ``beta``.
     cv, folds, sigma_grid, lam_grid:
-        If ``cv=True``, choose (sigma, lam) by K-fold cross validation.
+        If ``cv=True``, choose (sigma, lam) by cross validation.
         This is currently implemented only for the default Gaussian RKHS basis.
     max_iter, tol, verbose:
         L-BFGS-B controls for the general (non-squared) case.
@@ -400,6 +453,15 @@ def fit_density_ratio(
         # Closed-form only for the squared generator + L2 (or no) penalty.
         if isinstance(gen, SquaredGenerator) and (pen_local.penalty is None or pen_local.p_norm == 2.0):
             beta_hat = _solve_squared_closed_form(Phi_num=Phi_num, Phi_den=Phi_den, C=gen.C, penalty=pen_local)
+        elif isinstance(gen, BKLGenerator):
+            beta_hat = _fit_bkl_classification(
+                Phi_num=Phi_num,
+                Phi_den=Phi_den,
+                penalty=pen_local,
+                max_iter=max_iter,
+                tol=tol,
+                verbose=verbose,
+            )
         else:
             beta_hat = _fit_numeric(
                 X_num=Xn,
@@ -428,6 +490,7 @@ def fit_density_ratio(
             centers=centers,
             sigma=sigma_used,
             standardize=bool(standardize) if basis is None else None,
+            class_prior_ratio=(float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None),
         )
 
     # Cross-validation
@@ -485,6 +548,15 @@ def fit_density_ratio(
                         C=gen.C,
                         penalty=pen_local,
                     )
+                elif isinstance(gen, BKLGenerator):
+                    beta = _fit_bkl_classification(
+                        Phi_num=Phi_n_tr,
+                        Phi_den=Phi_d_tr,
+                        penalty=pen_local,
+                        max_iter=max_iter,
+                        tol=tol,
+                        verbose=False,
+                    )
                 else:
                     beta = _fit_numeric(
                         X_num=Xn[tr_n],
@@ -498,11 +570,17 @@ def fit_density_ratio(
                         verbose=False,
                     )
 
-                # Validation score: unpenalized population objective
+                # Validation score: unpenalized objective
                 v_d = np.asarray(b(Xd[te_d]) @ beta, dtype=float).reshape(-1)
-                g_star, _ = gen.conjugate(Xd[te_d], v_d)
                 v_n = np.asarray(b(Xn[te_n]) @ beta, dtype=float).reshape(-1)
-                score = float(np.mean(g_star) - np.mean(v_n))
+                if isinstance(gen, BKLGenerator):
+                    score = float(
+                        np.mean(np.logaddexp(0.0, v_n) - v_n)
+                        + np.mean(np.logaddexp(0.0, v_d))
+                    )
+                else:
+                    g_star, _ = gen.conjugate(Xd[te_d], v_d)
+                    score = float(np.mean(g_star) - np.mean(v_n))
                 if not np.isfinite(score):
                     score = float('inf')
                 scores.append(score)
@@ -528,4 +606,5 @@ def fit_density_ratio(
         centers=centers,
         sigma=float(sig_star),
         standardize=bool(standardize),
+        class_prior_ratio=(float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None),
     )

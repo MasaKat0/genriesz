@@ -26,3 +26,19 @@ def test_repo_notebooks_are_mirrored_in_docs() -> None:
             f"Notebook mismatch between {nb} and {mirror}. "
             "Please sync notebooks/ and docs/notebooks/."
         )
+
+
+def test_notebook_markdown_math_delimiters() -> None:
+    import json
+
+    repo_root = Path(__file__).resolve().parents[1]
+    for nb in sorted((repo_root / "notebooks").glob("*.ipynb")):
+        data = json.loads(nb.read_text())
+        for cell in data.get("cells", []):
+            if cell.get("cell_type") != "markdown":
+                continue
+            text = "".join(cell.get("source", []))
+            assert "\\\\[" not in text
+            assert "\\\\]" not in text
+            assert "\\\\(" not in text
+            assert "\\\\)" not in text

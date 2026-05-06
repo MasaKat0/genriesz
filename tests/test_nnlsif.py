@@ -38,3 +38,26 @@ def test_local_polynomial_nn_lsif_inverse_propensity_weights_runs():
 
     assert out.w.shape == (n,)
     assert np.all(np.isfinite(out.w))
+
+
+def test_local_polynomial_nn_lsif_inverse_propensity_weight_scale():
+    rng = np.random.default_rng(1)
+    n = 600
+    X = rng.normal(size=(n, 2))
+    D = rng.binomial(1, 0.5, size=n).astype(int)
+
+    out = local_polynomial_nn_lsif_inverse_propensity_weights(
+        X=X,
+        D=D,
+        M=40,
+        degree=1,
+        kernel="ball",
+        standardize=True,
+        clip_min=None,
+        ridge=1e-8,
+    )
+
+    pi1 = float(np.mean(D))
+    pi0 = 1.0 - pi1
+    assert np.isclose(float(np.mean(out.w1)), 1.0 / pi1, rtol=0.35)
+    assert np.isclose(float(np.mean(out.w0)), 1.0 / pi0, rtol=0.35)

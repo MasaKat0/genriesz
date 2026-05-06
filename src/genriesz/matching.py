@@ -200,7 +200,8 @@ def _multi_indices(d: int, degree: int) -> tuple[tuple[int, ...], ...]:
     out: list[tuple[int, ...]] = []
 
     def rec(pos: int, remaining: int, cur: list[int]) -> None:
-        if pos == d:
+        if pos == d - 1:
+            cur[pos] = remaining
             out.append(tuple(cur))
             return
         for e in range(remaining + 1):
@@ -211,8 +212,6 @@ def _multi_indices(d: int, degree: int) -> tuple[tuple[int, ...], ...]:
     for total in range(degree + 1):
         rec(0, total, cur)
 
-    # The recursion appends for each total degree, but it mutates `cur`.
-    # Ensure a clean copy by rebuilding the list.
     return tuple(out)
 
 
@@ -453,12 +452,12 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
 ) -> LocalPolynomialLSIFWeights:
     """Local-polynomial NN–LSIF inverse-propensity weight estimation for ATE.
 
-    This is Corollary 6.3's construction:
+    This uses the density ratio representation of the ATE Riesz representer:
 
     - numerator sample: f(X)   (all units)
     - denominator sample: f(X | D=d)
 
-    For each d in {0,1} we estimate w0(d,x)=f(x)/f(x,d) via local-polynomial NN–LSIF.
+    For each d in {0,1}, local-polynomial NN–LSIF estimates f(x)/f(x | D=d).
 
     Parameters
     ----------
@@ -529,6 +528,11 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
         n_jobs=n_jobs,
         verbose=verbose,
     )
+
+    pi1 = float(len(X1) / len(X_))
+    pi0 = float(len(X0) / len(X_))
+    w1 = w1 / pi1
+    w0 = w0 / pi0
 
     if clip_min is not None:
         w1 = np.maximum(w1, float(clip_min))

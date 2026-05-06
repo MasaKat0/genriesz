@@ -85,7 +85,7 @@ class BaseBasis:
 class CallableBasis(BaseBasis):
     """Wrap a Python callable as a basis.
 
-    This is useful when you want to quickly prototype a custom feature map
+    This is useful when you want to define a custom feature map
     without creating a full class.
 
     Parameters
@@ -189,7 +189,8 @@ class PolynomialBasis(BaseBasis):
         powers: list[list[int]] = []
 
         def rec(pos: int, remaining: int, cur: list[int]) -> None:
-            if pos == d:
+            if pos == d - 1:
+                cur[pos] = remaining
                 powers.append(cur.copy())
                 return
             for e in range(remaining + 1):
@@ -301,8 +302,9 @@ class TreatmentInteractionBasis(BaseBasis):
         X2, _ = _as_2d_allow_1d(X)
         if self.treatment_index < 0 or self.treatment_index >= X2.shape[1]:
             raise ValueError("treatment_index is out of bounds")
+        D = X2[:, self.treatment_index]
         Z = np.delete(X2, self.treatment_index, axis=1)
-        self.base_basis.fit(Z, y=None)
+        self.base_basis.fit(Z, y=D)
         self._base_dim = int(self.base_basis.n_features)
         return self
 
@@ -420,6 +422,30 @@ class RBFRandomFourierBasis(BaseBasis):
         feats = feats.astype(float)
         return feats[0] if single else feats
 
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        """Derivative of the feature map wrt ``X[:, coordinate]``.
+
+        d/dx_k [ sqrt(2/D) cos(W[:,j]^T (x-mu)/std + b_j) ]
+            = -sqrt(2/D) * W[k,j]/std[k] * sin(W[:,j]^T (x-mu)/std + b_j)
+        """
+        X2, single = _as_2d_allow_1d(X)
+        if self._W is None or self._b is None or self._mean is None or self._std is None:
+            self.fit(X2)
+
+        n, d = X2.shape
+        coordinate = int(coordinate)
+        if coordinate < 0 or coordinate >= d:
+            raise ValueError(f"coordinate must be in [0, {d - 1}]. Got {coordinate}.")
+
+        Z = (X2 - self._mean) / self._std
+        proj = Z @ self._W + self._b  # (n, D)
+        scale = self._W[coordinate, :] / self._std[coordinate]  # (D,)
+        dfeats = np.sqrt(2.0 / self.n_features_rff) * (-np.sin(proj)) * scale  # (n, D)
+        if self.include_bias:
+            dfeats = np.column_stack([np.zeros(n, dtype=float), dfeats])
+        dfeats = dfeats.astype(float)
+        return dfeats[0] if single else dfeats
+
 
 def _rbf_kernel(
     X: NDArray[np.float64],
@@ -450,7 +476,7 @@ class GaussianRKHSBasis(BaseBasis):
 
     where {c_j} are fitted centers.
 
-    This is a convenient default for RKHS-style GRR in moderate dimensions.
+    This is a convenient default for RKHS regression in moderate dimensions.
     """
 
     def __init__(
@@ -734,6 +760,6 @@ class KNNCatchmentBasis(BaseBasis):
             Phi[i, ind[i]] = 1.0
 
         if self.include_bias:
-            Phi = np.column_stack([Phi, np.ones(n, dtype=float)])
+            Phi = np.column_stack([np.ones(n, dtype=float), Phi])
 
         return Phi[0] if single else Phi

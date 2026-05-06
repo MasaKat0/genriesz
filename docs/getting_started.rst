@@ -66,7 +66,7 @@ The following example assumes your regressor matrix is ``X = [D, Z]`` where
    # Note: you do not need to call phi.fit(X) manually.
    # grr_ate / grr_functional will copy and fit the basis inside each training fold.
 
-   # UKL generator induces the ARB link automatically
+   # UKL generator induces the link function automatically
    gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)).as_generator()
 
    res = grr_ate(
@@ -87,6 +87,6 @@ The following example assumes your regressor matrix is ``X = [D, Z]`` where
 Next steps
 ----------
 
-- See :doc:`user_guide` for details on bases, generators, estimators, and cross-fitting.
+- See :doc:`user_guide` for details on bases, generators, estimators, and cross fitting.
 - See :doc:`examples` for runnable scripts and notebooks.
 - See :doc:`api` for the full API reference.
