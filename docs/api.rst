@@ -1,10 +1,8 @@
 API reference
 =============
 
-This page lists the main public objects in *genriesz*.
-
-High-level estimation
----------------------
+Core estimation
+---------------
 
 .. autofunction:: genriesz.grr_functional
 .. autofunction:: genriesz.grr_ate
@@ -12,124 +10,48 @@ High-level estimation
 .. autofunction:: genriesz.grr_did
 .. autofunction:: genriesz.grr_ame
 
-Density ratio and covariate shift
----------------------------------
+ScoreMatchingRiesz
+------------------
 
-.. autofunction:: genriesz.fit_density_ratio
+ScoreMatchingRiesz is an optional PyTorch module. The core package exposes a lazy loader:
 
-.. autoclass:: genriesz.DensityRatioResult
-   :members:
+.. autofunction:: genriesz.load_scorematchingriesz
 
-Functionals
------------
+After installing the optional dependency, import the reusable primitives directly:
 
-.. autoclass:: genriesz.LinearFunctional
-   :members:
+.. code-block:: python
 
-.. autoclass:: genriesz.CallableFunctional
-   :members:
+   import genriesz.scorematchingriesz as smr
 
-.. autoclass:: genriesz.ATEFunctional
-   :members:
+   model = smr.fit_time_smr_dre_infinity(x_q, x_p)
+   log_ratio = smr.log_ratio_from_time_score(model, x, x_p_for_norm=x_p)
 
-.. autoclass:: genriesz.ATTFunctional
-   :members:
+Experiment-specific data-generating processes, paper tables, and plots are intentionally not
+part of ``src/genriesz``. They are written in the notebooks under
+``notebooks/scorematchingriesz``.
 
-.. autoclass:: genriesz.DIDFunctional
-   :members:
-
-.. autoclass:: genriesz.AMEFunctional
-   :members:
-
-Low-level solvers
------------------
-
-.. autoclass:: genriesz.GRRGLM
-   :members:
-
-Bases
------
-
-The abstract base class all bases inherit from:
-
-.. autoclass:: genriesz.BaseBasis
-   :members:
-
-Built-in bases:
+Basis functions
+---------------
 
 .. autoclass:: genriesz.PolynomialBasis
-   :members:
-
 .. autoclass:: genriesz.TreatmentInteractionBasis
-   :members:
-
 .. autoclass:: genriesz.RBFRandomFourierBasis
-   :members:
-
 .. autoclass:: genriesz.GaussianRKHSBasis
-   :members:
-
 .. autoclass:: genriesz.RBFNystromBasis
-   :members:
-
 .. autoclass:: genriesz.KNNCatchmentBasis
-   :members:
-
-.. autoclass:: genriesz.CallableBasis
-   :members:
-
-Optional bases (scikit-learn)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Requires ``pip install "genriesz[sklearn]"``.
-
-.. autoclass:: genriesz.sklearn_basis.RandomForestLeafBasis
-   :members:
-
-Optional bases (PyTorch)
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-Requires ``pip install "genriesz[torch]"``.
-
-.. autoclass:: genriesz.torch_basis.MLPEmbeddingNet
-   :members:
-
-.. autoclass:: genriesz.torch_basis.TorchEmbeddingBasis
-   :members:
 
 Generators
 ----------
 
-.. autoclass:: genriesz.BregmanGenerator
-   :members:
-
 .. autoclass:: genriesz.SquaredGenerator
-   :members:
-
 .. autoclass:: genriesz.UKLGenerator
-   :members:
-
 .. autoclass:: genriesz.BKLGenerator
-   :members:
-
 .. autoclass:: genriesz.BPGenerator
-   :members:
-
 .. autoclass:: genriesz.PUGenerator
-   :members:
-
-Matching helpers
-----------------
-
-.. autofunction:: genriesz.nn_matching_inverse_propensity_weights
-.. autofunction:: genriesz.local_polynomial_nn_lsif_density_ratio
-.. autofunction:: genriesz.local_polynomial_nn_lsif_inverse_propensity_weights
+.. autoclass:: genriesz.BregmanGenerator
 
 Results
 -------
 
 .. autoclass:: genriesz.FunctionalEstimate
-   :members:
-
 .. autoclass:: genriesz.SingleEstimate
-   :members:

@@ -14,7 +14,7 @@ Public symbols are re-exported from submodules for convenience.
 
 from __future__ import annotations
 
-__version__ = "0.2.5"
+__version__ = "0.2.6"
 
 # High-level estimation
 from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
@@ -24,6 +24,15 @@ from .glm import GRRGLM
 
 # Density ratio and covariate shift
 from .density_ratio import DensityRatioResult, fit_density_ratio
+
+# ScoreMatchingRiesz is an optional PyTorch module. Import it lazily so the core
+# package remains usable without torch.
+def load_scorematchingriesz():
+    """Return the optional :mod:`genriesz.scorematchingriesz` module."""
+
+    from importlib import import_module
+
+    return import_module("genriesz.scorematchingriesz")
 
 # Functionals
 from .functionals import (
@@ -72,6 +81,8 @@ __all__ = [
     # Density ratio
     "fit_density_ratio",
     "DensityRatioResult",
+    # ScoreMatchingRiesz optional module
+    "load_scorematchingriesz",
     # Functionals
     "LinearFunctional",
     "CallableFunctional",

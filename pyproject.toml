@@ -45,6 +45,10 @@ torch = [
   "torch>=2.0",
 ]
 
+scorematchingriesz = [
+  "torch>=2.0",
+]
+
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",

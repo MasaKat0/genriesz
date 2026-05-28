@@ -25,5 +25,6 @@ The central user-facing API is:
    api
    diagnostics
    examples
+   experiments
    references
 
