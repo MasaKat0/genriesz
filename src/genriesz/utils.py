@@ -72,18 +72,24 @@ def kfold_splits(
         Whether to shuffle indices before splitting.
     """
 
+    n = int(n)
+    folds = int(folds)
+    if n < 2:
+        raise ValueError("n must be >= 2 for cross-fitting")
     if folds <= 1:
         raise ValueError("folds must be >= 2 for cross-fitting")
+    if folds > n:
+        raise ValueError("folds must be <= n for cross-fitting")
     idx = np.arange(n, dtype=int)
     if shuffle:
         rng = np.random.default_rng(random_state)
         rng.shuffle(idx)
 
     # Split into approximately equal folds
-    parts = np.array_split(idx, int(folds))
-    for k in range(int(folds)):
+    parts = np.array_split(idx, folds)
+    for k in range(folds):
         test = parts[k]
-        train = np.concatenate([parts[j] for j in range(int(folds)) if j != k])
+        train = np.concatenate([parts[j] for j in range(folds) if j != k])
         yield Fold(train=train.astype(int), test=test.astype(int))
 
 

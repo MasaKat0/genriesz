@@ -713,6 +713,12 @@ class KNNCatchmentBasis(BaseBasis):
         C = np.asarray(centers, dtype=float)
         if C.ndim != 2:
             raise ValueError(f"centers must be 2D. Got shape {C.shape}.")
+        if C.shape[0] == 0:
+            raise ValueError("centers must contain at least one row.")
+        if self.n_neighbors > C.shape[0]:
+            raise ValueError(
+                f"n_neighbors={self.n_neighbors} exceeds the number of centers={C.shape[0]}."
+            )
 
         if self.standardize:
             mean = C.mean(axis=0)

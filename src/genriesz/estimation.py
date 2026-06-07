@@ -25,7 +25,6 @@ When ``link`` is not given, we default to identity unless the outcome is bounded
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Sequence
 
 import numpy as np
@@ -267,7 +266,11 @@ def _expit(z: NDArray[np.float64]) -> NDArray[np.float64]:
     return out
 
 
-def _tmle_epsilon_gaussian(H: NDArray[np.float64], y: NDArray[np.float64], mu: NDArray[np.float64]) -> float:
+def _tmle_epsilon_gaussian(
+    H: NDArray[np.float64],
+    y: NDArray[np.float64],
+    mu: NDArray[np.float64],
+) -> float:
     resid = y - mu
     denom = float(np.sum(H * H))
     if denom <= 0 or not np.isfinite(denom):
@@ -275,7 +278,11 @@ def _tmle_epsilon_gaussian(H: NDArray[np.float64], y: NDArray[np.float64], mu: N
     return float(np.sum(H * resid) / denom)
 
 
-def _tmle_epsilon_bernoulli(H: NDArray[np.float64], y: NDArray[np.float64], mu: NDArray[np.float64]) -> float:
+def _tmle_epsilon_bernoulli(
+    H: NDArray[np.float64],
+    y: NDArray[np.float64],
+    mu: NDArray[np.float64],
+) -> float:
     mu = np.clip(mu, 1e-6, 1.0 - 1e-6)
     offset = _logit(mu)
 
@@ -312,6 +319,19 @@ def _tmle_epsilon_bernoulli(H: NDArray[np.float64], y: NDArray[np.float64], mu: 
         right *= 2.0
         s_left, s_right = score(left), score(right)
     return float(eps)
+
+
+def _raise_if_fit_failed(*, result, what: str, fold_id: int, tag: str | None = None) -> None:
+    """Raise when a nuisance optimization failed to converge."""
+
+    if bool(getattr(result, "success", False)):
+        return
+    label = what if tag is None else f"{what} ({tag})"
+    message = str(getattr(result, "message", "unknown optimizer failure"))
+    n_iter = int(getattr(result, "n_iter", -1))
+    raise RuntimeError(
+        f"{label} optimization failed in fold {fold_id}: {message} (n_iter={n_iter})."
+    )
 
 
 def grr_functional(
@@ -367,7 +387,9 @@ def grr_functional(
         Basis used for Riesz regression (and for the outcome regression when
         ``outcome_models='shared'``).
     generator:
-        Bregman generator used for GRR. If None, you can pass a generator function via ``g`` (and optionally ``grad_g``, ``inv_grad_g``, ``grad2_g``).
+        Bregman generator used for GRR. If None, you can pass a generator
+        function via ``g`` (and optionally ``grad_g``, ``inv_grad_g``,
+        ``grad2_g``).
     riesz_method:
         - "grr"            : solve the GRR optimization problem
         - "nn_matching"    : NN-matching inverse propensity weights (**ATE-only** convenience)
@@ -395,6 +417,13 @@ def grr_functional(
     ests = _canonical_estimators(estimators)
 
     riesz_method_ = str(riesz_method).lower()
+
+    if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
+        t_idx = getattr(m, "treatment_index", 0)
+        D = X_[:, t_idx]
+        uniq = np.unique(D)
+        if not np.all(np.isin(uniq, [0.0, 1.0])):
+            raise ValueError("Treatment indicator must be binary (0/1).")
 
     # Guard rails: matching-based Riesz methods are currently implemented only
     # for the ATE and only without cross-fitting.
@@ -470,7 +499,7 @@ def grr_functional(
     for fold_id, fold in enumerate(splits):
         train_idx, test_idx = fold.train, fold.test
         X_tr, y_tr = X_[train_idx], y_[train_idx]
-        X_te, y_te = X_[test_idx], y_[test_idx]
+        X_te = X_[test_idx]
 
         # ----- Riesz representer
         if riesz_method_ == "grr":
@@ -486,7 +515,8 @@ def grr_functional(
                 lam=riesz_lam,
                 p_norm=riesz_p_norm,
             )
-            grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            _raise_if_fit_failed(result=fit_result, what="Riesz GRR", fold_id=fold_id)
 
             alpha_obs[test_idx] = grr.predict_alpha(X_te)
 
@@ -512,8 +542,10 @@ def grr_functional(
                 X1[:, t_idx] = 1.0
                 X0 = X_te.copy()
                 X0[:, t_idx] = 0.0
-                cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X1)
-                cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))[test_idx] = grr.predict_alpha(X0)
+                alpha1 = cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))
+                alpha0 = cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))
+                alpha1[test_idx] = grr.predict_alpha(X1)
+                alpha0[test_idx] = grr.predict_alpha(X0)
 
         elif riesz_method_ in {"nn_matching", "local_poly_nn_lsif"}:
             # Matching-based Riesz methods: currently implemented only for the ATE.
@@ -536,13 +568,15 @@ def grr_functional(
                 )
                 w = wobj.w
             else:
-                wobj2: LocalPolynomialLSIFWeights = local_polynomial_nn_lsif_inverse_propensity_weights(
-                    Z_tr,
-                    D,
-                    M,
-                    degree=local_poly_degree,
-                    standardize=standardize_for_matching,
-                    verbose=verbose,
+                wobj2: LocalPolynomialLSIFWeights = (
+                    local_polynomial_nn_lsif_inverse_propensity_weights(
+                        Z_tr,
+                        D,
+                        M,
+                        degree=local_poly_degree,
+                        standardize=standardize_for_matching,
+                        verbose=verbose,
+                    )
                 )
                 w = wobj2.w
 
@@ -572,15 +606,16 @@ def grr_functional(
             ob = basis if outcome_basis is None else outcome_basis
             variants = {"separate": ob.copy().fit(X_tr, y_tr)}
         elif outcome_models_ == "both":
+            ob = basis if outcome_basis is None else outcome_basis
             if riesz_method_ == "grr":
                 variants = {
                     "shared": basis_r,
-                    "separate": (basis if outcome_basis is None else outcome_basis).copy().fit(X_tr, y_tr),
+                    "separate": ob.copy().fit(X_tr, y_tr),
                 }
             else:
                 variants = {
                     "shared": basis.copy().fit(X_tr, y_tr),
-                    "separate": (basis if outcome_basis is None else outcome_basis).copy().fit(X_tr, y_tr),
+                    "separate": ob.copy().fit(X_tr, y_tr),
                 }
         else:
             raise ValueError(f"Unknown outcome_models: {outcome_models}")
@@ -593,7 +628,13 @@ def grr_functional(
                 lam=outcome_lam,
                 p_norm=outcome_p_norm,
             )
-            out.fit(X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            fit_result = out.fit(X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            _raise_if_fit_failed(
+                result=fit_result,
+                what="Outcome regression",
+                fold_id=fold_id,
+                tag=tag,
+            )
 
             mu_obs.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = out.predict(X_te)
 
@@ -612,10 +653,14 @@ def grr_functional(
                 m, (ATEFunctional, ATTFunctional, DIDFunctional)
             ):
                 t_idx = getattr(m, "treatment_index", 0)
-                X1 = X_te.copy(); X1[:, t_idx] = 1.0
-                X0 = X_te.copy(); X0[:, t_idx] = 0.0
-                cf_cache.setdefault(f"mu1_{tag}", np.zeros(n, dtype=float))[test_idx] = out.predict(X1)
-                cf_cache.setdefault(f"mu0_{tag}", np.zeros(n, dtype=float))[test_idx] = out.predict(X0)
+                X1 = X_te.copy()
+                X1[:, t_idx] = 1.0
+                X0 = X_te.copy()
+                X0[:, t_idx] = 0.0
+                mu1_cache = cf_cache.setdefault(f"mu1_{tag}", np.zeros(n, dtype=float))
+                mu0_cache = cf_cache.setdefault(f"mu0_{tag}", np.zeros(n, dtype=float))
+                mu1_cache[test_idx] = out.predict(X1)
+                mu0_cache[test_idx] = out.predict(X0)
 
     # ------------------------------------------------------------------
     # Compute estimators + inference
@@ -624,7 +669,14 @@ def grr_functional(
 
     def add_est(key: str, name: str, est: float, psi: NDArray[np.float64]) -> None:
         se, lo, hi, p = se_ci_pvalue(est, psi, alpha=alpha, null=null)
-        estimates[key] = SingleEstimate(name=name, estimate=float(est), se=float(se), ci_low=float(lo), ci_high=float(hi), p_value=float(p))
+        estimates[key] = SingleEstimate(
+            name=name,
+            estimate=float(est),
+            se=float(se),
+            ci_low=float(lo),
+            ci_high=float(hi),
+            p_value=float(p),
+        )
 
     # RW always available when we have alpha
     if "rw" in ests:
@@ -634,7 +686,6 @@ def grr_functional(
 
     if need_outcome:
         # Choose the primary outcome model variant
-        tags = list(mu_obs.keys())
         if outcome_models_ == "shared":
             primary = "shared"
         elif outcome_models_ == "separate":
@@ -675,24 +726,32 @@ def grr_functional(
                     eps_hat = _tmle_epsilon_bernoulli(alpha_obs, y_, mu)
                     mu_star = _expit(_logit(mu) + eps_hat * alpha_obs)
 
-                    # Treatment-type functionals need counterfactual evaluation.
-                    if not isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
-                        raise ValueError("Bernoulli TMLE is only implemented for ATE/ATT/DID.")
-                    mu1 = cf_cache[f"mu1_{tag}"]
-                    mu0 = cf_cache[f"mu0_{tag}"]
-                    a1 = cf_cache.get("alpha1")
-                    a0 = cf_cache.get("alpha0")
-                    if a1 is None or a0 is None:
-                        raise RuntimeError("Missing alpha counterfactual cache for Bernoulli TMLE")
-                    mu1_star = _expit(_logit(mu1) + eps_hat * a1)
-                    mu0_star = _expit(_logit(mu0) + eps_hat * a0)
-                    if isinstance(m, ATEFunctional):
-                        m_mu_star = mu1_star - mu0_star
+                    if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
+                        mu1 = cf_cache[f"mu1_{tag}"]
+                        mu0 = cf_cache[f"mu0_{tag}"]
+                        a1 = cf_cache.get("alpha1")
+                        a0 = cf_cache.get("alpha0")
+                        if a1 is None or a0 is None:
+                            raise RuntimeError(
+                                "Missing alpha counterfactual cache for Bernoulli TMLE"
+                            )
+                        mu1_star = _expit(_logit(mu1) + eps_hat * a1)
+                        mu0_star = _expit(_logit(mu0) + eps_hat * a0)
+                        if isinstance(m, ATEFunctional):
+                            m_mu_star = mu1_star - mu0_star
+                        else:
+                            # ATT and DID
+                            D = X_[:, getattr(m, "treatment_index", 0)].astype(float)
+                            pi = getattr(m, "pi", float(np.mean(D)))
+                            m_mu_star = (D / pi) * (mu1_star - mu0_star)
+                    elif isinstance(m, AMEFunctional):
+                        mu_clip = np.clip(mu, 1e-6, 1.0 - 1e-6)
+                        d_eta = m_mu_tag / (mu_clip * (1.0 - mu_clip))
+                        m_mu_star = (
+                            mu_star * (1.0 - mu_star) * (d_eta + eps_hat * m_alpha)
+                        )
                     else:
-                        # ATT and DID
-                        D = X_[:, getattr(m, "treatment_index", 0)].astype(float)
-                        pi = getattr(m, "pi", float(np.mean(D)))
-                        m_mu_star = (D / pi) * (mu1_star - mu0_star)
+                        raise ValueError("Bernoulli TMLE is only implemented for ATE/ATT/DID/AME.")
 
                 theta_tmle = float(np.mean(m_mu_star))
                 psi_tmle = m_mu_star + alpha_obs * (y_ - mu_star) - theta_tmle
@@ -751,7 +810,14 @@ def grr_functional(
                 "n_control": int(bal["n_control"]),
             }
 
-    return FunctionalEstimate(estimand=m.name, n=n, alpha=alpha, null=null, estimates=estimates, diagnostics=diagnostics)
+    return FunctionalEstimate(
+        estimand=m.name,
+        n=n,
+        alpha=alpha,
+        null=null,
+        estimates=estimates,
+        diagnostics=diagnostics,
+    )
 
 
 # ----------------------------------------------------------------------

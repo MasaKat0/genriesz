@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from genriesz import ATEFunctional, SquaredGenerator, grr_functional
+from genriesz.utils import kfold_splits
 
 
 def _make_synthetic_ate(n: int = 300, d: int = 2, seed: int = 0):
@@ -63,3 +65,25 @@ def test_grr_functional_ra_rw_arw_tmle_run():
     s = res.summary_text()
     assert isinstance(s, str)
     assert "rw" in s.lower()
+
+
+def test_grr_functional_raises_when_riesz_optimization_fails():
+    X, Y, _ = _make_synthetic_ate(n=120, d=2, seed=2)
+    gen = SquaredGenerator(C=0.0).as_generator()
+
+    with pytest.raises(RuntimeError, match="Riesz GRR optimization failed"):
+        grr_functional(
+            X=X,
+            Y=Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=phi,
+            generator=gen,
+            cross_fit=False,
+            estimators=("rw",),
+            max_iter=0,
+        )
+
+
+def test_kfold_splits_rejects_more_folds_than_observations():
+    with pytest.raises(ValueError, match="folds must be <= n"):
+        list(kfold_splits(3, folds=4, random_state=0))

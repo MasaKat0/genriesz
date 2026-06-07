@@ -339,6 +339,10 @@ def local_polynomial_nn_lsif_density_ratio(
         raise ValueError("M must be a positive integer.")
     if M > len(X):
         raise ValueError(f"M={M} exceeds denominator sample size N0={len(X)}.")
+    if exclude_self and M >= len(X):
+        raise ValueError(
+            "exclude_self=True requires M to be smaller than the denominator sample size."
+        )
     if degree < 0:
         raise ValueError("degree must be >= 0.")
 

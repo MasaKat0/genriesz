@@ -68,3 +68,19 @@ def test_matching_riesz_method_is_ate_only_and_no_tmle():
             cross_fit=False,
             estimators=("rw",),
         )
+
+
+def test_treatment_functionals_reject_nonbinary_treatment_early():
+    X, Y, _, _ = _toy_data()
+    X = X.copy()
+    X[:, 0] = np.linspace(0.1, 0.9, len(X))
+
+    with pytest.raises(ValueError, match="binary"):
+        grr_ate(
+            X=X,
+            Y=Y,
+            basis=PolynomialBasis(degree=1, include_bias=True),
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            cross_fit=False,
+            estimators=("rw",),
+        )

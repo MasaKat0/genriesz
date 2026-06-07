@@ -973,14 +973,25 @@ def wald_interval(score_values: np.ndarray, *, alpha: float = 0.05) -> PointEsti
     return PointEstimate(estimate=estimate, se=se, ci_low=estimate - z * se, ci_high=estimate + z * se)
 
 
-def crossfit_splits(n: int, *, n_folds: int = 2, seed: int = 0) -> list[tuple[np.ndarray, np.ndarray]]:
+def crossfit_splits(
+    n: int,
+    *,
+    n_folds: int = 2,
+    seed: int = 0,
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Return train/test index pairs for cross-fitting."""
 
-    if int(n_folds) < 2:
+    n = int(n)
+    n_folds = int(n_folds)
+    if n < 2:
+        raise ValueError("n must be at least 2.")
+    if n_folds < 2:
         raise ValueError("n_folds must be at least 2.")
+    if n_folds > n:
+        raise ValueError("n_folds must be at most n.")
     rng = np.random.default_rng(seed)
-    indices = rng.permutation(int(n))
-    folds = np.array_split(indices, int(n_folds))
+    indices = rng.permutation(n)
+    folds = np.array_split(indices, n_folds)
     splits: list[tuple[np.ndarray, np.ndarray]] = []
     for fold in folds:
         test = np.asarray(fold, dtype=int)

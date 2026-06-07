@@ -1,6 +1,8 @@
 import numpy as np
+import pytest
 
 from genriesz import (
+    local_polynomial_nn_lsif_density_ratio,
     local_polynomial_nn_lsif_inverse_propensity_weights,
     nn_matching_inverse_propensity_weights,
 )
@@ -61,3 +63,17 @@ def test_local_polynomial_nn_lsif_inverse_propensity_weight_scale():
     pi0 = 1.0 - pi1
     assert np.isclose(float(np.mean(out.w1)), 1.0 / pi1, rtol=0.35)
     assert np.isclose(float(np.mean(out.w0)), 1.0 / pi0, rtol=0.35)
+
+
+def test_local_polynomial_nn_lsif_exclude_self_requires_room_for_neighbor():
+    X = np.array([[0.0], [1.0], [2.0]], dtype=float)
+
+    with pytest.raises(ValueError, match="exclude_self=True"):
+        local_polynomial_nn_lsif_density_ratio(
+            numerator=X,
+            denominator=X,
+            eval_points=X,
+            M=len(X),
+            degree=0,
+            exclude_self=True,
+        )

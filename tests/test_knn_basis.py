@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 
 def test_knn_catchment_basis_shapes_and_row_sums():
@@ -34,3 +35,11 @@ def test_knn_catchment_basis_include_bias():
     Phi = basis(queries)
     assert Phi.shape == (len(queries), len(centers) + 1)
     assert np.all(Phi[:, 0] == 1.0)
+
+
+def test_knn_catchment_basis_rejects_too_many_neighbors():
+    from genriesz import KNNCatchmentBasis
+
+    centers = np.zeros((3, 2))
+    with pytest.raises(ValueError, match="n_neighbors"):
+        KNNCatchmentBasis(n_neighbors=4).fit(centers)

@@ -82,6 +82,34 @@ def test_grr_ame_accepts_unfitted_polynomial_basis():
         assert np.isfinite(res.estimates[key].estimate)
 
 
+def test_grr_ame_binary_outcome_keeps_logit_tmle():
+    rng = np.random.default_rng(4)
+    X = rng.normal(size=(180, 2))
+    p = 1.0 / (1.0 + np.exp(-(0.7 * X[:, 0] - 0.4 * X[:, 1])))
+    Y = rng.binomial(1, p, size=len(X)).astype(float)
+
+    res = grr_ame(
+        X=X,
+        Y=Y,
+        coordinate=0,
+        basis=PolynomialBasis(degree=2, include_bias=True),
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        cross_fit=True,
+        folds=3,
+        random_state=0,
+        estimators=("tmle",),
+        outcome_models="shared",
+        riesz_penalty="l2",
+        riesz_lam=1e-3,
+        max_iter=150,
+        tol=1e-9,
+    )
+
+    assert "tmle" in res.estimates
+    assert np.isfinite(res.estimates["tmle"].estimate)
+    assert np.isfinite(res.estimates["tmle"].se)
+
+
 def test_polynomial_basis_feature_count_and_unique_powers():
     import math
 
