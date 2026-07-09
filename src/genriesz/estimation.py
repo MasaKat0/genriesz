@@ -635,6 +635,7 @@ def grr_functional(
                         "n_admissible": sel.n_admissible,
                         "n_candidates": sel.n_candidates,
                         "best_score": sel.best_score,
+                        "modifies_estimand": sel.modifies_estimand,
                     }
                 )
                 if return_riesz_cv_path:
@@ -965,6 +966,14 @@ def grr_functional(
     diagnostics["alpha_abs_mean"] = float(np.mean(alpha_abs))
     diagnostics["alpha_abs_p95"] = float(np.percentile(alpha_abs, 95))
     diagnostics["alpha_abs_max"] = float(np.max(alpha_abs))
+
+    # Design section 9-4: whether the Riesz generator targets a modified estimand.
+    # Read together with `riesz_clip_binding_rate_max`: the flag says the target
+    # *can* differ, the binding rate says by how much of the sample it does.
+    if riesz_method_ == "grr" and generator is not None:
+        diagnostics["riesz_modifies_estimand"] = bool(
+            getattr(generator, "modifies_estimand", False)
+        )
 
     if riesz_fit_stats["success"]:
         diagnostics["optimizer"] = {k: list(v) for k, v in riesz_fit_stats.items()}

@@ -15,6 +15,11 @@ Design principles (see ``doc/coverage_failure_improvement_design_revised.md``):
   sample size, cap binding, ...) followed by a *criterion* minimization
   (default ``bias_variance``: ``B^2 + V/n + tau_R R + tau_K K``).
 - Neither coverage nor any true nuisance/effect is used for selection.
+- Generators that modify the estimand (``generator.modifies_estimand``, e.g.
+  :class:`~genriesz.generators.BoundedBKLGenerator`) are never admissible
+  (design section 9-4). A bound that binds changes the target functional, so
+  such candidates are a *target-sensitivity* analysis and must not compete on a
+  criterion against candidates that target the original estimand.
 """
 
 from __future__ import annotations
@@ -120,7 +125,14 @@ class GRRCVConfig:
 
 @dataclass
 class GRRCVResult:
-    """Selected Riesz hyper-parameters and the candidate path table."""
+    """Selected Riesz hyper-parameters and the candidate path table.
+
+    ``modifies_estimand`` records that the generator targets a modified estimand
+    (design section 9-4). It forces ``n_admissible == 0``: the selection below is
+    then a target-sensitivity analysis over the bounded target, not a selection
+    over the original one. It is keyword-only so that adding it leaves the
+    positional signature and ``__match_args__`` of the previous release intact.
+    """
 
     sigma: float | None
     lam: float
@@ -130,6 +142,7 @@ class GRRCVResult:
     n_admissible: int
     n_candidates: int
     path: list[dict] = field(default_factory=list)
+    modifies_estimand: bool = field(default=False, kw_only=True)
 
 
 def _effective_sample_size(w: NDArray[np.float64]) -> float:
@@ -358,6 +371,7 @@ def score_grr_candidate(
         "lam": float(lam),
         "n_centers": None if centers is None else int(centers.shape[0]),
         "success": bool(all_success and imbalances),
+        "modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "bregman_validation": _nanmean(risks),
         "held_out_imbalance": b_imb,
         "std_imbalance": std_imb,
@@ -376,6 +390,11 @@ def score_grr_candidate(
 
 def _is_admissible(row: dict, thr: dict[str, float | None]) -> bool:
     if not row["success"]:
+        return False
+    # Design section 9-4: a generator that modifies the estimand is always a
+    # target-sensitivity candidate, never an admissible one -- even when its
+    # bound happens not to bind on this sample.
+    if row.get("modifies_estimand", False):
         return False
     min_ess = thr.get("min_ess_ratio")
     if min_ess is not None and row["ess_ratio_min"] < float(min_ess):
@@ -516,22 +535,40 @@ def select_grr_hyperparams(
                 )
                 path.append(row)
 
+    modifies_estimand = bool(getattr(generator, "modifies_estimand", False))
+
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
     pool = admissible
     if not pool:
-        warnings.warn(
-            "No Riesz candidate passed the admissibility screen on this training "
-            "fold; falling back to the best-criterion candidate among all fitted "
-            "candidates. Inspect the CV path table (return_riesz_cv_path=True).",
-            UserWarning,
-            stacklevel=2,
-        )
+        # Fall back before warning: if nothing fitted at all, the failure is the
+        # story and a warning about "the selection below" would describe a
+        # selection that never happens.
         pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
-    if not pool:
-        raise RuntimeError(
-            "All Riesz candidates failed to fit on this training fold. "
-            "Check the basis, generator, and grids."
-        )
+        if not pool:
+            raise RuntimeError(
+                "All Riesz candidates failed to fit on this training fold. "
+                "Check the basis, generator, and grids."
+            )
+        if modifies_estimand:
+            warnings.warn(
+                f"Generator {getattr(generator, 'name', type(generator).__name__)} "
+                f"modifies the estimand, so none of its candidates enter the "
+                f"admissible set (design section 9-4). The hyper-parameters "
+                f"selected below tune a target-sensitivity analysis over the "
+                f"modified (bounded) estimand -- they are not a selection over "
+                f"the original estimand. Report the bound-binding rate alongside "
+                f"the estimate.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                "No Riesz candidate passed the admissibility screen on this training "
+                "fold; falling back to the best-criterion candidate among all fitted "
+                "candidates. Inspect the CV path table (return_riesz_cv_path=True).",
+                UserWarning,
+                stacklevel=2,
+            )
 
     best = min(pool, key=lambda r: r["criterion"])
 
@@ -544,4 +581,5 @@ def select_grr_hyperparams(
         n_admissible=len(admissible),
         n_candidates=len(path),
         path=path if config.return_path else [],
+        modifies_estimand=modifies_estimand,
     )
