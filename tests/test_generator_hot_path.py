@@ -17,11 +17,14 @@ every later evaluation into a Python loop. The probe now distinguishes the two
 causes by *retrying the same inputs rowwise*: if rowwise also fails, the data was
 bad and the error propagates with the verdict left undecided.
 
-Both fixes are output-invariant; ``test_fit_results_are_unchanged`` pins that.
+Both fixes are output-invariant;
+``test_fit_results_are_bit_identical_with_and_without_the_cache`` pins that by
+running two real fits and comparing beta, the KKT residual and the binding rate.
 """
 
 from __future__ import annotations
 
+import contextlib
 import math
 
 import numpy as np
@@ -34,11 +37,12 @@ from genriesz import (
     BregmanGenerator,
     DomainError,
     PolynomialBasis,
+    PUGenerator,
     SquaredGenerator,
     TreatmentInteractionBasis,
     UKLGenerator,
 )
-from genriesz.generators import _RowwiseScalarFn
+from genriesz.generators import _BRANCH_CACHE_MAX_ENTRIES, _RowwiseScalarFn
 
 
 def _make_ate(n: int = 400, seed: int = 0):
@@ -122,6 +126,41 @@ def test_branch_cache_does_not_alias_distinct_arrays():
     assert np.array_equal(a_treated, a_treated_again)
 
 
+def test_branch_cache_is_bounded_for_callers_that_never_reuse_an_array():
+    """A fresh array per call must cost speed, not memory."""
+
+    gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0))
+    v = np.full(20, -0.5)
+
+    with gen.branch_cache():
+        for _ in range(5 * _BRANCH_CACHE_MAX_ENTRIES):
+            # int dtype forces np.asarray(..., dtype=float) to copy, so every
+            # call reaches _sign with a brand-new array object.
+            gen.inv_grad(np.ones((20, 2), dtype=np.int64), v)
+            assert len(gen._branch_cache) <= _BRANCH_CACHE_MAX_ENTRIES
+
+
+def test_solver_keeps_a_single_cache_entry_even_for_non_float_input():
+    """GRRGLM normalizes X once, so the bound is never approached in a fit."""
+
+    X = _make_ate(n=80, seed=5).astype(np.float32)
+    gen = UKLGenerator(C=1.0, branch_fn=_CountingBranch())
+    sizes: list[int] = []
+    original = gen._branch_signs
+
+    def spy(arr):
+        sizes.append(len(gen._branch_cache or {}))
+        return original(arr)
+
+    gen._branch_signs = spy  # type: ignore[method-assign]
+    fr = GRRGLM(
+        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+    ).fit(X)
+
+    assert fr.success
+    assert sizes == [0]  # computed exactly once, on an empty cache
+
+
 def test_branch_cache_nesting_restores_the_outer_cache():
     gen = UKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0))
     with gen.branch_cache():
@@ -137,26 +176,37 @@ def test_branch_cache_nesting_restores_the_outer_cache():
     [
         lambda b: UKLGenerator(C=1.0, branch_fn=b),
         lambda b: BPGenerator(C=1.0, omega=0.5, branch_fn=b),
+        lambda b: PUGenerator(C=1.0, branch_fn=b),
         lambda b: SquaredGenerator(C=0.0),
     ],
-    ids=["ukl", "bp", "sq"],
+    ids=["ukl", "bp", "pu", "sq"],
 )
-def test_fit_results_are_unchanged(make_gen):
-    """The cache must not move the solution: cached and uncached alpha agree."""
+def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monkeypatch):
+    """The whole point of item W: the optimizer must land in the same place.
+
+    Compare two real fits -- one with ``branch_cache`` active, one with it
+    neutralized -- on beta, the KKT residual and the binding rate.
+    """
 
     X = _make_ate(n=300, seed=3)
-    gen = make_gen(lambda x: int(x[0] == 1.0))
-    model = GRRGLM(
-        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
-    )
-    fr = model.fit(X)
-    assert fr.success
 
-    v = model.predict_v(X)
-    with gen.branch_cache():
-        cached = gen.inv_grad(X, v)
-    uncached = gen.inv_grad(X, v)
-    assert np.array_equal(cached, uncached)
+    def run(disable_cache: bool):
+        gen = make_gen(lambda x: int(x[0] == 1.0))
+        if disable_cache:
+            monkeypatch.setattr(gen, "branch_cache", contextlib.nullcontext)
+        model = GRRGLM(
+            basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+        )
+        fr = model.fit(X)
+        assert fr.success
+        return model.beta_, fr.kkt_residual, fr.clip_binding_rate
+
+    beta_c, kkt_c, bind_c = run(disable_cache=False)
+    beta_u, kkt_u, bind_u = run(disable_cache=True)
+
+    assert np.array_equal(beta_c, beta_u)
+    assert kkt_c == kkt_u
+    assert bind_c == bind_u
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +281,29 @@ def test_single_row_call_does_not_decide_vectorization():
     assert np.allclose(out2, [7.0, 7.0])
 
 
+def test_single_row_call_still_serves_a_vectorized_only_callable():
+    """Undecided must not mean "rowwise": a vectorized-only f(X, a) has no
+    rowwise form, and used to work at n = 1."""
+
+    fn = _RowwiseScalarFn(lambda Xv, av: Xv[:, 0] + av)
+    out = fn(np.ones((1, 2)), np.array([2.0]))
+
+    assert np.allclose(out, [3.0])
+    assert fn._vectorized is None  # one row still decides nothing
+
+    # Two rows: now the verdict is recorded and the vectorized path is used.
+    assert np.allclose(fn(np.ones((2, 2)), np.array([2.0, 3.0])), [3.0, 4.0])
+    assert fn._vectorized is True
+
+
+def test_empty_input_is_handled_without_deciding():
+    fn = _RowwiseScalarFn(lambda a: np.asarray(a, dtype=float) ** 2)
+    out = fn(np.zeros((0, 2)), np.zeros(0))
+
+    assert out.shape == (0,)
+    assert fn._vectorized is None
+
+
 def test_vectorized_callable_is_used_without_a_python_loop():
     calls = {"n": 0}
 
@@ -245,14 +318,26 @@ def test_vectorized_callable_is_used_without_a_python_loop():
     assert fn._vectorized is True
 
 
-def test_custom_generator_with_a_scalar_g_still_fits():
-    """End-to-end: the rowwise path stays correct after the probe change."""
+def test_custom_generator_with_a_scalar_g_matches_its_closed_form():
+    """End-to-end: the rowwise path stays correct after the probe change.
+
+    ``g(alpha) = alpha^2`` has link ``alpha = v / 2``; the generic generator
+    reaches it by finite differences and Newton, so this exercises ``g`` through
+    ``_RowwiseScalarFn`` many times over.
+    """
 
     X = _make_ate(n=120, seed=4)
-    gen = BregmanGenerator(g=lambda a: a * a, name="sq-like")
-    model = GRRGLM(
-        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-2
-    )
-    alpha = gen.inv_grad(X, np.linspace(-1.0, 1.0, len(X)))
-    assert np.all(np.isfinite(alpha))
-    assert model.fit(X) is not None
+    v = np.linspace(-1.0, 1.0, len(X))
+
+    # math.pow refuses an ndarray, so this g really is scalar-only. (`a * a`
+    # would not be: numpy broadcasts it.)
+    scalar = BregmanGenerator(g=lambda a: math.pow(a, 2.0), name="scalar-g")
+    vector = BregmanGenerator(g=lambda a: np.asarray(a, dtype=float) ** 2, name="vector-g")
+
+    alpha_scalar = scalar.inv_grad(X, v)
+    alpha_vector = vector.inv_grad(X, v)
+
+    assert scalar._g._vectorized is False
+    assert vector._g._vectorized is True
+    assert np.allclose(alpha_scalar, v / 2.0, atol=1e-6)
+    assert np.allclose(alpha_scalar, alpha_vector, atol=1e-9)

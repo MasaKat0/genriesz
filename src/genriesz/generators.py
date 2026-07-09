@@ -56,6 +56,11 @@ from numpy.typing import ArrayLike, NDArray
 
 BranchFn = Callable[[NDArray[np.float64]], int]
 
+#: Upper bound on the number of arrays memoized inside ``branch_cache()``.
+#: Solvers see one array per fit; the bound only exists so a caller that hands a
+#: fresh array to every call degrades in speed rather than in memory.
+_BRANCH_CACHE_MAX_ENTRIES = 8
+
 
 class DomainError(RuntimeError):
     """Raised when a generator cannot evaluate its link/conjugate at a point.
@@ -144,8 +149,8 @@ class _RowwiseScalarFn:
         return out
 
     def _probe(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> bool:
-        # A single row cannot separate "returns a scalar" from "returns one
-        # value per row", so leave the verdict undecided and evaluate rowwise.
+        # Two rows: one cannot separate "returns a scalar" from "returns one
+        # value per row".
         k = 2
         Xk, ak = X[:k], a[:k]
         try:
@@ -156,11 +161,30 @@ class _RowwiseScalarFn:
             return False
         return bool(out.shape[0] == k)
 
+    def _try_both(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Evaluate without recording a verdict (fewer than two rows).
+
+        Vectorized first, exactly as before this module learned to probe: a
+        vectorized-only callable must keep working when it is handed a single
+        row. A failure falls through to rowwise, which re-raises if the cause was
+        the data rather than the signature.
+        """
+
+        try:
+            out = self._call_vectorized(X, a)
+        except Exception:
+            return self._call_rowwise(X, a)
+        if out.shape[0] == len(a):
+            return out
+        return self._call_rowwise(X, a)
+
     def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
         X = _as_2d(X)
         a = _as_1d(a, n=len(X), name="a")
 
-        if self._vectorized is None and len(a) >= 2:
+        if self._vectorized is None:
+            if len(a) < 2:
+                return self._try_both(X, a)
             self._vectorized = self._probe(X, a)
 
         if self._vectorized:
@@ -279,8 +303,22 @@ class BregmanGenerator:
 
         Entries are keyed by array identity (a strong reference is held, so ids
         cannot be recycled). **Do not mutate ``X`` in place inside the block**;
-        the cache cannot see that. Nesting is safe: the previous cache is
-        restored on exit.
+        the cache cannot see that.
+
+        Use it as a ``with`` block. Nesting is safe -- the previous cache is
+        restored on exit -- but the save/restore is LIFO, so a generator instance
+        must not be shared between concurrently running fits (threads, or manual
+        out-of-order ``__enter__``/``__exit__``). Generators already carry other
+        mutable probe state and were never thread-safe; the library's solvers are
+        sequential.
+
+        A caller that hands a *fresh* array to every call -- e.g. an ``int`` or
+        ``float32`` ``X``, which ``np.asarray(..., dtype=float)`` must copy --
+        would never hit the cache and would otherwise accumulate one full array
+        per call. The cache is therefore capped at
+        :data:`_BRANCH_CACHE_MAX_ENTRIES`; past that it is cleared rather than
+        grown, degrading to the uncached cost instead of leaking memory. The
+        solvers normalize ``X`` once before fitting, so they keep a single entry.
         """
 
         prev = self._branch_cache
@@ -307,9 +345,15 @@ class BregmanGenerator:
             return self._branch_signs(X)
 
         hit = cache.get(id(X))
+        # The identity re-check is unreachable while the tuple holds X alive, and
+        # is kept so that weakening that reference cannot silently alias arrays.
         if hit is not None and hit[0] is X:
             return hit[1]
         s = self._branch_signs(X)
+        if len(cache) >= _BRANCH_CACHE_MAX_ENTRIES:
+            # A caller that never reuses an array must not accumulate copies of
+            # it. Drop the cache and start over rather than grow without bound.
+            cache.clear()
         cache[id(X)] = (X, s)
         return s
 
