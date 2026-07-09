@@ -1,9 +1,7 @@
 """Tests for the helpers consolidated into ``genriesz.utils`` (design item X).
 
-Two things are pinned here: the behaviour of each shared helper, and the fact
-that the per-module private copies are gone. The latter is what keeps the
-duplication from creeping back -- a module that re-grows its own ``_as_2d``
-will fail ``test_modules_do_not_redefine_shared_helpers``.
+Two things are pinned here: the behaviour of each shared helper, and the absence
+of the per-module private copies that used to shadow them.
 """
 
 from __future__ import annotations
@@ -24,7 +22,9 @@ from genriesz.utils import (
 )
 
 # Modules that used to carry private copies of the shared helpers, mapped to the
-# names they must no longer define.
+# names they must no longer define. This is a name check, not a clone detector:
+# it catches a revert or a re-import under the old name, but a duplicate spelled
+# `_ensure_2d` would slip past it.
 _CONSOLIDATED = {
     "genriesz.glm": ("_as_2d", "_as_1d", "_sigmoid"),
     "genriesz.functionals": ("_as_2d",),
@@ -37,7 +37,7 @@ _CONSOLIDATED = {
 
 
 @pytest.mark.parametrize("module_name,names", sorted(_CONSOLIDATED.items()))
-def test_modules_do_not_redefine_shared_helpers(module_name, names):
+def test_modules_do_not_redefine_the_old_helper_names(module_name, names):
     module = importlib.import_module(module_name)
     for name in names:
         assert not hasattr(module, name), (
@@ -153,13 +153,43 @@ def test_standardize_columns_propagates_nan_rather_than_masking_it():
 # ---------------------------------------------------------------------------
 
 
+def _crossfit_splits_before_consolidation(n, *, n_folds, seed):
+    """The implementation `crossfit_splits` had before it delegated to `kfold_splits`.
+
+    Comparing against this -- rather than against the delegate -- is what makes the
+    test independent of `kfold_splits`'s defaults and internals.
+    """
+
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n)
+    splits = []
+    for fold in np.array_split(indices, n_folds):
+        test = np.asarray(fold, dtype=int)
+        splits.append((np.setdiff1d(indices, test, assume_unique=True), test))
+    return splits
+
+
 @pytest.mark.parametrize("n,folds,seed", [(17, 4, 7), (10, 3, 0), (101, 5, 42), (4, 2, 1)])
-def test_crossfit_splits_matches_kfold_splits(n, folds, seed):
+def test_crossfit_splits_still_produces_the_pre_consolidation_splits(n, folds, seed):
     smr = genriesz.load_scorematchingriesz()
     got = smr.crossfit_splits(n, n_folds=folds, seed=seed)
-    want = [(f.train, f.test) for f in kfold_splits(n, folds=folds, random_state=seed)]
+    want = _crossfit_splits_before_consolidation(n, n_folds=folds, seed=seed)
 
     assert len(got) == len(want)
+    for (train_got, test_got), (train_want, test_want) in zip(got, want, strict=True):
+        np.testing.assert_array_equal(train_got, train_want)
+        np.testing.assert_array_equal(test_got, test_want)
+        assert train_got.dtype == train_want.dtype
+        assert test_got.dtype == test_want.dtype
+
+
+@pytest.mark.parametrize("n,folds,seed", [(17, 4, 7), (10, 3, 0)])
+def test_crossfit_splits_delegates_to_kfold_splits(n, folds, seed):
+    smr = genriesz.load_scorematchingriesz()
+    got = smr.crossfit_splits(n, n_folds=folds, seed=seed)
+    folds_iter = kfold_splits(n, folds=folds, random_state=seed, shuffle=True)
+    want = [(f.train, f.test) for f in folds_iter]
+
     for (train_got, test_got), (train_want, test_want) in zip(got, want, strict=True):
         np.testing.assert_array_equal(train_got, train_want)
         np.testing.assert_array_equal(test_got, test_want)

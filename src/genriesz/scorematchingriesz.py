@@ -1085,6 +1085,8 @@ def crossfit_splits(
 
     The bounds are re-checked here rather than deferred to ``kfold_splits`` so
     that the message names ``n_folds``, the argument the caller actually passed.
+    ``shuffle`` is passed explicitly for the same reason: this function has
+    always shuffled, and that must not silently hinge on the delegate's default.
     """
 
     n = int(n)
@@ -1095,7 +1097,10 @@ def crossfit_splits(
         raise ValueError("n_folds must be at least 2.")
     if n_folds > n:
         raise ValueError("n_folds must be at most n.")
-    return [(f.train, f.test) for f in kfold_splits(n, folds=n_folds, random_state=seed)]
+    return [
+        (f.train, f.test)
+        for f in kfold_splits(n, folds=n_folds, random_state=seed, shuffle=True)
+    ]
 
 
 __all__ = [
