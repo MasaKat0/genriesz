@@ -14,6 +14,16 @@ jupyter notebook notebooks/experiments
 
 The IHDP notebook uses the npci-format files under `notebooks/experiments/data/ihdp`. The Lalonde notebook downloads and caches the public MatchIt/Rdatasets Lalonde CSV if it is not already present. No fallback data are generated.
 
+## After re-running a notebook
+
+The Monte Carlo loops raise NumPy `RuntimeWarning`s, and Jupyter stores every one of them in the notebook as an `stderr` output. A single execution of `01_main_simulation_study.ipynb` writes 6508 of them and grows the file past GitHub's 100 MB blob limit, which makes the whole push fail. Before committing a re-run:
+
+```bash
+make notebooks-strip   # drop stderr outputs; figures, tables, and stdout are kept
+```
+
+`make verify` refuses to pass while an executed notebook still carries `stderr` output, and `make install-hooks` installs a pre-commit hook that enforces the same check plus a 50 MB file-size guard.
+
 
 Display convention: ATE and ATT are never placed in the same table or the same figure. Each notebook filters by `estimand` and then displays a separate table or plot for each target.
 

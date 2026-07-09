@@ -1,0 +1,14 @@
+#!/bin/sh
+# Reject a commit that would put an oversized blob or an unstripped executed
+# notebook into history. Install with `make install-hooks`.
+set -e
+
+PYTHON="${PYTHON:-python3}"
+root="$(git rev-parse --show-toplevel)"
+
+"$PYTHON" "$root/tools/check_large_files.py" --staged || exit 1
+
+# Only pay for the notebook scan when an experiment notebook is being committed.
+if git diff --cached --name-only --diff-filter=ACMR | grep -q '^notebooks/experiments/.*\.ipynb$'; then
+    "$PYTHON" "$root/tools/strip_notebook_stderr.py" --check || exit 1
+fi
