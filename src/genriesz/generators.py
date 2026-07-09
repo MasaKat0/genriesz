@@ -46,14 +46,20 @@ length n.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 BranchFn = Callable[[NDArray[np.float64]], int]
+
+#: Upper bound on the number of arrays memoized inside ``branch_cache()``.
+#: Solvers see one array per fit; the bound only exists so a caller that hands a
+#: fresh array to every call degrades in speed rather than in memory.
+_BRANCH_CACHE_MAX_ENTRIES = 8
 
 
 class DomainError(RuntimeError):
@@ -90,7 +96,20 @@ class _RowwiseScalarFn:
     - ``f(x, alpha)`` where ``x`` is a 1D regressor row
     - a vectorized form: ``f(alpha_array)`` or ``f(X, alpha_array)``
 
-    The wrapper tries the vectorized call once and caches the outcome.
+    Whether the callable is vectorized is decided once, by probing it. The probe
+    must not confuse *"this function cannot take arrays"* with *"this data is
+    outside the function's domain"*: a generator that raises
+    :class:`DomainError` on a bad ``alpha`` is still vectorized, and permanently
+    demoting it to a Python loop would silently cost O(n) per objective
+    evaluation for the rest of the fit. So when the vectorized probe raises, the
+    same inputs are retried rowwise:
+
+    - rowwise succeeds -> the failure was the signature; use rowwise from now on.
+    - rowwise fails too -> the failure was the data; propagate it and leave the
+      vectorization verdict undecided so the next call can probe again.
+
+    Once the verdict is ``True`` the vectorized call is made directly, with no
+    exception handling, so domain errors surface unchanged.
     """
 
     def __init__(self, func: Callable):
@@ -111,23 +130,15 @@ class _RowwiseScalarFn:
         # None = unknown, True = vectorized works, False = rowwise only
         self._vectorized: bool | None = None
 
-    def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
-        X = _as_2d(X)
-        a = _as_1d(a, n=len(X), name="a")
+    def _call_vectorized(
+        self, X: NDArray[np.float64], a: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        out = self.func(a) if self._arity == 1 else self.func(X, a)
+        return np.asarray(out, dtype=float).reshape(-1)
 
-        if self._vectorized is not False:
-            try:
-                if self._arity == 1:
-                    out = self.func(a)
-                else:
-                    out = self.func(X, a)
-                out_arr = np.asarray(out, dtype=float).reshape(-1)
-                if out_arr.shape[0] == len(a):
-                    self._vectorized = True
-                    return out_arr
-            except Exception:
-                self._vectorized = False
-
+    def _call_rowwise(
+        self, X: NDArray[np.float64], a: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
         out = np.empty(len(a), dtype=float)
         if self._arity == 1:
             for i in range(len(a)):
@@ -136,6 +147,56 @@ class _RowwiseScalarFn:
             for i in range(len(a)):
                 out[i] = float(self.func(np.asarray(X[i], dtype=float), float(a[i])))
         return out
+
+    def _probe(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> bool:
+        # Two rows: one cannot separate "returns a scalar" from "returns one
+        # value per row".
+        k = 2
+        Xk, ak = X[:k], a[:k]
+        try:
+            out = self._call_vectorized(Xk, ak)
+        except Exception:
+            # Signature problem, or bad data? Ask the rowwise path.
+            self._call_rowwise(Xk, ak)  # raises the data error, if that is what it was
+            return False
+        return bool(out.shape[0] == k)
+
+    def _try_both(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Evaluate without recording a verdict (fewer than two rows).
+
+        Vectorized first, exactly as before this module learned to probe: a
+        vectorized-only callable must keep working when it is handed a single
+        row. A failure falls through to rowwise, which re-raises if the cause was
+        the data rather than the signature.
+        """
+
+        try:
+            out = self._call_vectorized(X, a)
+        except Exception:
+            return self._call_rowwise(X, a)
+        if out.shape[0] == len(a):
+            return out
+        return self._call_rowwise(X, a)
+
+    def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
+        X = _as_2d(X)
+        a = _as_1d(a, n=len(X), name="a")
+
+        if self._vectorized is None:
+            if len(a) < 2:
+                return self._try_both(X, a)
+            self._vectorized = self._probe(X, a)
+
+        if self._vectorized:
+            out = self._call_vectorized(X, a)
+            if out.shape[0] != len(a):
+                raise ValueError(
+                    f"vectorized callable returned {out.shape[0]} values for "
+                    f"{len(a)} observations"
+                )
+            return out
+
+        return self._call_rowwise(X, a)
 
 
 class BregmanGenerator:
@@ -195,6 +256,11 @@ class BregmanGenerator:
         self.name = str(name)
         self.C = float(C)
         self.branch_fn = branch_fn
+        # Active only inside branch_cache(): id(X) -> (X, signs). The array is
+        # kept alive by the tuple so a stale id can never alias a new array.
+        self._branch_cache: dict[int, tuple[NDArray[np.float64], NDArray[np.float64]]] | None = (
+            None
+        )
 
         self._g = None if g is None else _RowwiseScalarFn(g)
         self._grad = None if grad is None else _RowwiseScalarFn(grad)
@@ -225,14 +291,70 @@ class BregmanGenerator:
     # ------------------------------------------------------------------
     # Internal utilities
     # ------------------------------------------------------------------
+    @contextlib.contextmanager
+    def branch_cache(self) -> Iterator[None]:
+        """Memoize the branch signs of each ``X`` seen inside the block.
+
+        ``branch_fn`` is a function of ``x`` alone, so within a fit the sign
+        array is constant while ``v`` changes on every objective and gradient
+        evaluation. Without this, an L-BFGS fit calls ``branch_fn`` once per row
+        per evaluation -- tens of thousands of Python calls for a few hundred
+        rows of real work.
+
+        Entries are keyed by array identity (a strong reference is held, so ids
+        cannot be recycled). **Do not mutate ``X`` in place inside the block**;
+        the cache cannot see that.
+
+        Use it as a ``with`` block. Nesting is safe -- the previous cache is
+        restored on exit -- but the save/restore is LIFO, so a generator instance
+        must not be shared between concurrently running fits (threads, or manual
+        out-of-order ``__enter__``/``__exit__``). Generators already carry other
+        mutable probe state and were never thread-safe; the library's solvers are
+        sequential.
+
+        A caller that hands a *fresh* array to every call -- e.g. an ``int`` or
+        ``float32`` ``X``, which ``np.asarray(..., dtype=float)`` must copy --
+        would never hit the cache and would otherwise accumulate one full array
+        per call. The cache is therefore capped at
+        :data:`_BRANCH_CACHE_MAX_ENTRIES`; past that it is cleared rather than
+        grown, degrading to the uncached cost instead of leaking memory. The
+        solvers normalize ``X`` once before fitting, so they keep a single entry.
+        """
+
+        prev = self._branch_cache
+        self._branch_cache = {}
+        try:
+            yield
+        finally:
+            self._branch_cache = prev
+
+    def _branch_signs(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
+        s = np.empty(len(X), dtype=float)
+        for i in range(len(X)):
+            s[i] = 1.0 if int(self.branch_fn(X[i])) == 1 else -1.0  # type: ignore[misc]
+        return s
+
     def _sign(self, X: NDArray[np.float64], v: NDArray[np.float64]) -> NDArray[np.float64]:
         """Return +1/-1 sign array for branch-wise generators."""
 
         if self.branch_fn is None:
             return np.where(v >= 0.0, 1.0, -1.0)
-        s = np.empty(len(v), dtype=float)
-        for i in range(len(v)):
-            s[i] = 1.0 if int(self.branch_fn(X[i])) == 1 else -1.0
+
+        cache = self._branch_cache
+        if cache is None:
+            return self._branch_signs(X)
+
+        hit = cache.get(id(X))
+        # The identity re-check is unreachable while the tuple holds X alive, and
+        # is kept so that weakening that reference cannot silently alias arrays.
+        if hit is not None and hit[0] is X:
+            return hit[1]
+        s = self._branch_signs(X)
+        if len(cache) >= _BRANCH_CACHE_MAX_ENTRIES:
+            # A caller that never reuses an array must not accumulate copies of
+            # it. Drop the cache and start over rather than grow without bound.
+            cache.clear()
+        cache[id(X)] = (X, s)
         return s
 
     def _require_g(self) -> _RowwiseScalarFn:
