@@ -171,15 +171,36 @@ def test_branch_cache_nesting_restores_the_outer_cache():
     assert gen._branch_cache is None
 
 
+def test_squared_generator_never_reaches_the_cache():
+    """SQ + L2 is solved in closed form, before the cache is entered.
+
+    It is therefore excluded from the parametrization below, where it would be a
+    vacuous case rather than a passing one.
+    """
+
+    X = _make_ate(n=120, seed=6)
+    gen = SquaredGenerator(C=0.0)
+
+    def boom():
+        raise AssertionError("branch_cache must not be entered on the closed-form path")
+
+    gen.branch_cache = boom  # type: ignore[method-assign]
+    fr = GRRGLM(
+        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+    ).fit(X)
+
+    assert fr.success
+    assert fr.status == "closed_form"
+
+
 @pytest.mark.parametrize(
     "make_gen",
     [
         lambda b: UKLGenerator(C=1.0, branch_fn=b),
         lambda b: BPGenerator(C=1.0, omega=0.5, branch_fn=b),
         lambda b: PUGenerator(C=1.0, branch_fn=b),
-        lambda b: SquaredGenerator(C=0.0),
     ],
-    ids=["ukl", "bp", "pu", "sq"],
+    ids=["ukl", "bp", "pu"],
 )
 def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monkeypatch):
     """The whole point of item W: the optimizer must land in the same place.
@@ -191,7 +212,8 @@ def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monk
     X = _make_ate(n=300, seed=3)
 
     def run(disable_cache: bool):
-        gen = make_gen(lambda x: int(x[0] == 1.0))
+        branch = _CountingBranch()
+        gen = make_gen(branch)
         if disable_cache:
             monkeypatch.setattr(gen, "branch_cache", contextlib.nullcontext)
         model = GRRGLM(
@@ -199,10 +221,15 @@ def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monk
         )
         fr = model.fit(X)
         assert fr.success
-        return model.beta_, fr.kkt_residual, fr.clip_binding_rate
+        assert fr.status == "converged"  # the iterative path, not closed form
+        return model.beta_, fr.kkt_residual, fr.clip_binding_rate, branch.calls
 
-    beta_c, kkt_c, bind_c = run(disable_cache=False)
-    beta_u, kkt_u, bind_u = run(disable_cache=True)
+    beta_c, kkt_c, bind_c, calls_c = run(disable_cache=False)
+    beta_u, kkt_u, bind_u, calls_u = run(disable_cache=True)
+
+    # The disabled run really is uncached, so the comparison below has teeth.
+    assert calls_c == len(X)
+    assert calls_u > calls_c
 
     assert np.array_equal(beta_c, beta_u)
     assert kkt_c == kkt_u
