@@ -130,7 +130,8 @@ class GRRCVResult:
     ``modifies_estimand`` records that the generator targets a modified estimand
     (design section 9-4). It forces ``n_admissible == 0``: the selection below is
     then a target-sensitivity analysis over the bounded target, not a selection
-    over the original one.
+    over the original one. It is keyword-only so that adding it leaves the
+    positional signature and ``__match_args__`` of the previous release intact.
     """
 
     sigma: float | None
@@ -141,7 +142,7 @@ class GRRCVResult:
     n_admissible: int
     n_candidates: int
     path: list[dict] = field(default_factory=list)
-    modifies_estimand: bool = False
+    modifies_estimand: bool = field(default=False, kw_only=True)
 
 
 def _effective_sample_size(w: NDArray[np.float64]) -> float:
@@ -539,6 +540,15 @@ def select_grr_hyperparams(
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
     pool = admissible
     if not pool:
+        # Fall back before warning: if nothing fitted at all, the failure is the
+        # story and a warning about "the selection below" would describe a
+        # selection that never happens.
+        pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
+        if not pool:
+            raise RuntimeError(
+                "All Riesz candidates failed to fit on this training fold. "
+                "Check the basis, generator, and grids."
+            )
         if modifies_estimand:
             warnings.warn(
                 f"Generator {getattr(generator, 'name', type(generator).__name__)} "
@@ -559,12 +569,6 @@ def select_grr_hyperparams(
                 UserWarning,
                 stacklevel=2,
             )
-        pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
-    if not pool:
-        raise RuntimeError(
-            "All Riesz candidates failed to fit on this training fold. "
-            "Check the basis, generator, and grids."
-        )
 
     best = min(pool, key=lambda r: r["criterion"])
 

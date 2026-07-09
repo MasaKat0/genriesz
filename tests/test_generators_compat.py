@@ -35,6 +35,8 @@ Three invariants are protected here.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -44,8 +46,10 @@ from genriesz import (
     BKLGenerator,
     BoundedBKLGenerator,
     BPGenerator,
+    BregmanGenerator,
     GaussianRKHSBasis,
     GRRCVConfig,
+    GRRCVResult,
     PolynomialBasis,
     SquaredGenerator,
     TreatmentInteractionBasis,
@@ -328,15 +332,54 @@ def test_unbounded_generator_stays_admissible():
     assert all(not r["modifies_estimand"] for r in res.path)
 
 
-def test_grr_functional_reports_the_estimand_flag():
+def test_all_candidates_failing_raises_without_the_sensitivity_warning():
+    """The warning describes "the selection below"; there must be one to describe."""
+
+    X, Y = _make_ate(n=120, seed=13)
+
+    def _boom(_alpha):
+        raise RuntimeError("generator explodes")
+
+    gen = BregmanGenerator(g=_boom)
+    gen.modifies_estimand = True
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(RuntimeError, match="All Riesz candidates failed"):
+            _select(gen, n=120, seed=13)
+
+    assert not [w for w in caught if "modifies the estimand" in str(w.message)]
+    assert not [w for w in caught if "admissibility screen" in str(w.message)]
+
+
+@pytest.mark.parametrize(
+    "make_gen, expected",
+    [
+        (lambda: SquaredGenerator(C=0.0), False),
+        (lambda: BoundedBKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch), True),
+    ],
+    ids=["sq", "bounded_bkl"],
+)
+def test_grr_functional_reports_the_estimand_flag(make_gen, expected):
     X, Y = _make_ate(n=250, seed=12)
-    res = grr_ate(
-        X=X,
-        Y=Y,
-        basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
-        generator=SquaredGenerator(C=0.0),
-        riesz_lam=1e-2,
-        folds=3,
-        random_state=0,
-    )
-    assert res.diagnostics["riesz_modifies_estimand"] is False
+    with warnings.catch_warnings():
+        # A bounded link may legitimately bind; that warning is not under test.
+        warnings.simplefilter("ignore", UserWarning)
+        res = grr_ate(
+            X=X,
+            Y=Y,
+            basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
+            generator=make_gen(),
+            riesz_lam=1e-2,
+            folds=3,
+            random_state=0,
+        )
+    assert res.diagnostics["riesz_modifies_estimand"] is expected
+
+
+def test_grrcvresult_keeps_its_positional_signature():
+    """`modifies_estimand` is keyword-only, so old positional callers still work."""
+
+    assert "modifies_estimand" not in GRRCVResult.__match_args__
+    res = GRRCVResult(None, 1e-2, None, "bias_variance", 0.5, 1, 1, [])
+    assert res.modifies_estimand is False
