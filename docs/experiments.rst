@@ -28,10 +28,10 @@ Notebook map
    * - ``02_main_empirical_ihdp.ipynb``
      - Main text
      - IHDP semi-synthetic benchmark for ATE and ATT.
-   * - ``03_main_empirical_lalonde_att.ipynb``
+   * - ``03_main_empirical_lalonde.ipynb``
      - Main text
      - Lalonde NSW treated ATT benchmark, with ATE reported as sensitivity.
-   * - ``04_appendix_simulation_crossfit.ipynb``
+   * - ``04_appendix_crossfit_comparison.ipynb``
      - Appendix
      - Cross fitting versus no cross fitting for ATE and ATT.
    * - ``05_appendix_dimension_variation.ipynb``
@@ -40,9 +40,12 @@ Notebook map
    * - ``06_appendix_model_variation.ipynb``
      - Appendix
      - RKHS, polynomial, random forest, nearest-neighbor matching, and random Fourier features. GRR models estimate ATE and ATT; nearest-neighbor matching is kept as an ATE-only baseline when ATT is unsupported.
-   * - ``07_appendix_additional_experiments.ipynb``
+   * - ``07_appendix_score_guided_balancing.ipynb``
      - Appendix
-     - Zhao/Kang-Schafer balance path, kernel-GP basis mismatch, ACIC, HDMA, and NSW randomized checks, with ATE and ATT wherever possible.
+     - Score-guided balancing comparison: regressor balancing versus covariate balancing, with ATE and ATT displayed separately.
+   * - ``08_appendix_zhao_kernel_experiments.ipynb``
+     - Appendix
+     - Zhao/Kang-Schafer balance path and kernel-basis mismatch experiments.
 
 ScoreMatchingRiesz notebooks
 ---------------------------

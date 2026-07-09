@@ -109,9 +109,10 @@ def nn_matching_inverse_propensity_weights(
     standardize:
         If True, standardize X column-wise using the full sample (recommended).
     metric, algorithm, n_jobs:
-        Parameters for the kNN search. Without scikit-learn, only
-        ``metric="euclidean"`` is supported and ``algorithm`` is ignored.
-        ``n_jobs`` is passed to SciPy's cKDTree as ``workers``.
+        Parameters for the kNN search, which always uses SciPy's cKDTree.
+        Only ``metric="euclidean"`` is implemented; ``algorithm`` is accepted
+        for API compatibility but ignored. ``n_jobs`` is passed to cKDTree as
+        ``workers``.
 
     Returns
     -------
@@ -149,8 +150,8 @@ def nn_matching_inverse_propensity_weights(
 
     if metric != "euclidean":
         raise NotImplementedError(
-            "Only metric='euclidean' is supported without scikit-learn. "
-            "Install genriesz[sklearn] if you need alternative metrics."
+            "Only metric='euclidean' is currently implemented (the kNN search "
+            "always uses SciPy's cKDTree; there is no scikit-learn code path)."
         )
 
     # SciPy's cKDTree supports Euclidean kNN queries efficiently.
@@ -310,9 +311,10 @@ def local_polynomial_nn_lsif_density_ratio(
     ridge:
         A small ridge term added to H_hat(x) for numerical stability.
     metric, algorithm, n_jobs:
-        Parameters for the kNN search. Without scikit-learn, only
-        ``metric="euclidean"`` is supported and ``algorithm`` is ignored.
-        ``n_jobs`` is passed to SciPy's cKDTree as ``workers``.
+        Parameters for the kNN search, which always uses SciPy's cKDTree.
+        Only ``metric="euclidean"`` is implemented; ``algorithm`` is accepted
+        for API compatibility but ignored. ``n_jobs`` is passed to cKDTree as
+        ``workers``.
     verbose:
         If True, prints progress every ~500 eval points.
 
@@ -351,8 +353,8 @@ def local_polynomial_nn_lsif_density_ratio(
 
     if metric != "euclidean":
         raise NotImplementedError(
-            "Only metric='euclidean' is supported without scikit-learn. "
-            "Install genriesz[sklearn] if you need alternative metrics."
+            "Only metric='euclidean' is currently implemented (the kNN search "
+            "always uses SciPy's cKDTree; there is no scikit-learn code path)."
         )
 
     from scipy.spatial import cKDTree

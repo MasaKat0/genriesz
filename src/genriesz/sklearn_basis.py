@@ -13,6 +13,7 @@ in a separate module makes the optional integrations easy to discover.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -53,7 +54,7 @@ class RandomForestLeafBasis(BaseBasis):
         This attribute is provided for compatibility with older example code.
     """
 
-    model: object
+    model: Any
     include_bias: bool = False
     normalize: bool = True
 

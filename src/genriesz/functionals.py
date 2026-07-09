@@ -21,8 +21,8 @@ This module provides built-in functionals used in the notebooks:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -66,7 +66,9 @@ class LinearFunctional:
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:  # pragma: no cover
         raise NotImplementedError
 
-    def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:  # pragma: no cover
+    def m_from_predictor(  # pragma: no cover
+        self, X: ArrayLike, predict: PredictFn
+    ) -> NDArray[np.float64]:
         raise NotImplementedError
 
     def m_from_function(
@@ -187,17 +189,30 @@ class ATTFunctional(LinearFunctional):
 
     We treat this as a *plug-in linear functional* given a fixed value of
     ``pi = E[D]`` (estimated from the sample in the wrapper).
+
+    Parameters
+    ----------
+    pi:
+        Treatment probability E[D] used inside the functional.
+    pi_is_estimated:
+        Set to True when ``pi`` was estimated as the sample mean of ``D``
+        (the ``grr_att``/``grr_did`` wrappers do this). Estimation then adds
+        the first-step correction ``-(theta/pi) * (D - pi)`` to the influence
+        function so that standard errors account for the estimation of ``pi``.
+        Leave False when ``pi`` is externally known.
     """
 
     treatment_index: int = 0
     pi: float = 0.5
+    pi_is_estimated: bool = False
 
-    def __init__(self, *, treatment_index: int = 0, pi: float):
+    def __init__(self, *, treatment_index: int = 0, pi: float, pi_is_estimated: bool = False):
         if not np.isfinite(pi) or pi <= 0.0:
             raise ValueError("pi must be positive")
         super().__init__(name="ATT")
         object.__setattr__(self, "treatment_index", int(treatment_index))
         object.__setattr__(self, "pi", float(pi))
+        object.__setattr__(self, "pi_is_estimated", bool(pi_is_estimated))
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         X_ = _as_2d(X)
@@ -256,6 +271,6 @@ class DIDFunctional(ATTFunctional):
     a separate name for clarity.
     """
 
-    def __init__(self, *, treatment_index: int = 0, pi: float):
-        super().__init__(treatment_index=treatment_index, pi=pi)
+    def __init__(self, *, treatment_index: int = 0, pi: float, pi_is_estimated: bool = False):
+        super().__init__(treatment_index=treatment_index, pi=pi, pi_is_estimated=pi_is_estimated)
         object.__setattr__(self, "name", "DID")

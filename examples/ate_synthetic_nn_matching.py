@@ -1,11 +1,11 @@
-"""Synthetic ATE example: nearest-neighbor matching (as a Riesz/LSIF special case).
+r"""Synthetic ATE example: nearest-neighbor matching as a Riesz and LSIF special case.
 
 Run:
 
     python examples/ate_synthetic_nn_matching.py
 
 This script illustrates the connection (proved in the paper) between
-nearest-neighbor (NN) matching and squared-loss Riesz regression / LSIF.
+nearest-neighbor (NN) matching and squared-loss Riesz regression and LSIF.
 
 Key idea
 --------

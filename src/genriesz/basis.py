@@ -16,8 +16,9 @@ All docstrings and comments are in English as requested.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
-from typing import Callable, Protocol
+import warnings
+from collections.abc import Callable
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -48,7 +49,7 @@ def _as_2d_allow_1d(X: ArrayLike, *, name: str = "X") -> tuple[NDArray[np.float6
 class Basis(Protocol):
     """Protocol for basis objects."""
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "Basis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> Basis:
         ...
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
@@ -61,14 +62,14 @@ class Basis(Protocol):
     def n_features(self) -> int:
         ...
 
-    def copy(self) -> "Basis":
+    def copy(self) -> Basis:
         ...
 
 
 class BaseBasis:
     """Convenience base class implementing ``copy`` and a no-op ``fit``."""
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "BaseBasis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> BaseBasis:
         return self
 
     def copy(self):
@@ -112,7 +113,7 @@ class CallableBasis(BaseBasis):
         self._derivative = derivative
         self._n_features: int | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "CallableBasis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> CallableBasis:
         Phi = np.asarray(self.__call__(X), dtype=float)
         if Phi.ndim == 1:
             self._n_features = int(Phi.shape[0])
@@ -130,14 +131,16 @@ class CallableBasis(BaseBasis):
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
-        out = self.func(X if not single else X2[0])
+        out = self.func(X2[0] if single else X2)
         Phi = np.asarray(out, dtype=float)
 
         if single:
             if Phi.ndim == 2 and Phi.shape[0] == 1:
                 Phi = Phi[0]
             if Phi.ndim != 1:
-                raise ValueError("CallableBasis(func) returned an invalid shape for single-row input")
+                raise ValueError(
+                    "CallableBasis(func) returned an invalid shape for single-row input"
+                )
             if self._n_features is None:
                 self._n_features = int(Phi.shape[0])
             return Phi
@@ -178,7 +181,7 @@ class PolynomialBasis(BaseBasis):
         self._powers: NDArray[np.int64] | None = None
         self._n_input_features: int | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "PolynomialBasis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> PolynomialBasis:
         X2, _ = _as_2d_allow_1d(X)
 
         d = int(X2.shape[1])
@@ -220,7 +223,9 @@ class PolynomialBasis(BaseBasis):
             # Allow stateless usage by fitting on the fly.
             self.fit(X2)
         if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
-            raise ValueError("PolynomialBasis received X with a different number of columns than at fit time")
+            raise ValueError(
+                "PolynomialBasis received X with a different number of columns than at fit time"
+            )
 
         powers = self._powers
         n, d = X2.shape
@@ -242,7 +247,9 @@ class PolynomialBasis(BaseBasis):
         if self._powers is None or self._n_input_features is None:
             self.fit(X2)
         if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
-            raise ValueError("PolynomialBasis received X with a different number of columns than at fit time")
+            raise ValueError(
+                "PolynomialBasis received X with a different number of columns than at fit time"
+            )
 
         n, d = X2.shape
         coordinate = int(coordinate)
@@ -291,6 +298,14 @@ class TreatmentInteractionBasis(BaseBasis):
         phi(X) = [ D * psi(Z) , (1 - D) * psi(Z) ].
 
     This is a convenient default for ATE/ATT/DID-style functionals.
+
+    Notes
+    -----
+    ``fit(X, y)`` intentionally ignores the ``y`` argument passed by callers and
+    fits the base basis with the treatment indicator as the supervision target,
+    i.e. ``base_basis.fit(Z, y=D)``. Supervised base bases (e.g. forest-leaf
+    encodings) therefore learn propensity-style splits, not outcome-style
+    splits. Pass a pre-fit base basis if you need different supervision.
     """
 
     def __init__(self, *, base_basis: BaseBasis, treatment_index: int = 0):
@@ -298,7 +313,7 @@ class TreatmentInteractionBasis(BaseBasis):
         self.treatment_index = int(treatment_index)
         self._base_dim: int | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "TreatmentInteractionBasis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> TreatmentInteractionBasis:
         X2, _ = _as_2d_allow_1d(X)
         if self.treatment_index < 0 or self.treatment_index >= X2.shape[1]:
             raise ValueError("treatment_index is out of bounds")
@@ -317,7 +332,10 @@ class TreatmentInteractionBasis(BaseBasis):
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
         if self._base_dim is None:
-            self.fit(X2)
+            raise RuntimeError(
+                "TreatmentInteractionBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak information."
+            )
 
         D = X2[:, self.treatment_index].reshape(-1, 1)
         if not np.all(np.isin(np.unique(D), [0.0, 1.0])):
@@ -331,7 +349,10 @@ class TreatmentInteractionBasis(BaseBasis):
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
         if self._base_dim is None:
-            self.fit(X2)
+            raise RuntimeError(
+                "TreatmentInteractionBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak information."
+            )
 
         coordinate = int(coordinate)
         if coordinate == self.treatment_index:
@@ -361,17 +382,16 @@ class RBFRandomFourierBasis(BaseBasis):
         self,
         *,
         n_features: int = 500,
-        sigma: float = 1.0,
+        sigma: float | str = 1.0,
         include_bias: bool = True,
         standardize: bool = True,
         random_state: int | None = None,
     ):
         if int(n_features) <= 0:
             raise ValueError("n_features must be positive")
-        if float(sigma) <= 0:
-            raise ValueError("sigma must be positive")
         self.n_features_rff = int(n_features)
-        self.sigma = float(sigma)
+        # ``sigma`` may be a positive float or "auto" (median heuristic at fit).
+        self.sigma = _validate_sigma_input(sigma)
         self.include_bias = bool(include_bias)
         self.standardize = bool(standardize)
         self.random_state = random_state
@@ -380,8 +400,19 @@ class RBFRandomFourierBasis(BaseBasis):
         self._std: NDArray[np.float64] | None = None
         self._W: NDArray[np.float64] | None = None
         self._b: NDArray[np.float64] | None = None
+        self._sigma_resolved: float | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "RBFRandomFourierBasis":
+    @property
+    def sigma_(self) -> float:
+        """The resolved bandwidth used by the kernel (after ``fit``)."""
+
+        if self._sigma_resolved is None:
+            raise RuntimeError(
+                "RBFRandomFourierBasis must be fit() before sigma_ is available."
+            )
+        return float(self._sigma_resolved)
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> RBFRandomFourierBasis:
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
@@ -393,14 +424,18 @@ class RBFRandomFourierBasis(BaseBasis):
             mean = np.zeros(d)
             std = np.ones(d)
 
+        Xs = (X2 - mean) / std
+        sigma = _resolve_sigma(self.sigma, Xs, random_state=self.random_state)
+
         rng = np.random.default_rng(self.random_state)
-        W = rng.normal(loc=0.0, scale=1.0 / self.sigma, size=(d, self.n_features_rff))
+        W = rng.normal(loc=0.0, scale=1.0 / sigma, size=(d, self.n_features_rff))
         b = rng.uniform(0.0, 2.0 * np.pi, size=self.n_features_rff)
 
         self._mean = mean.astype(float)
         self._std = std.astype(float)
         self._W = W.astype(float)
         self._b = b.astype(float)
+        self._sigma_resolved = float(sigma)
         return self
 
     @property
@@ -412,7 +447,10 @@ class RBFRandomFourierBasis(BaseBasis):
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
         if self._W is None or self._b is None or self._mean is None or self._std is None:
-            self.fit(X2)
+            raise RuntimeError(
+                "RBFRandomFourierBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak its standardization."
+            )
 
         Z = (X2 - self._mean) / self._std
         proj = Z @ self._W + self._b
@@ -430,7 +468,10 @@ class RBFRandomFourierBasis(BaseBasis):
         """
         X2, single = _as_2d_allow_1d(X)
         if self._W is None or self._b is None or self._mean is None or self._std is None:
-            self.fit(X2)
+            raise RuntimeError(
+                "RBFRandomFourierBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak its standardization."
+            )
 
         n, d = X2.shape
         coordinate = int(coordinate)
@@ -467,6 +508,65 @@ def _rbf_kernel(
     return np.exp(-dist2 / (2.0 * sigma * sigma))
 
 
+def _median_pairwise_distance(
+    Xs: NDArray[np.float64], *, max_rows: int = 512, random_state: int | None = 0
+) -> float:
+    """Median Euclidean distance between distinct rows of ``Xs``.
+
+    Subsamples to at most ``max_rows`` rows because the computation is
+    ``O(rows^2)``. Returns NaN when fewer than two rows are available.
+    """
+
+    Xs = np.asarray(Xs, dtype=float)
+    n = Xs.shape[0]
+    if n > int(max_rows):
+        rng = np.random.default_rng(random_state)
+        Xs = Xs[rng.choice(n, size=int(max_rows), replace=False)]
+    x2 = np.sum(Xs * Xs, axis=1).reshape(-1, 1)
+    dist2 = np.maximum(x2 + x2.reshape(1, -1) - 2.0 * (Xs @ Xs.T), 0.0)
+    iu = np.triu_indices(Xs.shape[0], k=1)
+    if iu[0].size == 0:
+        return float("nan")
+    return float(np.median(np.sqrt(dist2[iu])))
+
+
+def _validate_sigma_input(sigma: float | str) -> float | str:
+    """Validate a bandwidth argument that may be a positive float or ``"auto"``."""
+
+    if isinstance(sigma, str):
+        s = sigma.lower()
+        if s != "auto":
+            raise ValueError("sigma must be a positive float or 'auto'")
+        return "auto"
+    if float(sigma) <= 0:
+        raise ValueError("sigma must be positive")
+    return float(sigma)
+
+
+def _resolve_sigma(
+    sigma: float | str, Xs: NDArray[np.float64], *, random_state: int | None = 0
+) -> float:
+    """Resolve ``sigma`` to a positive float, applying the median heuristic.
+
+    ``"auto"`` maps to the median pairwise distance of the (already standardized)
+    training rows ``Xs``. If that heuristic is degenerate (e.g. duplicate rows),
+    it falls back to ``1.0`` with a warning so the kernel stays well defined.
+    """
+
+    if not isinstance(sigma, str):
+        return float(sigma)
+    med = _median_pairwise_distance(Xs, random_state=random_state)
+    if not np.isfinite(med) or med <= 0:
+        warnings.warn(
+            "sigma='auto' median heuristic produced a non-positive bandwidth "
+            "(degenerate training rows); falling back to sigma=1.0.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return 1.0
+    return float(med)
+
+
 class GaussianRKHSBasis(BaseBasis):
     """Gaussian-kernel RKHS basis using kernel evaluations at fitted center points.
 
@@ -483,7 +583,7 @@ class GaussianRKHSBasis(BaseBasis):
         self,
         *,
         n_centers: int = 300,
-        sigma: float = 1.0,
+        sigma: float | str = 1.0,
         include_bias: bool = True,
         standardize: bool = True,
         random_state: int | None = None,
@@ -491,10 +591,10 @@ class GaussianRKHSBasis(BaseBasis):
     ):
         if int(n_centers) <= 0:
             raise ValueError("n_centers must be positive")
-        if float(sigma) <= 0:
-            raise ValueError("sigma must be positive")
         self.n_centers = int(n_centers)
-        self.sigma = float(sigma)
+        # ``sigma`` may be a positive float or the string "auto" (median
+        # heuristic, resolved on the training sample at fit time).
+        self.sigma = _validate_sigma_input(sigma)
         self.include_bias = bool(include_bias)
         self.standardize = bool(standardize)
         self.random_state = random_state
@@ -503,8 +603,9 @@ class GaussianRKHSBasis(BaseBasis):
         self._centers: NDArray[np.float64] | None = None
         self._mean: NDArray[np.float64] | None = None
         self._std: NDArray[np.float64] | None = None
+        self._sigma_resolved: float | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "GaussianRKHSBasis":
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> GaussianRKHSBasis:
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
@@ -532,7 +633,39 @@ class GaussianRKHSBasis(BaseBasis):
         self._mean = mean.astype(float)
         self._std = std.astype(float)
         self._centers = Cs.astype(float)
+        # Resolve the bandwidth from this (training) fold only.
+        self._sigma_resolved = _resolve_sigma(self.sigma, Xs, random_state=self.random_state)
         return self
+
+    @property
+    def sigma_(self) -> float:
+        """The resolved bandwidth used by the kernel (after ``fit``)."""
+
+        if self._sigma_resolved is None:
+            raise RuntimeError("GaussianRKHSBasis must be fit() before sigma_ is available.")
+        return float(self._sigma_resolved)
+
+    def copy_with_params(self, **overrides: object) -> GaussianRKHSBasis:
+        """Return a fresh, unfitted basis with selected constructor overrides.
+
+        Used to build cross-validation candidates that differ only in the given
+        parameters (e.g. ``sigma`` or ``n_centers``). The center-selection seed
+        is pinned so candidates share the same center subsample unless
+        ``random_state``/``n_centers``/``centers`` is itself overridden.
+        """
+
+        params: dict[str, object] = {
+            "n_centers": self.n_centers,
+            "sigma": self.sigma,
+            "include_bias": self.include_bias,
+            "standardize": self.standardize,
+            "random_state": self.random_state,
+            "centers": self._centers_input,
+        }
+        params.update(overrides)
+        if params.get("random_state") is None:
+            params["random_state"] = 0
+        return GaussianRKHSBasis(**params)  # type: ignore[arg-type]
 
     @property
     def centers(self) -> NDArray[np.float64]:
@@ -550,14 +683,104 @@ class GaussianRKHSBasis(BaseBasis):
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
         if self._centers is None or self._mean is None or self._std is None:
-            self.fit(X2)
+            raise RuntimeError(
+                "GaussianRKHSBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak centers and "
+                "standardization."
+            )
 
         Xs = (X2 - self._mean) / self._std
-        K = _rbf_kernel(Xs, self._centers, sigma=self.sigma)
+        K = _rbf_kernel(Xs, self._centers, sigma=self.sigma_)
         if self.include_bias:
             K = np.column_stack([np.ones(len(X2), dtype=float), K])
         K = K.astype(float)
         return K[0] if single else K
+
+    def diagnostics(
+        self,
+        X: ArrayLike,
+        *,
+        ridge: float = 1e-8,
+        max_rows: int = 512,
+        random_state: int | None = 0,
+    ) -> dict[str, float]:
+        """Kernel-health summary of the fitted RBF feature map on ``X``.
+
+        Reports whether the bandwidth ``sigma`` is in a usable range. A tiny
+        ``sigma`` collapses every off-diagonal kernel value to ~0 (underfitting:
+        each point only sees itself); a huge ``sigma`` makes all features nearly
+        constant (features carry no signal). The returned scalars feed the
+        kernel-health column of the coverage-failure tables.
+
+        Parameters
+        ----------
+        X:
+            Data on which to probe the kernel (typically the training fold).
+        ridge:
+            Ridge added to the Gram matrix before its condition number.
+        max_rows:
+            Subsample size used for the pairwise-distance / Gram statistics
+            (kept modest because those are ``O(rows^2)`` / ``O(rows^3)``).
+        random_state:
+            Seed for the subsample (does not affect the fitted centers).
+
+        Notes
+        -----
+        This is a read-only probe: it does not refit centers or standardization.
+        """
+
+        if self._centers is None or self._mean is None or self._std is None:
+            raise RuntimeError("GaussianRKHSBasis must be fit() before diagnostics().")
+
+        X2, _ = _as_2d_allow_1d(X)
+        n = X2.shape[0]
+        if n > int(max_rows):
+            rng = np.random.default_rng(random_state)
+            sub = rng.choice(n, size=int(max_rows), replace=False)
+            X2 = X2[sub]
+
+        Xs = (X2 - self._mean) / self._std
+
+        # Median pairwise distance among the (standardized) probe rows: the scale
+        # the median heuristic would target.
+        med_pairwise = _median_pairwise_distance(Xs, max_rows=max_rows, random_state=random_state)
+
+        # RBF activations (exclude the constant bias column).
+        K = _rbf_kernel(Xs, self._centers, sigma=self.sigma_)
+        row_l2 = np.sqrt(np.sum(K * K, axis=1))
+        feat_var = np.var(K, axis=0)
+
+        Phi = K
+        if self.include_bias:
+            Phi = np.column_stack([np.ones(Phi.shape[0], dtype=float), Phi])
+        gram = (Phi.T @ Phi) / Phi.shape[0]
+        gram = gram + float(ridge) * np.eye(gram.shape[0])
+        evals = np.linalg.eigvalsh(gram)
+        evals = np.clip(evals, 0.0, None)
+        cond = float(evals[-1] / evals[0]) if evals[0] > 0 else float("inf")
+        total = float(np.sum(evals))
+        if total > 0:
+            pk = evals / total
+            pk = pk[pk > 0]
+            eff_rank = float(np.exp(-np.sum(pk * np.log(pk))))
+        else:
+            eff_rank = float("nan")
+
+        kernel_median = float(np.median(K))
+        return {
+            "sigma": float(self.sigma_),
+            "median_pairwise_distance": med_pairwise,
+            "kernel_median": kernel_median,
+            "kernel_p05": float(np.percentile(K, 5)),
+            "kernel_p95": float(np.percentile(K, 95)),
+            "row_l2_mean": float(np.mean(row_l2)),
+            "row_l2_min": float(np.min(row_l2)),
+            "feature_variance_median": float(np.median(feat_var)),
+            "feature_variance_min": float(np.min(feat_var)),
+            "gram_condition_number": cond,
+            "effective_rank": eff_rank,
+            "underfitting": bool(kernel_median < 1e-3),
+        }
 
 
 class RBFNystromBasis(BaseBasis):
@@ -581,7 +804,7 @@ class RBFNystromBasis(BaseBasis):
         self,
         *,
         n_centers: int = 300,
-        sigma: float = 1.0,
+        sigma: float | str = 1.0,
         include_bias: bool = True,
         standardize: bool = True,
         random_state: int | None = None,
@@ -590,13 +813,12 @@ class RBFNystromBasis(BaseBasis):
     ):
         if int(n_centers) <= 0:
             raise ValueError("n_centers must be positive")
-        if float(sigma) <= 0:
-            raise ValueError("sigma must be positive")
         if float(jitter) <= 0:
             raise ValueError("jitter must be positive")
 
         self.n_centers = int(n_centers)
-        self.sigma = float(sigma)
+        # ``sigma`` may be a positive float or "auto" (median heuristic at fit).
+        self.sigma = _validate_sigma_input(sigma)
         self.include_bias = bool(include_bias)
         self.standardize = bool(standardize)
         self.random_state = random_state
@@ -607,8 +829,17 @@ class RBFNystromBasis(BaseBasis):
         self._mean: NDArray[np.float64] | None = None
         self._std: NDArray[np.float64] | None = None
         self._inv_sqrt: NDArray[np.float64] | None = None
+        self._sigma_resolved: float | None = None
 
-    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> "RBFNystromBasis":
+    @property
+    def sigma_(self) -> float:
+        """The resolved bandwidth used by the kernel (after ``fit``)."""
+
+        if self._sigma_resolved is None:
+            raise RuntimeError("RBFNystromBasis must be fit() before sigma_ is available.")
+        return float(self._sigma_resolved)
+
+    def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> RBFNystromBasis:
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
@@ -621,6 +852,7 @@ class RBFNystromBasis(BaseBasis):
             std = np.ones(d)
 
         Xs = (X2 - mean) / std
+        self._sigma_resolved = _resolve_sigma(self.sigma, Xs, random_state=self.random_state)
 
         if self._centers_input is not None:
             C = np.asarray(self._centers_input, dtype=float)
@@ -633,7 +865,7 @@ class RBFNystromBasis(BaseBasis):
             idx = rng.choice(n, size=m, replace=False)
             Cs = Xs[idx]
 
-        Kmm = _rbf_kernel(Cs, Cs, sigma=self.sigma)
+        Kmm = _rbf_kernel(Cs, Cs, sigma=self.sigma_)
         Kmm = Kmm + self.jitter * np.eye(Kmm.shape[0])
 
         # Symmetric eigendecomposition
@@ -662,11 +894,20 @@ class RBFNystromBasis(BaseBasis):
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
-        if self._centers is None or self._mean is None or self._std is None or self._inv_sqrt is None:
-            self.fit(X2)
+        if (
+            self._centers is None
+            or self._mean is None
+            or self._std is None
+            or self._inv_sqrt is None
+        ):
+            raise RuntimeError(
+                "RBFNystromBasis must be fit() on training data before use. "
+                "Silently fitting on evaluation data would leak centers and "
+                "standardization."
+            )
 
         Xs = (X2 - self._mean) / self._std
-        Knm = _rbf_kernel(Xs, self._centers, sigma=self.sigma)
+        Knm = _rbf_kernel(Xs, self._centers, sigma=self.sigma_)
         Phi = Knm @ self._inv_sqrt
         if self.include_bias:
             Phi = np.column_stack([np.ones(len(X2), dtype=float), Phi])
@@ -707,7 +948,7 @@ class KNNCatchmentBasis(BaseBasis):
         self._std: NDArray[np.float64] | None = None
         self._nn = None
 
-    def fit(self, centers: ArrayLike, y: ArrayLike | None = None) -> "KNNCatchmentBasis":
+    def fit(self, centers: ArrayLike, y: ArrayLike | None = None) -> KNNCatchmentBasis:
         from scipy.spatial import cKDTree
 
         C = np.asarray(centers, dtype=float)

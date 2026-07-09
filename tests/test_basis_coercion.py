@@ -147,3 +147,27 @@ def test_treatment_interaction_basis_uses_treatment_for_base_basis_fit():
     base = _TreatmentTargetBasis()
     basis = TreatmentInteractionBasis(base_basis=base, treatment_index=0).fit(X)
     assert np.array_equal(basis.base_basis.y_seen, X[:, 0])
+
+
+def test_unfitted_data_dependent_bases_raise_instead_of_leaking():
+    import pytest
+
+    from genriesz import (
+        GaussianRKHSBasis,
+        RBFNystromBasis,
+        RBFRandomFourierBasis,
+    )
+
+    rng = np.random.default_rng(5)
+    X_eval = rng.normal(size=(10, 2))
+
+    for basis in [
+        GaussianRKHSBasis(n_centers=5, random_state=0),
+        RBFRandomFourierBasis(n_features=8, random_state=0),
+        RBFNystromBasis(n_centers=5, random_state=0),
+        TreatmentInteractionBasis(
+            base_basis=PolynomialBasis(degree=1), treatment_index=0
+        ),
+    ]:
+        with pytest.raises(RuntimeError, match="fit"):
+            basis(X_eval)

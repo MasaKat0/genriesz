@@ -1,5 +1,4 @@
 import numpy as np
-
 import pytest
 
 
@@ -41,7 +40,9 @@ def test_random_forest_leaf_basis_in_treatment_interaction_basis():
     X = np.column_stack([D, Z])
 
     rf = RandomForestClassifier(n_estimators=5, max_depth=2, random_state=1)
-    basis = TreatmentInteractionBasis(base_basis=RandomForestLeafBasis(rf), treatment_index=0).fit(X)
+    basis = TreatmentInteractionBasis(
+        base_basis=RandomForestLeafBasis(rf), treatment_index=0
+    ).fit(X)
     Phi = basis(X)
 
     assert Phi.shape[0] == X.shape[0]

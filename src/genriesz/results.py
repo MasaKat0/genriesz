@@ -7,6 +7,7 @@ inspected programmatically from notebooks.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -25,20 +26,70 @@ class SingleEstimate:
 
 @dataclass(frozen=True)
 class FunctionalEstimate:
-    """Container for estimates for the same estimand."""
+    """Container for estimates for the same estimand.
+
+    Point estimates are stored in :attr:`estimates`. Standard entries can also
+    be accessed with dictionary-style syntax, for example ``result["arw"]``, or
+    convenience attributes such as ``result.arw``. When both shared-basis and
+    separate-basis outcome models were requested, the convenience accessors
+    prefer the shared-basis estimate.
+    """
 
     n: int
     alpha: float
     null: float
     estimand: str
     estimates: dict[str, SingleEstimate]
-    diagnostics: dict[str, object]
+    diagnostics: dict[str, Any]
+
+    def _estimate(self, key: str) -> SingleEstimate:
+        key = str(key)
+        if key in self.estimates:
+            return self.estimates[key]
+
+        shared_key = f"{key} (shared)"
+        if shared_key in self.estimates:
+            return self.estimates[shared_key]
+
+        matches = [name for name in self.estimates if name.startswith(f"{key} ")]
+        if len(matches) == 1:
+            return self.estimates[matches[0]]
+        raise KeyError(key)
+
+    def __getitem__(self, key: str) -> SingleEstimate:
+        """Return a named estimate such as ``"ra"``, ``"rw"``, or ``"arw"``."""
+
+        return self._estimate(str(key))
+
+    @property
+    def ra(self) -> SingleEstimate:
+        """Regression-adjustment estimate."""
+
+        return self._estimate("ra")
+
+    @property
+    def rw(self) -> SingleEstimate:
+        """Riesz-weighting estimate."""
+
+        return self._estimate("rw")
+
+    @property
+    def arw(self) -> SingleEstimate:
+        """Augmented Riesz-weighting estimate."""
+
+        return self._estimate("arw")
+
+    @property
+    def tmle(self) -> SingleEstimate:
+        """TMLE-style estimate."""
+
+        return self._estimate("tmle")
 
     def love_plot_data(self, *, as_pandas: bool | None = None):
         """Return covariate-balance diagnostics used by :meth:`love_plot`.
 
         This method is available only when the underlying estimand is of
-        treatment-effect type (ATE / ATT / DID). The returned object contains
+        treatment-effect type (ATE, ATT, and DID). The returned object contains
         standardized mean differences (SMDs) *before* and *after* weighting.
 
         Parameters
@@ -52,7 +103,7 @@ class FunctionalEstimate:
         if love is None:
             raise RuntimeError(
                 "Love-plot diagnostics are not available for this result. "
-                "They are computed only for treatment-effect functionals (ATE/ATT/DID)."
+                "They are computed only for treatment-effect functionals (ATE, ATT, and DID)."
             )
 
         names = list(love["covariate_names"])
@@ -60,7 +111,7 @@ class FunctionalEstimate:
         smd_w = np.asarray(love["smd_weighted"], dtype=float)
 
         rows = []
-        for nm, u, w in zip(names, smd_u, smd_w):
+        for nm, u, w in zip(names, smd_u, smd_w, strict=True):
             rows.append(
                 {
                     "covariate": str(nm),
@@ -104,14 +155,14 @@ class FunctionalEstimate:
         Notes
         -----
         - Requires ``matplotlib`` (not a hard dependency).
-        - Only available for ATE / ATT / DID.
+        - Only available for ATE, ATT, and DID.
         """
 
         love = self.diagnostics.get("love_plot")
         if love is None:
             raise RuntimeError(
                 "Love-plot diagnostics are not available for this result. "
-                "They are computed only for treatment-effect functionals (ATE/ATT/DID)."
+                "They are computed only for treatment-effect functionals (ATE, ATT, and DID)."
             )
 
         try:

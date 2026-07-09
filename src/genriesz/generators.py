@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import inspect
 import warnings
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -191,7 +191,7 @@ class BregmanGenerator:
     # ------------------------------------------------------------------
     # Compatibility helpers
     # ------------------------------------------------------------------
-    def as_generator(self) -> "BregmanGenerator":
+    def as_generator(self) -> BregmanGenerator:
         """For API compatibility with earlier drafts."""
 
         return self
@@ -317,7 +317,9 @@ class BregmanGenerator:
             "for this generator."
         )
 
-    def conjugate(self, X: ArrayLike, v: ArrayLike) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    def conjugate(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Return (g*(v), alpha) evaluated row-wise."""
 
         X_ = _as_2d(X)
@@ -326,6 +328,18 @@ class BregmanGenerator:
         g_val = self.g(X_, alpha)
         g_star = v_ * alpha - g_val
         return g_star, alpha
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Return a boolean mask of observations where an internal domain clip binds.
+
+        The base implementation reports no binding. Built-in generators with
+        numerical clips in ``inv_grad`` override this so that solvers and
+        diagnostics can surface the clip binding rate instead of hiding it.
+        """
+
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        return np.zeros(v_.shape[0], dtype=bool)
 
 
 class SquaredGenerator(BregmanGenerator):
@@ -403,6 +417,12 @@ class UKLGenerator(BregmanGenerator):
         exp_term = np.maximum(exp_term, 1e-12)
         return s * (self.C + exp_term)
 
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        z = self._sign(X_, v_) * v_
+        return (z <= np.log(1e-12)) | (z >= 700.0)
+
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         a = _as_1d(alpha, n=len(X_), name="alpha")
@@ -426,7 +446,7 @@ class UKLGenerator(BregmanGenerator):
 
 
 class BPGenerator(BregmanGenerator):
-    """Box-Power generator (BP-Riesz).
+    """Basu-power generator (BP-Riesz).
 
     A smooth family interpolating between UKL-like (small power) and squared-like
     (power near 1) behavior.
@@ -494,6 +514,13 @@ class BPGenerator(BregmanGenerator):
         t = np.maximum(t, 1e-6)
         return s * (self.C + np.power(t, 1.0 / self.omega))
 
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        k = 1.0 + 1.0 / self.omega
+        return (1.0 + s * v_ / k) <= 1e-6
+
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         a = _as_1d(alpha, n=len(X_), name="alpha")
@@ -516,7 +543,6 @@ class BPGenerator(BregmanGenerator):
         t = np.maximum(t, 1e-12)
         k = 1.0 + 1.0 / self.omega
         return k * self.omega * np.power(t, self.omega - 1.0)
-
 
 
 class BKLGenerator(BregmanGenerator):
@@ -545,17 +571,30 @@ class BKLGenerator(BregmanGenerator):
     def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for BKLGenerator")
+        if branch_fn is None:
+            warnings.warn(
+                "BKLGenerator without branch_fn selects the alpha branch from "
+                "sign(v) (positive branch for v <= 0). "
+                "For GRR with functionals that require a fixed sign per "
+                "observation (e.g. ATE/ATT), provide branch_fn or use "
+                "SquaredGenerator instead.",
+                UserWarning,
+                stacklevel=2,
+            )
         super().__init__(name="BKL", C=float(C), branch_fn=branch_fn)
+
+    def _branch_sign(
+        self, X: NDArray[np.float64], v: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        # For BKL, the positive branch corresponds to v <= 0.
+        if self.branch_fn is None:
+            return np.where(v <= 0.0, 1.0, -1.0)
+        return self._sign(X, v)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         v_ = _as_1d(v, n=len(X_), name="v")
-
-        # For BKL, the positive branch corresponds to v <= 0.
-        if self.branch_fn is None:
-            s = np.where(v_ <= 0.0, 1.0, -1.0)
-        else:
-            s = self._sign(X_, v_)
+        s = self._branch_sign(X_, v_)
 
         # Enforce u = s*v < 0.
         u = s * v_
@@ -566,6 +605,19 @@ class BKLGenerator(BregmanGenerator):
         denom = np.maximum(denom, 1e-12)
         a = self.C * (1.0 + t) / denom
         return s * a
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask of observations where the domain clip in ``inv_grad`` binds.
+
+        ``u = s*v >= -1e-8`` is the dangerous side: the theoretical domain is
+        ``u < 0`` and clipping there produces extremely large ``alpha``
+        (order ``2C/1e-8``), which changes the estimand and destroys weights.
+        """
+
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        u = self._branch_sign(X_, v_) * v_
+        return (u >= -1e-8) | (u <= -700.0)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
@@ -618,6 +670,14 @@ class PUGenerator(BregmanGenerator):
     def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for PUGenerator")
+        if branch_fn is None:
+            warnings.warn(
+                "PUGenerator without branch_fn uses sign(v) to select the alpha "
+                "branch. For GRR with functionals that require a fixed sign per "
+                "observation (e.g. ATE/ATT), provide branch_fn.",
+                UserWarning,
+                stacklevel=2,
+            )
         super().__init__(name="PU", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
@@ -629,6 +689,12 @@ class PUGenerator(BregmanGenerator):
         a = 1.0 / (1.0 + np.exp(-z))
         a = np.clip(a, 1e-10, 1.0 - 1e-10)
         return s * a
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        z = self._sign(X_, v_) * v_ / self.C
+        return np.abs(z) >= np.log(1e10)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)

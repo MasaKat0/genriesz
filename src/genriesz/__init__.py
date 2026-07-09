@@ -5,7 +5,7 @@ Generalized Riesz Regression (GRR) under Bregman divergences.
 This package exposes a small, research-friendly API for:
 
 - estimating linear functionals via generalized Riesz regression,
-- common causal estimands (ATE / ATT / DID / AME),
+- common causal estimands (ATE, ATT, DID, and AME),
 - nearest-neighbor matching as LSIF/Riesz regression (and local-polynomial extensions),
 - density ratio estimation (covariate shift) via generalized Bregman divergence minimization.
 
@@ -17,33 +17,6 @@ from __future__ import annotations
 __version__ = "0.2.6"
 
 # High-level estimation
-from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
-
-# Low-level solver (advanced)
-from .glm import GRRGLM
-
-# Density ratio and covariate shift
-from .density_ratio import DensityRatioResult, fit_density_ratio
-
-# ScoreMatchingRiesz is an optional PyTorch module. Import it lazily so the core
-# package remains usable without torch.
-def load_scorematchingriesz():
-    """Return the optional :mod:`genriesz.scorematchingriesz` module."""
-
-    from importlib import import_module
-
-    return import_module("genriesz.scorematchingriesz")
-
-# Functionals
-from .functionals import (
-    AMEFunctional,
-    ATEFunctional,
-    ATTFunctional,
-    DIDFunctional,
-    CallableFunctional,
-    LinearFunctional,
-)
-
 # Bases
 from .basis import (
     BaseBasis,
@@ -51,13 +24,37 @@ from .basis import (
     GaussianRKHSBasis,
     KNNCatchmentBasis,
     PolynomialBasis,
-    RBFRandomFourierBasis,
     RBFNystromBasis,
+    RBFRandomFourierBasis,
     TreatmentInteractionBasis,
 )
 
+# Density ratio and covariate shift
+from .density_ratio import DensityRatioResult, fit_density_ratio
+from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
+
+# Functionals
+from .functionals import (
+    AMEFunctional,
+    ATEFunctional,
+    ATTFunctional,
+    CallableFunctional,
+    DIDFunctional,
+    LinearFunctional,
+)
+
 # Generators
-from .generators import BPGenerator, BKLGenerator, PUGenerator, BregmanGenerator, SquaredGenerator, UKLGenerator
+from .generators import (
+    BKLGenerator,
+    BPGenerator,
+    BregmanGenerator,
+    PUGenerator,
+    SquaredGenerator,
+    UKLGenerator,
+)
+
+# Low-level solver (advanced)
+from .glm import GRRGLM, OutcomeGLM
 
 # Matching (NN / local polynomial NN-LSIF)
 from .matching import (
@@ -66,8 +63,22 @@ from .matching import (
     nn_matching_inverse_propensity_weights,
 )
 
+# Inner cross-validation for Riesz hyper-parameters
+from .model_selection import GRRCVConfig, GRRCVResult, select_grr_hyperparams
+
 # Results
 from .results import FunctionalEstimate, SingleEstimate
+
+# Diagnostics helpers (coverage-failure tables)
+from .utils import bias_proxy, coverage_decomposition, oracle_decomposition
+
+
+def load_scorematchingriesz():
+    """Return the optional :mod:`genriesz.scorematchingriesz` module."""
+
+    from importlib import import_module
+
+    return import_module("genriesz.scorematchingriesz")
 
 __all__ = [
     "__version__",
@@ -78,6 +89,7 @@ __all__ = [
     "grr_did",
     "grr_ame",
     "GRRGLM",
+    "OutcomeGLM",
     # Density ratio
     "fit_density_ratio",
     "DensityRatioResult",
@@ -113,4 +125,12 @@ __all__ = [
     # Results
     "FunctionalEstimate",
     "SingleEstimate",
+    # Diagnostics helpers
+    "bias_proxy",
+    "coverage_decomposition",
+    "oracle_decomposition",
+    # Model selection (inner CV)
+    "GRRCVConfig",
+    "GRRCVResult",
+    "select_grr_hyperparams",
 ]

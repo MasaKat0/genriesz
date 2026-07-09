@@ -12,7 +12,7 @@ Estimators (naming convention):
 
 - RA   : regression adjustment (plug-in)
 - RW   : Riesz weighting (weighting only)
-- ARW  : augmented Riesz weighting (orthogonal / doubly-robust)
+- ARW  : augmented Riesz weighting (orthogonal and doubly robust)
 - TMLE : targeted maximum likelihood estimator
 
 TMLE likelihood is inferred from the *outcome regression link*:
@@ -25,7 +25,9 @@ When ``link`` is not given, we default to identity unless the outcome is bounded
 
 from __future__ import annotations
 
-from typing import Callable, Iterable, Literal, Sequence
+import warnings
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any, Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -33,14 +35,14 @@ from scipy import optimize
 
 from .basis import BaseBasis, Basis, CallableBasis
 from .functionals import (
-    ATEFunctional,
     AMEFunctional,
+    ATEFunctional,
     ATTFunctional,
-    DIDFunctional,
     CallableFunctional,
+    DIDFunctional,
     LinearFunctional,
 )
-from .generators import BregmanGenerator
+from .generators import BKLGenerator, BPGenerator, BregmanGenerator, UKLGenerator
 from .glm import GRRGLM, OutcomeGLM
 from .matching import (
     LocalPolynomialLSIFWeights,
@@ -48,9 +50,9 @@ from .matching import (
     local_polynomial_nn_lsif_inverse_propensity_weights,
     nn_matching_inverse_propensity_weights,
 )
+from .model_selection import GRRCVConfig, select_grr_hyperparams
 from .results import FunctionalEstimate, SingleEstimate
-from .utils import kfold_splits, se_ci_pvalue, Fold
-
+from .utils import Fold, bias_proxy, is_binary_y, kfold_splits, se_ci_pvalue
 
 EstimatorName = Literal["ra", "rw", "arw", "tmle"]
 OutcomeModels = Literal["shared", "separate", "both", "none", "auto"]
@@ -79,7 +81,7 @@ def _covariate_balance_smd(
     w_treated: NDArray[np.float64] | None = None,
     w_control: NDArray[np.float64] | None = None,
     target: Literal["ate", "att"] = "ate",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Compute standardized mean differences (SMDs) for a binary treatment.
 
     Parameters
@@ -177,7 +179,7 @@ def _as_1d(y: ArrayLike, *, n: int, name: str) -> NDArray[np.float64]:
 
 
 def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...]:
-    mapping = {
+    mapping: dict[str, EstimatorName] = {
         "ra": "ra",
         "rw": "rw",
         "arw": "arw",
@@ -350,6 +352,14 @@ def grr_functional(
     riesz_penalty: str | None = "l2",
     riesz_lam: float = 1e-3,
     riesz_p_norm: float | None = None,
+    # Riesz inner cross-validation (optional; backward-compatible when all None)
+    riesz_lam_grid: object | None = None,
+    riesz_sigma_grid: object | None = None,
+    riesz_n_centers_grid: object | None = None,
+    riesz_cv_folds: int = 3,
+    riesz_selection_score: str = "bias_variance",
+    riesz_admissibility_thresholds: dict | None = None,
+    return_riesz_cv_path: bool = False,
     # Matching-only options (ATE only)
     M: int = 1,
     local_poly_degree: int = 1,
@@ -452,10 +462,41 @@ def grr_functional(
                 raise ValueError("When riesz_method='grr', you must provide generator or g.")
             generator = BregmanGenerator(g=g, grad=grad_g, inv_grad=inv_grad_g, grad2=grad2_g)
 
+        if isinstance(m, (ATTFunctional, DIDFunctional)) and isinstance(
+            generator, (UKLGenerator, BPGenerator, BKLGenerator)
+        ):
+            c_value = float(getattr(generator, "C", 0.0))
+            warn = False
+            if isinstance(generator, (UKLGenerator, BPGenerator)) and c_value > 0.0:
+                warn = True
+            if isinstance(generator, BKLGenerator):
+                warn = True
+            if warn:
+                warnings.warn(
+                    "ATT and DID Riesz representers can have a control-branch magnitude "
+                    "below a positive generator shift C. For ATT/DID with KL-type "
+                    "branchwise generators, prefer C=0 for UKL/BP, a very small C for "
+                    "BKL only when a lower bound is justified, or SquaredGenerator. "
+                    "Using an incompatible C can create boundary weights and unstable "
+                    "finite-sample estimates.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
 
     # Outcome link inference
     if outcome_link is None:
-        outcome_link_ = "logit" if (np.nanmin(y_) >= 0.0 and np.nanmax(y_) <= 1.0) else "identity"
+        in_unit_interval = bool(np.nanmin(y_) >= 0.0 and np.nanmax(y_) <= 1.0)
+        outcome_link_ = "logit" if in_unit_interval else "identity"
+        if in_unit_interval and not is_binary_y(y_):
+            warnings.warn(
+                "outcome_link was not specified and Y lies in [0, 1] but is not "
+                "binary; inferring outcome_link='logit' (Bernoulli-style outcome "
+                "model and TMLE targeting). Pass outcome_link='identity' if Y is "
+                "a bounded continuous outcome.",
+                UserWarning,
+                stacklevel=2,
+            )
     else:
         outcome_link_ = str(outcome_link).lower()
         if outcome_link_ not in {"identity", "logit"}:
@@ -493,6 +534,49 @@ def grr_functional(
     # For Bernoulli TMLE with ATE/ATT/DID we need counterfactual mu/alpha.
     cf_cache: dict[str, NDArray[np.float64]] = {}
 
+    # Per-fold Riesz optimizer diagnostics (item F/G/L: failures and clip
+    # binding must be visible, not swallowed).
+    riesz_fit_stats: dict[str, list] = {
+        "success": [],
+        "status": [],
+        "gradient_norm": [],
+        "kkt_residual": [],
+        "clip_binding_rate": [],
+    }
+
+    # Held-out working-span imbalance (item H): out-of-fold check of the Riesz
+    # balancing condition E[alpha*phi_j] = E[m(.,phi_j)] on the fitted span.
+    # This is distinct from the raw-covariate SMD balance below. We keep the
+    # per-fold summary scalars and the full Delta vectors (the latter are used
+    # for the directional bias proxy and then discarded, not returned).
+    imbalance_stats: dict[str, list] = {"max": [], "mean": []}
+    imbalance_delta: list[NDArray[np.float64]] = []
+
+    # Kernel-health per fold (item B), populated only when the fitted Riesz
+    # basis exposes a diagnostics() method (e.g. GaussianRKHSBasis).
+    kernel_stats: list[dict[str, float]] = []
+
+    # Outcome coefficient budget (norm) and, on the shared span, the coefficient
+    # vectors per fold, used for the bias proxy (item I). Keyed by tag.
+    outcome_coef_norm_stats: dict[str, list] = {}
+    outcome_coef_vec_stats: dict[str, list] = {}
+
+    # Inner Riesz-hyperparameter cross-validation (item C). Active only when a
+    # grid is supplied; otherwise the fixed riesz_lam path runs (backward compat).
+    riesz_cv_config = GRRCVConfig(
+        sigma_grid=riesz_sigma_grid,
+        lam_grid=riesz_lam_grid,
+        n_centers_grid=riesz_n_centers_grid,
+        cv_folds=riesz_cv_folds,
+        selection_score=riesz_selection_score,
+        admissibility_thresholds=riesz_admissibility_thresholds,
+        return_path=return_riesz_cv_path,
+        random_state=random_state,
+    )
+    riesz_cv_active = riesz_method_ == "grr" and riesz_cv_config.is_active
+    riesz_cv_selected: list[dict] = []
+    riesz_cv_paths: list[list[dict]] = []
+
     # ------------------------------------------------------------------
     # Fit nuisances fold-by-fold
     # ------------------------------------------------------------------
@@ -506,19 +590,94 @@ def grr_functional(
             if generator is None:
                 raise ValueError("generator is required when riesz_method='grr'")
 
-            basis_r = basis.copy().fit(X_tr, y_tr)
+            # Optional inner CV of the Riesz hyper-parameters on this outer
+            # training fold only (the eval fold X_te is never passed in).
+            lam_fold = riesz_lam
+            if riesz_cv_active:
+                sel = select_grr_hyperparams(
+                    X_train=X_tr,
+                    y_train=y_tr,
+                    m=m,
+                    basis=basis,
+                    generator=generator,
+                    config=riesz_cv_config,
+                    riesz_penalty=riesz_penalty,
+                    riesz_lam=riesz_lam,
+                    riesz_p_norm=riesz_p_norm,
+                    outcome_link=outcome_link_,
+                    outcome_penalty=outcome_penalty,
+                    outcome_lam=outcome_lam,
+                    max_iter=max_iter,
+                    tol=tol,
+                )
+                lam_fold = sel.lam
+                overrides: dict[str, object] = {}
+                if sel.sigma is not None:
+                    overrides["sigma"] = sel.sigma
+                if sel.n_centers is not None:
+                    overrides["n_centers"] = sel.n_centers
+                if overrides:
+                    basis_r = basis.copy_with_params(**overrides).fit(X_tr, y_tr)
+                else:
+                    basis_r = basis.copy().fit(X_tr, y_tr)
+                riesz_cv_selected.append(
+                    {
+                        "fold": fold_id,
+                        "sigma": sel.sigma,
+                        "lam": sel.lam,
+                        "n_centers": sel.n_centers,
+                        "n_admissible": sel.n_admissible,
+                        "n_candidates": sel.n_candidates,
+                        "best_score": sel.best_score,
+                    }
+                )
+                if return_riesz_cv_path:
+                    riesz_cv_paths.append(sel.path)
+            else:
+                basis_r = basis.copy().fit(X_tr, y_tr)
+
             grr = GRRGLM(
                 basis=basis_r,
                 generator=generator,
                 functional=m,
                 penalty=riesz_penalty,
-                lam=riesz_lam,
+                lam=lam_fold,
                 p_norm=riesz_p_norm,
             )
             fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            riesz_fit_stats["success"].append(bool(fit_result.success))
+            riesz_fit_stats["status"].append(str(getattr(fit_result, "status", "")))
+            riesz_fit_stats["gradient_norm"].append(
+                float(getattr(fit_result, "gradient_norm", float("nan")))
+            )
+            riesz_fit_stats["kkt_residual"].append(
+                float(getattr(fit_result, "kkt_residual", float("nan")))
+            )
+            riesz_fit_stats["clip_binding_rate"].append(
+                float(getattr(fit_result, "clip_binding_rate", float("nan")))
+            )
             _raise_if_fit_failed(result=fit_result, what="Riesz GRR", fold_id=fold_id)
 
-            alpha_obs[test_idx] = grr.predict_alpha(X_te)
+            alpha_te = grr.predict_alpha(X_te)
+            alpha_obs[test_idx] = alpha_te
+
+            # ----- Held-out working-span imbalance (item H). On the eval fold
+            # I_k the GRR balancing condition E[alpha*phi_j] = E[m(.,phi_j)]
+            # should hold for every basis coordinate j. Its out-of-fold
+            # violation Delta_j = mean_i(alpha_hat_i * phi_j(X_i) - M_{i,j}) is
+            # the natural bias driver for the augmented estimator.
+            Phi_te = np.asarray(basis_r(X_te), dtype=float)
+            M_te = np.asarray(m.m_basis_matrix(X_te, basis_r), dtype=float)
+            delta = np.mean(alpha_te[:, None] * Phi_te - M_te, axis=0)
+            abs_delta = np.abs(delta)
+            imbalance_stats["max"].append(float(np.max(abs_delta)))
+            imbalance_stats["mean"].append(float(np.mean(abs_delta)))
+            imbalance_delta.append(np.asarray(delta, dtype=float))
+
+            # ----- Kernel health (item B), when available on the fitted basis.
+            kdiag = getattr(basis_r, "diagnostics", None)
+            if callable(kdiag):
+                kernel_stats.append({k: v for k, v in kdiag(X_tr).items()})
 
             # m(alpha) is needed for Gaussian TMLE update for any functional.
             # For AME we need derivatives; others only need predict().
@@ -636,6 +795,15 @@ def grr_functional(
                 tag=tag,
             )
 
+            # Outcome coefficient budget on this fold's working span (item I).
+            theta_out = getattr(out, "theta_", None)
+            if theta_out is not None:
+                theta_vec = np.asarray(theta_out, dtype=float)
+                outcome_coef_norm_stats.setdefault(tag, []).append(
+                    float(np.linalg.norm(theta_vec))
+                )
+                outcome_coef_vec_stats.setdefault(tag, []).append(theta_vec)
+
             mu_obs.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = out.predict(X_te)
 
             # m(gamma_hat)
@@ -667,7 +835,25 @@ def grr_functional(
     # ------------------------------------------------------------------
     estimates: dict[str, SingleEstimate] = {}
 
+    def _pi_correction(theta: float, psi: NDArray[np.float64]) -> NDArray[np.float64]:
+        """First-step correction for the estimated pi in ATT/DID functionals.
+
+        With pi estimated by the sample mean of D, the plug-in target
+        theta(pi) = E[(D/pi)(gamma1-gamma0)] has d theta/d pi = -theta/pi, so
+        the influence function gains -(theta/pi) * (D - pi). Without it the
+        reported SE ignores the estimation of pi.
+        """
+
+        if isinstance(m, (ATTFunctional, DIDFunctional)) and bool(
+            getattr(m, "pi_is_estimated", False)
+        ):
+            D_loc = X_[:, getattr(m, "treatment_index", 0)].astype(float)
+            pi_loc = float(m.pi)
+            return psi - (float(theta) / pi_loc) * (D_loc - pi_loc)
+        return psi
+
     def add_est(key: str, name: str, est: float, psi: NDArray[np.float64]) -> None:
+        psi = _pi_correction(est, psi)
         se, lo, hi, p = se_ci_pvalue(est, psi, alpha=alpha, null=null)
         estimates[key] = SingleEstimate(
             name=name,
@@ -774,6 +960,173 @@ def grr_functional(
     diagnostics["alpha_abs_p95"] = float(np.percentile(alpha_abs, 95))
     diagnostics["alpha_abs_max"] = float(np.max(alpha_abs))
 
+    if riesz_fit_stats["success"]:
+        diagnostics["optimizer"] = {k: list(v) for k, v in riesz_fit_stats.items()}
+        diagnostics["riesz_fit_success_rate"] = float(np.mean(riesz_fit_stats["success"]))
+        with warnings.catch_warnings():
+            # nanmax of an all-NaN column is a legitimate "not applicable".
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            diagnostics["riesz_gradient_norm_max"] = float(
+                np.nanmax(riesz_fit_stats["gradient_norm"])
+            )
+            diagnostics["riesz_kkt_residual_max"] = float(
+                np.nanmax(riesz_fit_stats["kkt_residual"])
+            )
+            binding_max = float(np.nanmax(riesz_fit_stats["clip_binding_rate"]))
+        diagnostics["riesz_clip_binding_rate_max"] = binding_max
+        if np.isfinite(binding_max) and binding_max > 0.0:
+            warnings.warn(
+                f"The generator's internal domain clip was active for up to "
+                f"{binding_max:.1%} of training observations in at least one "
+                f"fold. The fitted Riesz representer then targets a modified "
+                f"(clipped) estimand and weights can be extreme. Consider "
+                f"SquaredGenerator, a different C, or providing branch_fn.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    # Inner Riesz CV selections (item C), per outer fold.
+    if riesz_cv_selected:
+        cv_diag: dict[str, object] = {"selected": riesz_cv_selected}
+        if return_riesz_cv_path and riesz_cv_paths:
+            cv_diag["path"] = riesz_cv_paths
+        diagnostics["riesz_cv"] = cv_diag
+        diagnostics["riesz_cv_selection_score"] = riesz_cv_config.selection_score
+        sel_lams = [s["lam"] for s in riesz_cv_selected]
+        diagnostics["riesz_cv_lam_median"] = float(np.median(sel_lams))
+        sel_sigmas = [s["sigma"] for s in riesz_cv_selected if s["sigma"] is not None]
+        if sel_sigmas:
+            diagnostics["riesz_cv_sigma_median"] = float(np.median(sel_sigmas))
+
+    # Held-out working-span imbalance (item H). Distinct from the raw-covariate
+    # SMD balance below: this checks the GRR balancing condition on the fitted
+    # basis span, out of fold.
+    if imbalance_stats["max"]:
+        diagnostics["imbalance"] = {
+            "held_out_working_span_max": list(imbalance_stats["max"]),
+            "held_out_working_span_mean": list(imbalance_stats["mean"]),
+        }
+        diagnostics["held_out_imbalance_max"] = float(np.max(imbalance_stats["max"]))
+        diagnostics["held_out_imbalance_mean"] = float(np.mean(imbalance_stats["mean"]))
+
+    # Kernel health (item B), aggregated across folds when available.
+    if kernel_stats:
+        diagnostics["kernel"] = {"per_fold": kernel_stats}
+
+        def _kcol(key: str) -> NDArray[np.float64]:
+            return np.asarray([k.get(key, np.nan) for k in kernel_stats], dtype=float)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            diagnostics["kernel_median_min"] = float(np.nanmin(_kcol("kernel_median")))
+            diagnostics["kernel_feature_variance_min"] = float(
+                np.nanmin(_kcol("feature_variance_min"))
+            )
+            diagnostics["kernel_gram_condition_max"] = float(
+                np.nanmax(_kcol("gram_condition_number"))
+            )
+            diagnostics["kernel_effective_rank_min"] = float(np.nanmin(_kcol("effective_rank")))
+        diagnostics["kernel_underfitting_any"] = bool(
+            any(bool(k.get("underfitting", False)) for k in kernel_stats)
+        )
+
+    # Bias proxy and standardized bias (item I). On the shared span, the fitted
+    # outcome model gives gamma_hat = phi^T theta, and the empirical second-order
+    # term that the balancing condition is meant to kill is exactly
+    #   E_n[alpha_hat*gamma_hat] - E_n[m(.,gamma_hat)] = Delta^T theta,
+    # so the *directional* proxy |Delta^T theta| is the realized bias driver
+    # (headline b_hat). We also keep a conservative Cauchy-Schwarz product
+    # ||Delta|| * ||theta|| (b_bound) for worst-case sensitivity. Both are
+    # diagnostics only and never used for selection.
+    if imbalance_stats["max"] and outcome_coef_norm_stats:
+        tag_pref = (
+            "shared" if "shared" in outcome_coef_norm_stats else next(iter(outcome_coef_norm_stats))
+        )
+        cnorms = list(outcome_coef_norm_stats[tag_pref])
+        theta_vecs = outcome_coef_vec_stats.get(tag_pref, [])
+        n_pair = min(len(imbalance_delta), len(cnorms))
+
+        b_dir_fold: list[float] = []
+        b_bound_fold: list[float] = []
+        for i in range(n_pair):
+            d_vec = imbalance_delta[i]
+            th = theta_vecs[i] if i < len(theta_vecs) else None
+            if th is not None and th.shape[0] == d_vec.shape[0]:
+                # Shared span: exact empirical second-order term.
+                b_dir_fold.append(float(abs(float(np.dot(d_vec, th)))))
+            else:
+                # Separate/mismatched span: fall back to the conservative bound.
+                b_dir_fold.append(bias_proxy(float(np.max(np.abs(d_vec))), cnorms[i]))
+            b_bound_fold.append(float(np.linalg.norm(d_vec) * cnorms[i]))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            b_hat = float(np.nanmean(b_dir_fold)) if b_dir_fold else float("nan")
+            b_hat_max = float(np.nanmax(b_dir_fold)) if b_dir_fold else float("nan")
+            b_bound = float(np.nanmean(b_bound_fold)) if b_bound_fold else float("nan")
+
+        primary = None
+        for key in ("arw", "arw (shared)", "rw", "ra", "tmle"):
+            if key in estimates:
+                primary = estimates[key]
+                break
+        if primary is None and estimates:
+            primary = next(iter(estimates.values()))
+
+        se_primary = float(primary.se) if primary is not None else float("nan")
+        v_hat = float(n * se_primary * se_primary) if np.isfinite(se_primary) else float("nan")
+        std_bias = (
+            float(b_hat / se_primary)
+            if np.isfinite(se_primary) and se_primary > 0
+            else float("nan")
+        )
+
+        diagnostics["bias"] = {
+            "b_hat": b_hat,
+            "b_hat_max": b_hat_max,
+            "b_bound": b_bound,
+            "v_hat": v_hat,
+            "std_bias": std_bias,
+            "outcome_coef_norm_mean": float(np.mean(cnorms)) if cnorms else float("nan"),
+            "outcome_tag": tag_pref,
+        }
+        diagnostics["bias_proxy"] = b_hat
+        diagnostics["std_bias"] = std_bias
+
+    # Outcome-nuisance diagnostics (Step 4). Coverage collapse is driven by the
+    # PRODUCT of the Riesz and outcome errors, so the outcome side needs its own
+    # visibility: out-of-fold prediction risk (the off-span residual proxy),
+    # residual fold statistics, and the working-span coefficient budget. These
+    # are additive; point estimates and SEs are unchanged.
+    if mu_obs:
+        outcome_diag: dict[str, object] = {}
+        for tag, mu in mu_obs.items():
+            resid = y_ - mu
+            if outcome_link_ == "identity":
+                cv_risk = float(np.mean(resid * resid))
+            else:
+                p = np.clip(mu, 1e-12, 1.0 - 1e-12)
+                cv_risk = float(np.mean(-(y_ * np.log(p) + (1.0 - y_) * np.log(1.0 - p))))
+            fold_means: list[float] = []
+            fold_vars: list[float] = []
+            for fold in splits:
+                r = resid[fold.test]
+                fold_means.append(float(np.mean(r)) if r.size else float("nan"))
+                fold_vars.append(float(np.var(r, ddof=1)) if r.size > 1 else float("nan"))
+            cnorm_list = outcome_coef_norm_stats.get(tag, [])
+            outcome_diag[tag] = {
+                "cv_risk": cv_risk,
+                "residual_mean": float(np.mean(resid)),
+                "residual_var": float(np.var(resid, ddof=1)) if resid.size > 1 else float("nan"),
+                "residual_fold_mean": fold_means,
+                "residual_fold_var": fold_vars,
+                "coef_norm_mean": float(np.mean(cnorm_list)) if cnorm_list else float("nan"),
+            }
+        diagnostics["outcome"] = outcome_diag
+        primary_tag = "shared" if "shared" in outcome_diag else next(iter(outcome_diag))
+        diagnostics["outcome_cv_risk"] = outcome_diag[primary_tag]["cv_risk"]
+        diagnostics["outcome_residual_var"] = outcome_diag[primary_tag]["residual_var"]
+
     if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
         t_idx = getattr(m, "treatment_index", 0)
         D = X_[:, t_idx].astype(float)
@@ -790,7 +1143,7 @@ def grr_functional(
             w1 = w_abs[treated]
             w0 = w_abs[control]
 
-            target = "ate" if isinstance(m, ATEFunctional) else "att"
+            target: Literal["ate", "att"] = "ate" if isinstance(m, ATEFunctional) else "att"
             bal = _covariate_balance_smd(Z=Z, D=D, w_treated=w1, w_control=w0, target=target)
 
             # Store summary scalars for easy printing.
@@ -855,7 +1208,7 @@ def grr_att(
     pi = float(np.mean(D))
     if pi <= 0 or pi >= 1:
         raise ValueError("ATT requires both treatment groups to be non-empty")
-    m = ATTFunctional(treatment_index=treatment_index, pi=pi)
+    m = ATTFunctional(treatment_index=treatment_index, pi=pi, pi_is_estimated=True)
     return grr_functional(X=X, Y=Y, m=m, basis=basis, generator=generator, **kwargs)
 
 
@@ -881,7 +1234,7 @@ def grr_did(
     pi = float(np.mean(D))
     if pi <= 0 or pi >= 1:
         raise ValueError("DID requires both treatment groups to be non-empty")
-    m = DIDFunctional(treatment_index=treatment_index, pi=pi)
+    m = DIDFunctional(treatment_index=treatment_index, pi=pi, pi_is_estimated=True)
     return grr_functional(X=X, Y=dy, m=m, basis=basis, generator=generator, **kwargs)
 
 

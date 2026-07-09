@@ -94,3 +94,39 @@ def test_fit_density_ratio_bkl_can_return_values_below_one():
 
     vals = res.predict_ratio(np.array([[1.5], [2.0]]), clip_nonnegative=True)
     assert np.any(vals < 1.0)
+
+
+def test_fit_density_ratio_reports_route():
+    rng = np.random.default_rng(9)
+    X_num = rng.normal(0.2, 1.0, size=(80, 1))
+    X_den = rng.normal(0.0, 1.0, size=(80, 1))
+
+    res_sq = fit_density_ratio(X_num, X_den, n_centers=20, sigma=1.0, lam=1e-2)
+    assert res_sq.route == "bregman"
+
+    # BKL is fit as a probabilistic classifier; the result must say so because
+    # predictions then bypass generator.inv_grad entirely.
+    res_bkl = fit_density_ratio(
+        X_num, X_den, generator="bkl", n_centers=20, sigma=1.0, lam=1e-2
+    )
+    assert res_bkl.route == "logistic_classification"
+
+
+def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():
+    rng = np.random.default_rng(10)
+    X_num = rng.normal(0.0, 1.0, size=(60, 1))
+    X_den = rng.normal(0.5, 1.0, size=(60, 1))
+
+    # n_centers larger than any training fold: fold-local center selection
+    # must cap at the fold size instead of reaching into validation data.
+    res = fit_density_ratio(
+        X_num,
+        X_den,
+        n_centers=500,
+        sigma_grid=[0.5, 1.0],
+        lam_grid=[1e-2],
+        cv=True,
+        folds=3,
+        random_state=0,
+    )
+    assert res.sigma in {0.5, 1.0}

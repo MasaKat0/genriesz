@@ -409,6 +409,40 @@ The outcome link function is specified by ``outcome_link`` (``"identity"`` or
 - ``outcome_link="identity"`` ⟹ Gaussian targeting
 - ``outcome_link="logit"``    ⟹ Bernoulli targeting
 
+Cross-validating the Riesz hyper-parameters
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The Riesz bandwidth, regularization and number of kernel centers can be selected
+by an **inner** cross-validation, run *inside each outer training fold* so the
+outer evaluation fold is never used for selection (no leakage).  Pass any of the
+grids to switch it on; the default (all ``None``) keeps the fixed ``riesz_lam``
+behaviour:
+
+.. code-block:: python
+
+   res = grr_ate(
+       X=X, Y=Y,
+       basis=GaussianRKHSBasis(n_centers=120, sigma=1.0, random_state=0),
+       generator=SquaredGenerator(),
+       folds=5, random_state=0,
+       riesz_sigma_grid="auto",             # median heuristic * (0.25,0.5,1,2,4)
+       riesz_lam_grid=[1e-3, 1e-2, 1e-1],
+       riesz_n_centers_grid=[80, 160],
+       riesz_selection_score="bias_variance",   # default
+       return_riesz_cv_path=True,
+   )
+   print(res.diagnostics["riesz_cv"]["selected"])   # per-fold sigma/lambda/centers
+
+Selection is two-stage.  A candidate must first pass an **admissibility screen**
+(optimizer success, an effective-sample-size floor, a scale-free *kernel-health
+band* that rejects both collapsed and saturated bandwidths, and any thresholds
+you set via ``riesz_admissibility_thresholds``).  Among admissible candidates the
+``bias_variance`` criterion :math:`\hat B^2 + \hat V/n + \tau_R \hat R + \tau_K
+\hat K` is minimized.  Neither coverage nor any true nuisance is used for
+selection.  ``riesz_sigma_grid``/``riesz_n_centers_grid`` require a kernel basis
+with ``copy_with_params`` (e.g. :class:`~genriesz.GaussianRKHSBasis`); with any
+other basis you can still cross-validate ``riesz_lam_grid`` alone.
+
 Regularization: :math:`\ell_p`
 -------------------------------
 

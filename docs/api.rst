@@ -55,3 +55,23 @@ Results
 
 .. autoclass:: genriesz.FunctionalEstimate
 .. autoclass:: genriesz.SingleEstimate
+
+Diagnostics helpers
+-------------------
+
+.. autofunction:: genriesz.bias_proxy
+.. autofunction:: genriesz.coverage_decomposition
+.. autofunction:: genriesz.oracle_decomposition
+
+Model selection (inner CV)
+--------------------------
+
+.. autoclass:: genriesz.GRRCVConfig
+.. autoclass:: genriesz.GRRCVResult
+.. autofunction:: genriesz.select_grr_hyperparams
+
+Low-level solvers
+-----------------
+
+.. autoclass:: genriesz.GRRGLM
+.. autoclass:: genriesz.OutcomeGLM

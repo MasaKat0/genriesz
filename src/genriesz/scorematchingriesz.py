@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Callable, Iterable, Sequence
 
 import numpy as np
 
@@ -31,7 +31,7 @@ except Exception as exc:  # pragma: no cover - exercised only without optional d
     torch = None  # type: ignore[assignment]
     nn = None  # type: ignore[assignment]
     F = None  # type: ignore[assignment]
-    Tensor = object  # type: ignore[assignment]
+    Tensor = object  # type: ignore[assignment,misc]
     _TORCH_IMPORT_ERROR = exc
 else:
     _TORCH_IMPORT_ERROR = None
@@ -77,10 +77,25 @@ def get_device(prefer_gpu: bool = True):
 
 
 def set_seed(seed: int = 0) -> None:
-    """Set Python, NumPy, and PyTorch random seeds."""
+    """Set Python, NumPy, and PyTorch random seeds.
+
+    This is a user-facing convenience for scripting. Library fit functions do
+    NOT call it; they seed only the PyTorch RNG (see :func:`_seed_torch`) so
+    that fitting a model never mutates the caller's global NumPy/Python
+    random state.
+    """
 
     random.seed(int(seed))
     np.random.seed(int(seed))
+    if torch is not None:
+        torch.manual_seed(int(seed))
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(int(seed))
+
+
+def _seed_torch(seed: int) -> None:
+    """Seed only the PyTorch RNGs (used internally by the fit functions)."""
+
     if torch is not None:
         torch.manual_seed(int(seed))
         if torch.cuda.is_available():
@@ -142,6 +157,7 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
+            self.loss_history: list[float] = []
             self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
             self.net = MLP(
                 in_dim=int(x_dim) + int(t_emb_dim),
@@ -169,10 +185,15 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
+            self.loss_history: list[float] = []
             self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
             in_dim = int(x_dim) + int(t_emb_dim)
-            self.data_net = MLP(in_dim=in_dim, out_dim=int(x_dim), hidden_dims=hidden_dims, layer_norm=layer_norm)
-            self.time_net = MLP(in_dim=in_dim, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm)
+            self.data_net = MLP(
+                in_dim=in_dim, out_dim=int(x_dim), hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
+            self.time_net = MLP(
+                in_dim=in_dim, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
 
         def forward(self, x: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
             inp = torch.cat([x, self.t_embed(t)], dim=1)
@@ -190,7 +211,11 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
-            self.net = MLP(in_dim=int(x_dim) + 1, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm)
+            self.loss_history: list[float] = []
+            self.treatment_index: int = 0
+            self.net = MLP(
+                in_dim=int(x_dim) + 1, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
 
         def forward(self, x: Tensor, sigma: Tensor) -> Tensor:
             return self.net(torch.cat([x, sigma], dim=1))
@@ -207,7 +232,10 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
-            self.net = MLP(in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm)
+            self.loss_history: list[float] = []
+            self.net = MLP(
+                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
 
         def forward(self, x: Tensor) -> Tensor:
             return self.net(x)
@@ -224,7 +252,11 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
-            self.net = MLP(in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm)
+            self.loss_history: list[float] = []
+            self.objective: str = ""
+            self.net = MLP(
+                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
 
         def forward(self, x: Tensor) -> Tensor:
             return self.net(x)
@@ -241,13 +273,17 @@ if torch is not None:
             layer_norm: bool = False,
         ) -> None:
             super().__init__()
-            self.net = MLP(in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm)
+            self.loss_history: list[float] = []
+            self.net = MLP(
+                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+            )
 
         def forward(self, x: Tensor) -> Tensor:
             return self.net(x)
 
 else:  # pragma: no cover
-    MLP = TimeEmbedding = TimeScoreNet = JointScoreNet = DataScoreDNet = ScalarNet = RatioNet = OutcomeNet = None  # type: ignore[misc,assignment]
+    MLP = TimeEmbedding = TimeScoreNet = JointScoreNet = None  # type: ignore[misc,assignment]
+    DataScoreDNet = ScalarNet = RatioNet = OutcomeNet = None  # type: ignore[misc,assignment]
 
 
 @dataclass(frozen=True)
@@ -323,7 +359,9 @@ def time_smr_loss(
     t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype)
     s0 = model(x_q.detach(), t0)
     s1 = model(x_p.detach(), t1)
-    boundary = 2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
+    boundary = (
+        2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
+    )
     return interior.mean() + boundary.mean()
 
 
@@ -356,7 +394,9 @@ def joint_smr_loss(
     t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype)
     _, s0 = model(x_q.detach(), t0)
     _, s1 = model(x_p.detach(), t1)
-    boundary_time = 2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
+    boundary_time = (
+        2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
+    )
     loss_time = interior_time.mean() + boundary_time.mean()
 
     v = torch.randn_like(x_t)
@@ -418,7 +458,9 @@ def log_ratio_from_time_score(
         x_t = x
         if device is None:
             device = x_t.device
-    log_r = _integrate_time_score(lambda xb, tb: model(xb, tb), x_t, steps=steps, chunk_size=chunk_size)
+    log_r = _integrate_time_score(
+        lambda xb, tb: model(xb, tb), x_t, steps=steps, chunk_size=chunk_size
+    )
     if normalize:
         if x_p_for_norm is None:
             raise ValueError("normalize=True requires x_p_for_norm.")
@@ -426,7 +468,9 @@ def log_ratio_from_time_score(
             xp = torch.tensor(x_p_for_norm, dtype=x_t.dtype, device=x_t.device)
         else:
             xp = x_p_for_norm.to(x_t.device)
-        log_r_p = _integrate_time_score(lambda xb, tb: model(xb, tb), xp, steps=steps, chunk_size=chunk_size)
+        log_r_p = _integrate_time_score(
+            lambda xb, tb: model(xb, tb), xp, steps=steps, chunk_size=chunk_size
+        )
         log_z = torch.logsumexp(log_r_p, dim=0) - math.log(log_r_p.numel())
         log_r = log_r - log_z
     return log_r.view(-1, 1)
@@ -495,16 +539,26 @@ def fit_time_smr_dre_infinity(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     xq = torch.tensor(_as_2d_float_array(x_q, name="x_q"), device=device)
     xp = torch.tensor(_as_2d_float_array(x_p, name="x_p"), device=device)
     if xq.shape[1] != xp.shape[1]:
         raise ValueError("x_q and x_p must have the same number of columns.")
-    model = TimeScoreNet(x_dim=xq.shape[1], hidden_dims=hidden_dims, t_emb_dim=t_emb_dim, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    model = TimeScoreNet(
+        x_dim=xq.shape[1], hidden_dims=hidden_dims, t_emb_dim=t_emb_dim, layer_norm=layer_norm
+    ).to(device)
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     history: list[float] = []
     for _ in range(int(n_steps)):
-        loss = time_smr_loss(model, _rand_batch(xq, batch_size), _rand_batch(xp, batch_size), lambda_kind=lambda_kind, create_graph=True)
+        loss = time_smr_loss(
+            model,
+            _rand_batch(xq, batch_size),
+            _rand_batch(xp, batch_size),
+            lambda_kind=lambda_kind,
+            create_graph=True,
+        )
         opt.zero_grad(set_to_none=True)
         loss.backward()
         if grad_clip is not None:
@@ -538,13 +592,17 @@ def fit_joint_smr_dre_infinity(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     xq = torch.tensor(_as_2d_float_array(x_q, name="x_q"), device=device)
     xp = torch.tensor(_as_2d_float_array(x_p, name="x_p"), device=device)
     if xq.shape[1] != xp.shape[1]:
         raise ValueError("x_q and x_p must have the same number of columns.")
-    model = JointScoreNet(x_dim=xq.shape[1], hidden_dims=hidden_dims, t_emb_dim=t_emb_dim, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    model = JointScoreNet(
+        x_dim=xq.shape[1], hidden_dims=hidden_dims, t_emb_dim=t_emb_dim, layer_norm=layer_norm
+    ).to(device)
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     history: list[float] = []
     for _ in range(int(n_steps)):
         loss = joint_smr_loss(
@@ -590,14 +648,18 @@ def fit_data_smr_score_dsm(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     x_np = _as_2d_float_array(x, name="x")
     t_idx = int(treatment_index)
     if t_idx < 0 or t_idx >= x_np.shape[1]:
         raise ValueError("treatment_index out of bounds.")
     xt = torch.tensor(x_np, dtype=torch.float32, device=device)
-    model = DataScoreDNet(x_dim=xt.shape[1], hidden_dims=hidden_dims, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    model = DataScoreDNet(
+        x_dim=xt.shape[1], hidden_dims=hidden_dims, layer_norm=layer_norm
+    ).to(device)
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     history: list[float] = []
     for _ in range(int(n_steps)):
         xb = _rand_batch(xt, batch_size)
@@ -669,12 +731,16 @@ def log_ratio_from_data_score_shift(
         device = next(model.parameters()).device
     x_np = _as_2d_float_array(x, name="x")
     x_tensor = torch.tensor(x_np, dtype=torch.float32, device=device)
-    t_idx = int(getattr(model, "treatment_index", 0) if treatment_index is None else treatment_index)
+    t_idx = int(
+        getattr(model, "treatment_index", 0) if treatment_index is None else treatment_index
+    )
     if int(steps) <= 1 or abs(float(delta)) < 1e-15:
         log_r = torch.zeros((x_tensor.shape[0],), device=device, dtype=torch.float32)
     else:
         grid = torch.linspace(0.0, float(delta), int(steps), device=device, dtype=torch.float32)
-        x_rep = x_tensor.unsqueeze(0).expand(int(steps), x_tensor.shape[0], x_tensor.shape[1]).clone()
+        x_rep = (
+            x_tensor.unsqueeze(0).expand(int(steps), x_tensor.shape[0], x_tensor.shape[1]).clone()
+        )
         if direction == "+":
             x_rep[:, :, t_idx] = x_rep[:, :, t_idx] - grid[:, None]
             sign = -1.0
@@ -682,15 +748,20 @@ def log_ratio_from_data_score_shift(
             x_rep[:, :, t_idx] = x_rep[:, :, t_idx] + grid[:, None]
             sign = +1.0
         flat = x_rep.reshape(int(steps) * x_tensor.shape[0], x_tensor.shape[1])
-        sigma = torch.full((flat.shape[0], 1), float(sigma_eval), device=device, dtype=torch.float32)
+        sigma = torch.full(
+            (flat.shape[0], 1), float(sigma_eval), device=device, dtype=torch.float32
+        )
         scores = model(flat, sigma).reshape(int(steps), x_tensor.shape[0])
-        log_r = torch.trapz(sign * scores, grid, dim=0)
+        log_r = torch.trapezoid(sign * scores, grid, dim=0)
     if normalize:
         if x_p_for_norm is None:
             raise ValueError("normalize=True requires x_p_for_norm.")
         xp = x_p_for_norm
         if norm_subsample is not None and xp.shape[0] > int(norm_subsample):
-            xp = xp[: int(norm_subsample)]
+            # Evenly strided subsample: deterministic and unbiased for sorted
+            # inputs (taking the first N rows is biased when x_p is ordered).
+            idx = np.linspace(0, xp.shape[0] - 1, int(norm_subsample)).astype(int)
+            xp = xp[idx]
         log_r_p = log_ratio_from_data_score_shift(
             model,
             xp,
@@ -727,10 +798,12 @@ def fit_sq_riesz_ame(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     xt = torch.tensor(_as_2d_float_array(x, name="x"), dtype=torch.float32, device=device)
     model = ScalarNet(x_dim=xt.shape[1], hidden_dims=hidden_dims, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     t_idx = int(treatment_index)
     history: list[float] = []
     for _ in range(int(n_steps)):
@@ -779,13 +852,15 @@ def _fit_ratio_template(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     xq = torch.tensor(_as_2d_float_array(x_q, name="x_q"), device=device)
     xp = torch.tensor(_as_2d_float_array(x_p, name="x_p"), device=device)
     if xq.shape[1] != xp.shape[1]:
         raise ValueError("x_q and x_p must have the same number of columns.")
     model = RatioNet(x_dim=xq.shape[1], hidden_dims=hidden_dims, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     history: list[float] = []
     for _ in range(int(n_steps)):
         bq = _rand_batch(xq, batch_size)
@@ -852,18 +927,26 @@ def eval_ratio_sq(
     if normalize:
         if x_p_for_norm is None:
             raise ValueError("normalize=True requires x_p_for_norm.")
-        xp = torch.tensor(_as_2d_float_array(x_p_for_norm, name="x_p_for_norm"), dtype=torch.float32, device=device)
+        xp = torch.tensor(
+            _as_2d_float_array(x_p_for_norm, name="x_p_for_norm"),
+            dtype=torch.float32,
+            device=device,
+        )
         r = r / (F.softplus(model(xp)).mean() + 1e-8)
     return r.detach().cpu().numpy()
 
 
 @_torch_no_grad()
-def eval_ratio_ukl(model: RatioNet, x: np.ndarray, x_p_for_norm: np.ndarray, *, device=None) -> np.ndarray:
+def eval_ratio_ukl(
+    model: RatioNet, x: np.ndarray, x_p_for_norm: np.ndarray, *, device=None
+) -> np.ndarray:
     _require_torch()
     if device is None:
         device = next(model.parameters()).device
     xt = torch.tensor(_as_2d_float_array(x, name="x"), dtype=torch.float32, device=device)
-    xp = torch.tensor(_as_2d_float_array(x_p_for_norm, name="x_p_for_norm"), dtype=torch.float32, device=device)
+    xp = torch.tensor(
+        _as_2d_float_array(x_p_for_norm, name="x_p_for_norm"), dtype=torch.float32, device=device
+    )
     f = model(xt)
     fp = model(xp)
     log_z = torch.logsumexp(fp, dim=0) - math.log(fp.shape[0])
@@ -887,7 +970,11 @@ def eval_ratio_bkl(
     if normalize:
         if x_p_for_norm is None:
             raise ValueError("normalize=True requires x_p_for_norm.")
-        xp = torch.tensor(_as_2d_float_array(x_p_for_norm, name="x_p_for_norm"), dtype=torch.float32, device=device)
+        xp = torch.tensor(
+            _as_2d_float_array(x_p_for_norm, name="x_p_for_norm"),
+            dtype=torch.float32,
+            device=device,
+        )
         rp = torch.exp(torch.clamp(model(xp), min=-30.0, max=30.0))
         r = r / (rp.mean() + 1e-8)
     return r.detach().cpu().numpy()
@@ -912,14 +999,17 @@ def fit_outcome_net(
     _require_torch()
     if device is None:
         device = get_device()
-    set_seed(seed)
+    _seed_torch(seed)
     x_np = _as_2d_float_array(x, name="x")
     y_np = _as_1d_float_array(y, n=x_np.shape[0], name="y")
     xt = torch.tensor(x_np, dtype=torch.float32, device=device)
     yt = torch.tensor(y_np, dtype=torch.float32, device=device).view(-1, 1)
     model = OutcomeNet(x_dim=xt.shape[1], hidden_dims=hidden_dims, layer_norm=layer_norm).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay))
+    opt = torch.optim.AdamW(
+        model.parameters(), lr=float(learning_rate), weight_decay=float(weight_decay)
+    )
     steps_per_epoch = max(1, xt.shape[0] // int(batch_size))
+    history: list[float] = []
     for _ in range(int(n_epochs)):
         perm = torch.randperm(xt.shape[0], device=device)
         for step in range(steps_per_epoch):
@@ -931,7 +1021,9 @@ def fit_outcome_net(
             if grad_clip is not None:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), float(grad_clip))
             opt.step()
+            history.append(float(loss.item()))
     model.eval()
+    model.loss_history = history
     return model
 
 
@@ -946,7 +1038,9 @@ def predict_outcome(model: OutcomeNet, x: np.ndarray, *, device=None) -> np.ndar
     return model(xt).detach().cpu().numpy()
 
 
-def partial_d_outcome(model: OutcomeNet, x: np.ndarray, *, coordinate: int = 0, device=None) -> np.ndarray:
+def partial_d_outcome(
+    model: OutcomeNet, x: np.ndarray, *, coordinate: int = 0, device=None
+) -> np.ndarray:
     """Compute a partial derivative of an outcome model by autograd."""
 
     _require_torch()
@@ -970,7 +1064,9 @@ def wald_interval(score_values: np.ndarray, *, alpha: float = 0.05) -> PointEsti
     from scipy.stats import norm
 
     z = float(norm.ppf(1.0 - alpha / 2.0))
-    return PointEstimate(estimate=estimate, se=se, ci_low=estimate - z * se, ci_high=estimate + z * se)
+    return PointEstimate(
+        estimate=estimate, se=se, ci_low=estimate - z * se, ci_high=estimate + z * se
+    )
 
 
 def crossfit_splits(

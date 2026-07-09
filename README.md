@@ -1,6 +1,6 @@
 # genriesz — Generalized Riesz Regression (GRR)
 
-A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing** and then report **RA, RW, and ARW** estimates with inference (optionally via cross fitting).
+A Python library for **Generalized Riesz Regression** (GRR) under **Bregman divergences** — a unified way to fit **Riesz representers** with **automatic regressor balancing** and then report **RA, RW, ARW, and TMLE** estimates with inference (optionally via cross fitting).
 
 - **Docs**: https://genriesz.readthedocs.io/en/latest/
 - **Paper**: [A Unified Framework for Debiased Machine Learning: Riesz Representer Fitting under Bregman Divergence (arXiv:2601.07752)](https://arxiv.org/abs/2601.07752)
@@ -18,6 +18,7 @@ A Python library for **Generalized Riesz Regression** (GRR) under **Bregman dive
     - [Built-in generator classes](#built-in-generator-classes)
   - [General API: `grr_functional`](#general-api-grr_functional)
     - [Providing $g'$ and $(g')^{-1}$](#providing-g-and-g-1)
+  - [Inspecting results and diagnostics](#inspecting-results-and-diagnostics)
   - [Built-in estimands](#built-in-estimands)
   - [Basis functions](#basis-functions)
     - [Polynomial basis](#polynomial-basis)
@@ -249,6 +250,31 @@ If you omit them, the library falls back to:
 
 ---
 
+## Inspecting results and diagnostics
+
+Every high-level estimator returns a `FunctionalEstimate`. Point estimates are stored in `res.estimates`, keyed by estimator name. Standard estimates are also available through convenience attributes when they were requested. If `outcome_models="both"`, these attributes prefer the shared-basis estimate.
+
+```python
+arw = res.estimates["arw"]
+print(arw.estimate, arw.se, arw.ci_low, arw.ci_high, arw.p_value)
+
+# Equivalent convenience access
+print(res["arw"].estimate)
+print(res.arw.estimate)
+```
+
+Diagnostics are stored separately in `res.diagnostics`. For treatment-effect functionals, Love-plot data are available through `res.love_plot_data()` and `res.love_plot()`.
+
+```python
+print(res.diagnostics["alpha_abs_max"])
+print(res.diagnostics["max_abs_smd_weighted"])
+
+love_rows = res.love_plot_data(as_pandas=False)
+print(love_rows[:3])
+```
+
+The current result object stores aggregate out-of-fold diagnostics when `cross_fit=True`; it does not expose a `fold_estimates` attribute.
+
 ## Built-in estimands
 
 The following convenience wrappers are included:
@@ -285,6 +311,18 @@ Phi_rff = rff(X)
 
 nys = RBFNystromBasis(n_centers=500, sigma=1.0, standardize=True, random_state=0)
 Phi_nys = nys(X)
+```
+
+Pass `sigma="auto"` (also supported by `GaussianRKHSBasis`) to select the bandwidth
+by the **median heuristic** — the median pairwise distance of the *standardized
+training sample*, resolved at `fit` time on each fold only. The resolved value is
+available as `basis.sigma_` after fitting:
+
+```python
+from genriesz import GaussianRKHSBasis
+
+krn = GaussianRKHSBasis(n_centers=300, sigma="auto", random_state=0).fit(X)
+print(krn.sigma_)  # the median-heuristic bandwidth actually used
 ```
 
 ### Nearest-neighbor matching (kNN indicator basis)

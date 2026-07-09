@@ -5,7 +5,6 @@ import importlib.util
 import numpy as np
 import pytest
 
-
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("torch") is None,
     reason="PyTorch optional dependency missing",
@@ -33,6 +32,7 @@ def test_crossfit_splits_cover_each_index_once() -> None:
 
 def test_small_time_smr_ratio_training_runs() -> None:
     import torch
+
     from genriesz.scorematchingriesz import fit_time_smr_dre_infinity, log_ratio_from_time_score
 
     rng = np.random.default_rng(0)
@@ -64,6 +64,7 @@ def test_small_time_smr_ratio_training_runs() -> None:
 
 def test_small_data_smr_shift_ratio_runs() -> None:
     import torch
+
     from genriesz.scorematchingriesz import fit_data_smr_score_dsm, log_ratio_from_data_score_shift
 
     rng = np.random.default_rng(1)
@@ -88,3 +89,17 @@ def test_small_data_smr_shift_ratio_runs() -> None:
     )
     assert out.shape == (6, 1)
     assert np.isfinite(out).all()
+
+
+def test_fit_functions_do_not_mutate_global_numpy_rng() -> None:
+    from genriesz.scorematchingriesz import fit_sq_riesz_ame
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(48, 3))
+
+    np.random.seed(12345)
+    before = np.random.get_state()[1].copy()
+    fit_sq_riesz_ame(x, n_steps=2, batch_size=16, device="cpu")
+    after = np.random.get_state()[1].copy()
+
+    assert np.array_equal(before, after)

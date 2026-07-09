@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from genriesz import grr_ate, grr_att, grr_did, PolynomialBasis, SquaredGenerator
+from genriesz import PolynomialBasis, SquaredGenerator, grr_ate, grr_att, grr_did
 
 
 def _toy_data(seed: int = 0, n: int = 200):

@@ -19,7 +19,9 @@ We solve the resulting convex (often smooth) problem with L-BFGS-B.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+import warnings
+from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -27,7 +29,16 @@ from scipy import optimize
 
 from .basis import Basis
 from .functionals import LinearFunctional
-from .generators import BregmanGenerator
+from .generators import BregmanGenerator, SquaredGenerator
+
+
+class DomainError(RuntimeError):
+    """Raised when a generator cannot evaluate its link/conjugate at a point.
+
+    This replaces the previous behavior of silently returning a huge objective
+    value and a zero gradient, which could make the optimizer stop at a broken
+    point with ``success=True``.
+    """
 
 
 def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
@@ -54,12 +65,57 @@ def _sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
     return out
 
 
+def _ensure_basis_fitted(basis: Basis, X: NDArray[np.float64]) -> None:
+    """Fit ``basis`` on the training data if it has not been fit yet.
+
+    Stateful bases raise when ``n_features`` is accessed before ``fit``; in
+    that case fitting on the solver's own training sample is the correct
+    (leakage-free) default. Already-fitted bases are left untouched so that
+    cross-fitting callers keep control over what data the basis sees.
+    """
+
+    try:
+        _ = basis.n_features
+    except Exception:
+        basis.fit(X)
+
+
 @dataclass
 class FitResult:
+    """Result of a nuisance optimization.
+
+    Attributes
+    ----------
+    beta, success, message, n_iter:
+        Solution, optimizer success flag, optimizer message, iteration count.
+    status:
+        One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
+        ``"domain_error"``, ``"domain_error_at_solution"`` (or ``""`` for
+        results produced by callers that do not set it).
+    objective_value:
+        Penalized objective evaluated at ``beta``.
+    gradient_norm:
+        Infinity norm of the full (loss + penalty) gradient at ``beta``.
+    kkt_residual:
+        Stationarity residual. Equal to ``gradient_norm`` for smooth
+        penalties; for l1 it is the exact subgradient residual.
+    clip_binding_rate:
+        Fraction of observations for which the generator's internal domain
+        clip was active at the solution (``nan`` when not applicable).
+    fit_time:
+        Wall-clock seconds spent in ``fit``.
+    """
+
     beta: NDArray[np.float64]
     success: bool
     message: str
     n_iter: int
+    status: str = ""
+    objective_value: float = field(default=float("nan"))
+    gradient_norm: float = field(default=float("nan"))
+    kkt_residual: float = field(default=float("nan"))
+    clip_binding_rate: float = field(default=float("nan"))
+    fit_time: float = field(default=float("nan"))
 
 
 class _Penalty:
@@ -72,7 +128,11 @@ class _Penalty:
 
         # Convenience shorthand: allow strings like "l1.5" to mean an l_p penalty.
         # This keeps the public API concise while still supporting general l_p.
-        if self.penalty is not None and self.penalty.startswith("l") and self.penalty not in {"l1", "l2", "lp", "l_p"}:
+        if (
+            self.penalty is not None
+            and self.penalty.startswith("l")
+            and self.penalty not in {"l1", "l2", "lp", "l_p"}
+        ):
             try:
                 p = float(self.penalty[1:])
                 self.penalty = "lp"
@@ -99,7 +159,11 @@ class _Penalty:
         if self.penalty is None or self.lam == 0.0:
             return 0.0
         if self.p_norm == 1.0:
-            return float(self.lam * np.sum(np.abs(beta)))
+            # Keep the objective differentiable in the same way as grad().
+            # L-BFGS-B expects a gradient that is consistent with the objective.
+            # The additive constant sqrt(eps) is irrelevant for optimisation, so
+            # we do not subtract it.
+            return float(self.lam * np.sum(np.sqrt(beta * beta + self._eps)))
         return float((self.lam / self.p_norm) * np.sum(np.abs(beta) ** self.p_norm))
 
     def grad(self, beta: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -142,14 +206,16 @@ class GRRGLM:
         tol: float = 1e-8,
         verbose: bool = False,
     ) -> FitResult:
+        t0 = time.perf_counter()
         X_ = _as_2d(X)
-        self._Phi = np.asarray(self.basis(X_), dtype=float)
-        self._M = np.asarray(self.functional.m_basis_matrix(X_, self.basis), dtype=float)
+        _ensure_basis_fitted(self.basis, X_)
+        Phi = np.asarray(self.basis(X_), dtype=float)
+        M = np.asarray(self.functional.m_basis_matrix(X_, self.basis), dtype=float)
 
-        n, p = self._Phi.shape
-        if self._M.shape != (n, p):
+        n, p = Phi.shape
+        if M.shape != (n, p):
             raise ValueError(
-                f"m_basis_matrix returned shape {self._M.shape}, expected {(n, p)}."
+                f"m_basis_matrix returned shape {M.shape}, expected {(n, p)}."
             )
 
         if beta0 is None:
@@ -159,18 +225,44 @@ class GRRGLM:
             if beta0_.shape[0] != p:
                 raise ValueError(f"beta0 must have length {p}. Got {beta0_.shape}.")
 
-        Phi = self._Phi
-        M = self._M
+        # Closed form for the squared generator with an L2 (or no) penalty.
+        # g(alpha) = (alpha - C)^2 gives g*(v) = C v + v^2/4, so the objective
+        # is quadratic and the stationarity condition is
+        #     (0.5 Phi'Phi/n + lam I) beta = mean(M) - C mean(Phi).
+        if isinstance(self.generator, SquaredGenerator) and (
+            self.penalty.penalty is None or self.penalty.p_norm == 2.0
+        ):
+            lam = self.penalty.lam if self.penalty.penalty is not None else 0.0
+            A = 0.5 * (Phi.T @ Phi) / n + lam * np.eye(p)
+            b = M.mean(axis=0) - self.generator.C * Phi.mean(axis=0)
+            try:
+                beta_hat = np.linalg.solve(A, b)
+            except np.linalg.LinAlgError:
+                beta_hat = np.linalg.lstsq(A, b, rcond=None)[0]
+            return self._finalize_fit(
+                X_,
+                Phi,
+                M,
+                np.asarray(beta_hat, dtype=float),
+                success=True,
+                message="closed_form",
+                status="closed_form",
+                n_iter=1,
+                t0=t0,
+            )
 
-        # Objective and gradient
-        big = 1e20
-
+        # Objective and gradient. Generator failures are raised (and turned
+        # into an explicit FitResult failure below), never converted into a
+        # huge objective value with a zero gradient.
         def fun(beta: NDArray[np.float64]) -> float:
             v = Phi @ beta
             try:
                 g_star, _ = self.generator.conjugate(X_, v)
-            except Exception:
-                return big
+            except Exception as exc:
+                raise DomainError(
+                    f"generator '{self.generator.name}' failed to evaluate its "
+                    f"conjugate during optimization: {exc}"
+                ) from exc
             loss = float(np.mean(g_star - (M @ beta)))
             return loss + self.penalty.value(beta)
 
@@ -178,26 +270,119 @@ class GRRGLM:
             v = Phi @ beta
             try:
                 _, alpha = self.generator.conjugate(X_, v)
-            except Exception:
-                return np.zeros_like(beta)
+            except Exception as exc:
+                raise DomainError(
+                    f"generator '{self.generator.name}' failed to evaluate its "
+                    f"link during optimization: {exc}"
+                ) from exc
             grad = (alpha[:, None] * Phi - M).mean(axis=0)
             return grad + self.penalty.grad(beta)
 
         opts: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
         if verbose:
             opts["iprint"] = 1
-        res = optimize.minimize(fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts)
+        try:
+            res = optimize.minimize(fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts)
+        except DomainError as exc:
+            out = FitResult(
+                beta=beta0_,
+                success=False,
+                message=str(exc),
+                n_iter=0,
+                status="domain_error",
+                fit_time=time.perf_counter() - t0,
+            )
+            self.beta_ = beta0_
+            self.fit_result_ = out
+            self._Phi = None
+            self._M = None
+            return out
 
         beta_hat = np.asarray(res.x, dtype=float)
-        out = FitResult(
-            beta=beta_hat,
+        return self._finalize_fit(
+            X_,
+            Phi,
+            M,
+            beta_hat,
             success=bool(res.success),
             message=str(res.message),
+            status="converged" if bool(res.success) else "optimizer_failure",
             n_iter=int(getattr(res, "nit", -1)),
+            t0=t0,
+        )
+
+    def _finalize_fit(
+        self,
+        X_: NDArray[np.float64],
+        Phi: NDArray[np.float64],
+        M: NDArray[np.float64],
+        beta_hat: NDArray[np.float64],
+        *,
+        success: bool,
+        message: str,
+        status: str,
+        n_iter: int,
+        t0: float,
+    ) -> FitResult:
+        """Compute solution diagnostics and store the fit result."""
+
+        objective = float("nan")
+        gradient_norm = float("nan")
+        kkt = float("nan")
+        binding = float("nan")
+        v = Phi @ beta_hat
+        try:
+            g_star, alpha = self.generator.conjugate(X_, v)
+            objective = float(np.mean(g_star - (M @ beta_hat))) + self.penalty.value(beta_hat)
+            grad_loss = (alpha[:, None] * Phi - M).mean(axis=0)
+            grad_total = grad_loss + self.penalty.grad(beta_hat)
+            gradient_norm = float(np.max(np.abs(grad_total))) if grad_total.size else 0.0
+            kkt = self._kkt_residual(grad_loss, beta_hat)
+            binding_fn = getattr(self.generator, "domain_binding", None)
+            if callable(binding_fn):
+                bind = np.asarray(binding_fn(X_, v), dtype=bool)
+                binding = float(np.mean(bind)) if bind.size else 0.0
+        except Exception as exc:
+            success = False
+            status = "domain_error_at_solution"
+            message = f"{message} | diagnostics failed at solution: {exc}"
+
+        out = FitResult(
+            beta=beta_hat,
+            success=success,
+            message=message,
+            n_iter=n_iter,
+            status=status,
+            objective_value=objective,
+            gradient_norm=gradient_norm,
+            kkt_residual=kkt,
+            clip_binding_rate=binding,
+            fit_time=time.perf_counter() - t0,
         )
         self.beta_ = beta_hat
         self.fit_result_ = out
+        # Do not keep the (n, p) design matrices alive on the fitted object.
+        self._Phi = None
+        self._M = None
         return out
+
+    def _kkt_residual(
+        self, grad_loss: NDArray[np.float64], beta: NDArray[np.float64]
+    ) -> float:
+        pen = self.penalty
+        if beta.size == 0:
+            return 0.0
+        if pen.penalty is None or pen.lam == 0.0:
+            return float(np.max(np.abs(grad_loss)))
+        if pen.p_norm == 1.0:
+            nz = beta != 0.0
+            resid = np.where(
+                nz,
+                np.abs(grad_loss + pen.lam * np.sign(beta)),
+                np.maximum(0.0, np.abs(grad_loss) - pen.lam),
+            )
+            return float(np.max(resid))
+        return float(np.max(np.abs(grad_loss + pen.grad(beta))))
 
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
         if self.beta_ is None:
@@ -223,8 +408,19 @@ class GRRGLM:
         dPhi = self.basis.derivative(X_, coordinate)
         dv = dPhi @ self.beta_
         alpha = self.predict_alpha(X_)
-        g2 = self.generator.grad2(X_, alpha)
-        return dv / g2
+        g2 = np.asarray(self.generator.grad2(X_, alpha), dtype=float)
+        bad = ~np.isfinite(g2) | (g2 <= 0.0)
+        if np.any(bad):
+            warnings.warn(
+                "derivative_alpha encountered non-positive or non-finite curvature "
+                f"g''(alpha) for {int(bad.sum())} observation(s); returning NaN there.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        out = np.full_like(dv, np.nan, dtype=float)
+        ok = ~bad
+        out[ok] = dv[ok] / g2[ok]
+        return out
 
 
 class OutcomeGLM:
@@ -258,6 +454,7 @@ class OutcomeGLM:
         verbose: bool = False,
     ) -> FitResult:
         X_ = _as_2d(X)
+        _ensure_basis_fitted(self.basis, X_)
         Phi = np.asarray(self.basis(X_), dtype=float)
         n, p = Phi.shape
         y_ = _as_1d(y, n=n, name="y")
@@ -283,7 +480,10 @@ class OutcomeGLM:
                 b = (Phi.T @ y_) / n
                 theta = np.linalg.solve(A, b)
             self.theta_ = np.asarray(theta, dtype=float)
-            return FitResult(beta=self.theta_, success=True, message="closed_form", n_iter=1)
+            return FitResult(
+                beta=self.theta_, success=True, message="closed_form", n_iter=1,
+                status="closed_form",
+            )
 
         def fun(theta: NDArray[np.float64]) -> float:
             eta = Phi @ theta
@@ -318,6 +518,7 @@ class OutcomeGLM:
             success=bool(res.success),
             message=str(res.message),
             n_iter=int(getattr(res, "nit", -1)),
+            status="converged" if bool(res.success) else "optimizer_failure",
         )
 
     def predict_link(self, X: ArrayLike) -> NDArray[np.float64]:

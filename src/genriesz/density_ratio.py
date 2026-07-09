@@ -40,8 +40,9 @@ Notes
 
 from __future__ import annotations
 
+import warnings
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import Callable, Iterable
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -49,14 +50,14 @@ from scipy import optimize
 
 from .basis import BaseBasis, CallableBasis, GaussianRKHSBasis
 from .generators import (
-    BPGenerator,
     BKLGenerator,
+    BPGenerator,
     BregmanGenerator,
     PUGenerator,
     SquaredGenerator,
     UKLGenerator,
 )
-from .glm import _Penalty
+from .glm import DomainError, _Penalty
 from .utils import kfold_splits
 
 
@@ -104,7 +105,8 @@ def _coerce_generator(
     if isinstance(generator, str):
         key = generator.strip().lower()
         # Density ratios are nonnegative, so by default we use the positive branch.
-        pos_branch = lambda _x: 1
+        def pos_branch(_x):
+            return 1
         if key in {'sq', 'squared', 'lsif'}:
             return SquaredGenerator(C=0.0)
         if key in {'ukl'}:
@@ -116,7 +118,8 @@ def _coerce_generator(
         if key in {'pu'}:
             return PUGenerator(C=1.0, branch_fn=pos_branch)
         raise ValueError(
-            "Unknown generator name. Use a generator instance or one of: 'sq', 'ukl', 'bkl', 'bp', 'pu'."
+            "Unknown generator name. Use a generator instance or one of: "
+            "'sq', 'ukl', 'bkl', 'bp', 'pu'."
         )
 
     if isinstance(generator, BregmanGenerator):
@@ -142,6 +145,12 @@ class DensityRatioResult:
     centers, sigma, standardize:
         Convenience metadata when the default Gaussian RKHS basis is used.
         These are ``None`` when a custom basis is provided.
+    route:
+        ``"bregman"`` when the ratio is predicted through the generator's
+        canonical link ``generator.inv_grad(v)``. ``"logistic_classification"``
+        when the BKL generator was requested: the model is then fit as a
+        probabilistic classifier and predictions use
+        ``class_prior_ratio * exp(v)`` -- ``generator.inv_grad`` is NOT used.
     """
 
     basis: BaseBasis | CallableBasis
@@ -156,6 +165,7 @@ class DensityRatioResult:
     sigma: float | None = None
     standardize: bool | None = None
     class_prior_ratio: float | None = None
+    route: str = "bregman"
 
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
         """Predict the linear score v(x) = phi(x)^T beta."""
@@ -242,7 +252,9 @@ def _fit_bkl_classification(
     Phi_num = np.asarray(Phi_num, dtype=float)
     Phi_den = np.asarray(Phi_den, dtype=float)
     Phi = np.vstack([Phi_num, Phi_den])
-    y = np.concatenate([np.ones(Phi_num.shape[0], dtype=float), np.zeros(Phi_den.shape[0], dtype=float)])
+    y = np.concatenate(
+        [np.ones(Phi_num.shape[0], dtype=float), np.zeros(Phi_den.shape[0], dtype=float)]
+    )
 
     p = Phi.shape[1]
     beta0 = np.zeros(p, dtype=float)
@@ -290,16 +302,20 @@ def _fit_numeric(
     p = Phi_den.shape[1]
     beta0 = np.zeros(p, dtype=float)
 
-    big = 1e20
-
     Phi_num_mean = Phi_num.mean(axis=0)
 
+    # Generator failures are raised (and reported as an explicit optimization
+    # failure below), never converted into a huge objective value with a zero
+    # gradient.
     def fun(beta: NDArray[np.float64]) -> float:
         v_den = Phi_den @ beta
         try:
             g_star, _ = generator.conjugate(X_den, v_den)
-        except Exception:
-            return big
+        except Exception as exc:
+            raise DomainError(
+                f"generator '{generator.name}' failed to evaluate its conjugate "
+                f"during density-ratio optimization: {exc}"
+            ) from exc
 
         v_num = Phi_num @ beta
         loss = float(np.mean(g_star) - np.mean(v_num))
@@ -309,8 +325,11 @@ def _fit_numeric(
         v_den = Phi_den @ beta
         try:
             _, alpha_den = generator.conjugate(X_den, v_den)
-        except Exception:
-            return np.zeros_like(beta)
+        except Exception as exc:
+            raise DomainError(
+                f"generator '{generator.name}' failed to evaluate its link "
+                f"during density-ratio optimization: {exc}"
+            ) from exc
 
         grad = (alpha_den[:, None] * Phi_den).mean(axis=0) - Phi_num_mean
         return grad + penalty.grad(beta)
@@ -318,7 +337,10 @@ def _fit_numeric(
     opts_num: dict = {'maxiter': int(max_iter), 'ftol': float(tol)}
     if verbose:
         opts_num['iprint'] = 1
-    res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num)
+    try:
+        res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num)
+    except DomainError as exc:
+        raise RuntimeError(f"Density-ratio optimization failed: {exc}") from exc
 
     if not bool(res.success):
         raise RuntimeError(f"Density-ratio optimization failed: {res.message}")
@@ -394,7 +416,9 @@ def fit_density_ratio(
         raise ValueError('X_num and X_den must have the same number of columns')
 
     # Coerce generator
-    gen = _coerce_generator(generator=generator, g=g, grad_g=grad_g, inv_grad_g=inv_grad_g, grad2_g=grad2_g)
+    gen = _coerce_generator(
+        generator=generator, g=g, grad_g=grad_g, inv_grad_g=inv_grad_g, grad2_g=grad2_g
+    )
 
     # Regularization
     pen = _Penalty(penalty, lam=float(lam), p_norm=p_norm)
@@ -430,6 +454,48 @@ def fit_density_ratio(
             # Some user bases may not implement copy(); fall back to in-place fit.
             basis_obj.fit(np.vstack([Xn, Xd]))  # type: ignore[attr-defined]
 
+    def solve_beta(
+        b,
+        Xn_fit: NDArray[np.float64],
+        Xd_fit: NDArray[np.float64],
+        lam_: float,
+        *,
+        verbose_: bool,
+    ) -> NDArray[np.float64]:
+        """Dispatch to the right solver for the (already fitted) basis ``b``."""
+
+        Phi_num = np.asarray(b(Xn_fit), dtype=float)
+        Phi_den = np.asarray(b(Xd_fit), dtype=float)
+        pen_local = _Penalty(penalty, lam=float(lam_), p_norm=p_norm)
+
+        # Closed-form only for the squared generator + L2 (or no) penalty.
+        if isinstance(gen, SquaredGenerator) and (
+            pen_local.penalty is None or pen_local.p_norm == 2.0
+        ):
+            return _solve_squared_closed_form(
+                Phi_num=Phi_num, Phi_den=Phi_den, C=gen.C, penalty=pen_local
+            )
+        if isinstance(gen, BKLGenerator):
+            return _fit_bkl_classification(
+                Phi_num=Phi_num,
+                Phi_den=Phi_den,
+                penalty=pen_local,
+                max_iter=max_iter,
+                tol=tol,
+                verbose=verbose_,
+            )
+        return _fit_numeric(
+            X_num=Xn_fit,
+            X_den=Xd_fit,
+            Phi_num=Phi_num,
+            Phi_den=Phi_den,
+            generator=gen,
+            penalty=pen_local,
+            max_iter=max_iter,
+            tol=tol,
+            verbose=verbose_,
+        )
+
     def fit_for_params(sig: float, lam_: float):
         # Rebuild basis for this sigma if we are using the default RKHS basis.
         if basis is None:
@@ -445,41 +511,17 @@ def fit_density_ratio(
             # For a custom basis, we do not support sigma tuning.
             b = basis_obj
 
-        Phi_num = np.asarray(b(Xn), dtype=float)
-        Phi_den = np.asarray(b(Xd), dtype=float)
-
-        pen_local = _Penalty(penalty, lam=float(lam_), p_norm=p_norm)
-
-        # Closed-form only for the squared generator + L2 (or no) penalty.
-        if isinstance(gen, SquaredGenerator) and (pen_local.penalty is None or pen_local.p_norm == 2.0):
-            beta_hat = _solve_squared_closed_form(Phi_num=Phi_num, Phi_den=Phi_den, C=gen.C, penalty=pen_local)
-        elif isinstance(gen, BKLGenerator):
-            beta_hat = _fit_bkl_classification(
-                Phi_num=Phi_num,
-                Phi_den=Phi_den,
-                penalty=pen_local,
-                max_iter=max_iter,
-                tol=tol,
-                verbose=verbose,
-            )
-        else:
-            beta_hat = _fit_numeric(
-                X_num=Xn,
-                X_den=Xd,
-                Phi_num=Phi_num,
-                Phi_den=Phi_den,
-                generator=gen,
-                penalty=pen_local,
-                max_iter=max_iter,
-                tol=tol,
-                verbose=verbose,
-            )
+        beta_hat = solve_beta(b, Xn, Xd, lam_, verbose_=verbose)
         return b, beta_hat
+
+    route = "logistic_classification" if isinstance(gen, BKLGenerator) else "bregman"
 
     if not cv:
         if sigma_used is None and basis is None:
             raise ValueError('sigma must be provided when cv=False and basis is None')
-        b, beta_hat = fit_for_params(float(sigma_used) if sigma_used is not None else 1.0, float(lam))
+        b, beta_hat = fit_for_params(
+            float(sigma_used) if sigma_used is not None else 1.0, float(lam)
+        )
         return DensityRatioResult(
             basis=b,
             generator=gen,
@@ -490,7 +532,10 @@ def fit_density_ratio(
             centers=centers,
             sigma=sigma_used,
             standardize=bool(standardize) if basis is None else None,
-            class_prior_ratio=(float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None),
+            class_prior_ratio=(
+                float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None
+            ),
+            route=route,
         )
 
     # Cross-validation
@@ -503,7 +548,7 @@ def fit_density_ratio(
         lam_grid = [1e-3, 1e-2, 1e-1]
 
     sigma_grid = [float(s) for s in sigma_grid]
-    lam_grid = [float(l) for l in lam_grid]
+    lam_grid = [float(lam_val) for lam_val in lam_grid]
 
     if folds <= 1:
         raise ValueError('folds must be >= 2 when cv=True')
@@ -517,8 +562,22 @@ def fit_density_ratio(
         )
     )
 
+    # Fold-local kernel centers: selecting centers from the full sample before
+    # splitting would leak validation points into the candidate bases.
+    fold_centers: list[NDArray[np.float64]] = []
+    for f in range(folds):
+        X_tr_all = np.vstack([Xn[splits_num[f].train], Xd[splits_den[f].train]])
+        rng_f = np.random.default_rng(
+            None if random_state is None else random_state + 7919 * (f + 1)
+        )
+        m_f = min(int(n_centers), int(X_tr_all.shape[0]))
+        idx_f = rng_f.choice(X_tr_all.shape[0], size=m_f, replace=False)
+        fold_centers.append(np.asarray(X_tr_all[idx_f], dtype=float))
+
     best: tuple[float, float] | None = None
     best_score = float('inf')
+    n_failed_fits = 0
+    last_failure: str | None = None
 
     for sig in sigma_grid:
         for lam_ in lam_grid:
@@ -527,48 +586,23 @@ def fit_density_ratio(
                 tr_n, te_n = splits_num[f].train, splits_num[f].test
                 tr_d, te_d = splits_den[f].train, splits_den[f].test
 
-                assert centers is not None
                 b = GaussianRKHSBasis(
-                    centers=centers,
+                    centers=fold_centers[f],
                     sigma=float(sig),
                     standardize=standardize,
                     include_bias=True,
                     random_state=random_state,
                 ).fit(np.vstack([Xn[tr_n], Xd[tr_d]]))
 
-                Phi_n_tr = np.asarray(b(Xn[tr_n]), dtype=float)
-                Phi_d_tr = np.asarray(b(Xd[tr_d]), dtype=float)
-
-                pen_local = _Penalty(penalty, lam=float(lam_), p_norm=p_norm)
-
-                if isinstance(gen, SquaredGenerator) and (pen_local.penalty is None or pen_local.p_norm == 2.0):
-                    beta = _solve_squared_closed_form(
-                        Phi_num=Phi_n_tr,
-                        Phi_den=Phi_d_tr,
-                        C=gen.C,
-                        penalty=pen_local,
-                    )
-                elif isinstance(gen, BKLGenerator):
-                    beta = _fit_bkl_classification(
-                        Phi_num=Phi_n_tr,
-                        Phi_den=Phi_d_tr,
-                        penalty=pen_local,
-                        max_iter=max_iter,
-                        tol=tol,
-                        verbose=False,
-                    )
-                else:
-                    beta = _fit_numeric(
-                        X_num=Xn[tr_n],
-                        X_den=Xd[tr_d],
-                        Phi_num=Phi_n_tr,
-                        Phi_den=Phi_d_tr,
-                        generator=gen,
-                        penalty=pen_local,
-                        max_iter=max_iter,
-                        tol=tol,
-                        verbose=False,
-                    )
+                # A single failing candidate must not abort the whole CV; it is
+                # excluded (score = inf) and counted.
+                try:
+                    beta = solve_beta(b, Xn[tr_n], Xd[tr_d], lam_, verbose_=False)
+                except RuntimeError as exc:
+                    n_failed_fits += 1
+                    last_failure = str(exc)
+                    scores.append(float('inf'))
+                    continue
 
                 # Validation score: unpenalized objective
                 v_d = np.asarray(b(Xd[te_d]) @ beta, dtype=float).reshape(-1)
@@ -586,12 +620,22 @@ def fit_density_ratio(
                 scores.append(score)
 
             avg = float(np.mean(scores))
-            if avg < best_score:
+            if np.isfinite(avg) and avg < best_score:
                 best_score = avg
                 best = (sig, lam_)
 
+    if n_failed_fits > 0:
+        warnings.warn(
+            f"{n_failed_fits} candidate fit(s) failed during density-ratio CV "
+            f"and were excluded (last failure: {last_failure}).",
+            UserWarning,
+            stacklevel=2,
+        )
     if best is None:
-        raise RuntimeError('Cross-validation failed to find a finite score')
+        raise RuntimeError(
+            "Cross-validation failed to find a finite score "
+            f"({n_failed_fits} candidate fits failed; last failure: {last_failure})"
+        )
 
     sig_star, lam_star = best
     b, beta_hat = fit_for_params(sig_star, lam_star)
@@ -606,5 +650,8 @@ def fit_density_ratio(
         centers=centers,
         sigma=float(sig_star),
         standardize=bool(standardize),
-        class_prior_ratio=(float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None),
+        class_prior_ratio=(
+            float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None
+        ),
+        route=route,
     )
