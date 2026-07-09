@@ -23,12 +23,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-
-def _as_2d(X: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"{name} must be a 2D array. Got shape {X_.shape}.")
-    return X_
+from .utils import standardize_columns
 
 
 def _as_2d_allow_1d(X: ArrayLike, *, name: str = "X") -> tuple[NDArray[np.float64], bool]:
@@ -416,15 +411,7 @@ class RBFRandomFourierBasis(BaseBasis):
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
-        if self.standardize:
-            mean = X2.mean(axis=0)
-            std = X2.std(axis=0, ddof=0)
-            std = np.where(std > 0, std, 1.0)
-        else:
-            mean = np.zeros(d)
-            std = np.ones(d)
-
-        Xs = (X2 - mean) / std
+        Xs, mean, std = standardize_columns(X2, enabled=self.standardize)
         sigma = _resolve_sigma(self.sigma, Xs, random_state=self.random_state)
 
         rng = np.random.default_rng(self.random_state)
@@ -609,15 +596,7 @@ class GaussianRKHSBasis(BaseBasis):
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
-        if self.standardize:
-            mean = X2.mean(axis=0)
-            std = X2.std(axis=0, ddof=0)
-            std = np.where(std > 0, std, 1.0)
-        else:
-            mean = np.zeros(d)
-            std = np.ones(d)
-
-        Xs = (X2 - mean) / std
+        Xs, mean, std = standardize_columns(X2, enabled=self.standardize)
 
         if self._centers_input is not None:
             C = np.asarray(self._centers_input, dtype=float)
@@ -843,15 +822,7 @@ class RBFNystromBasis(BaseBasis):
         X2, _ = _as_2d_allow_1d(X)
         n, d = X2.shape
 
-        if self.standardize:
-            mean = X2.mean(axis=0)
-            std = X2.std(axis=0, ddof=0)
-            std = np.where(std > 0, std, 1.0)
-        else:
-            mean = np.zeros(d)
-            std = np.ones(d)
-
-        Xs = (X2 - mean) / std
+        Xs, mean, std = standardize_columns(X2, enabled=self.standardize)
         self._sigma_resolved = _resolve_sigma(self.sigma, Xs, random_state=self.random_state)
 
         if self._centers_input is not None:
@@ -961,15 +932,7 @@ class KNNCatchmentBasis(BaseBasis):
                 f"n_neighbors={self.n_neighbors} exceeds the number of centers={C.shape[0]}."
             )
 
-        if self.standardize:
-            mean = C.mean(axis=0)
-            std = C.std(axis=0, ddof=0)
-            std = np.where(std > 0, std, 1.0)
-        else:
-            mean = np.zeros(C.shape[1])
-            std = np.ones(C.shape[1])
-
-        C_std = (C - mean) / std
+        C_std, mean, std = standardize_columns(C, enabled=self.standardize)
 
         tree = cKDTree(C_std)
 

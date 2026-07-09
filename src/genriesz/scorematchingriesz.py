@@ -22,6 +22,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .utils import kfold_splits
+
 try:  # optional dependency
     import torch
     import torch.nn as nn
@@ -1075,7 +1077,15 @@ def crossfit_splits(
     n_folds: int = 2,
     seed: int = 0,
 ) -> list[tuple[np.ndarray, np.ndarray]]:
-    """Return train/test index pairs for cross-fitting."""
+    """Return train/test index pairs for cross-fitting.
+
+    A thin adapter over :func:`genriesz.utils.kfold_splits` that keeps this
+    module's historical ``list[(train, test)]`` shape; the splits themselves are
+    identical fold for fold.
+
+    The bounds are re-checked here rather than deferred to ``kfold_splits`` so
+    that the message names ``n_folds``, the argument the caller actually passed.
+    """
 
     n = int(n)
     n_folds = int(n_folds)
@@ -1085,15 +1095,7 @@ def crossfit_splits(
         raise ValueError("n_folds must be at least 2.")
     if n_folds > n:
         raise ValueError("n_folds must be at most n.")
-    rng = np.random.default_rng(seed)
-    indices = rng.permutation(n)
-    folds = np.array_split(indices, n_folds)
-    splits: list[tuple[np.ndarray, np.ndarray]] = []
-    for fold in folds:
-        test = np.asarray(fold, dtype=int)
-        train = np.setdiff1d(indices, test, assume_unique=True)
-        splits.append((train, test))
-    return splits
+    return [(f.train, f.test) for f in kfold_splits(n, folds=n_folds, random_state=seed)]
 
 
 __all__ = [

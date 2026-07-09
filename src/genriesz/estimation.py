@@ -58,7 +58,16 @@ from .matching import (
 )
 from .model_selection import GRRCVConfig, select_grr_hyperparams
 from .results import FunctionalEstimate, SingleEstimate
-from .utils import Fold, bias_proxy, is_binary_y, kfold_splits, se_ci_pvalue
+from .utils import (
+    Fold,
+    as_1d_of_length,
+    as_2d,
+    bias_proxy,
+    is_binary_y,
+    kfold_splits,
+    se_ci_pvalue,
+    sigmoid,
+)
 
 EstimatorName = Literal["ra", "rw", "arw", "tmle"]
 OutcomeModels = Literal["shared", "separate", "both", "none", "auto"]
@@ -170,20 +179,6 @@ def _covariate_balance_smd(
     }
 
 
-def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-    return X_
-
-
-def _as_1d(y: ArrayLike, *, n: int, name: str) -> NDArray[np.float64]:
-    y_ = np.asarray(y, dtype=float).reshape(-1)
-    if y_.shape[0] != n:
-        raise ValueError(f"{name} must have length {n}. Got shape {y_.shape}.")
-    return y_
-
-
 def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...]:
     mapping: dict[str, EstimatorName] = {
         "ra": "ra",
@@ -265,15 +260,6 @@ def _logit(p: NDArray[np.float64], eps: float = 1e-6) -> NDArray[np.float64]:
     return np.log(p / (1.0 - p))
 
 
-def _expit(z: NDArray[np.float64]) -> NDArray[np.float64]:
-    out = np.empty_like(z)
-    pos = z >= 0
-    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
-    ez = np.exp(z[~pos])
-    out[~pos] = ez / (1.0 + ez)
-    return out
-
-
 def _tmle_epsilon_gaussian(
     H: NDArray[np.float64],
     y: NDArray[np.float64],
@@ -295,7 +281,7 @@ def _tmle_epsilon_bernoulli(
     offset = _logit(mu)
 
     def score(eps: float) -> float:
-        mu_eps = _expit(offset + eps * H)
+        mu_eps = sigmoid(offset + eps * H)
         return float(np.mean(H * (y - mu_eps)))
 
     # Newton with derivative (monotone score)
@@ -304,7 +290,7 @@ def _tmle_epsilon_bernoulli(
         s = score(eps)
         if abs(s) < 1e-10:
             return float(eps)
-        mu_eps = _expit(offset + eps * H)
+        mu_eps = sigmoid(offset + eps * H)
         deriv = -float(np.mean((H * H) * mu_eps * (1.0 - mu_eps)))
         if deriv == 0 or not np.isfinite(deriv):
             break
@@ -418,9 +404,9 @@ def grr_functional(
         TMLE likelihood is inferred from this link.
     """
 
-    X_ = _as_2d(X)
+    X_ = as_2d(X)
     n = X_.shape[0]
-    y_ = _as_1d(Y, n=n, name="Y")
+    y_ = as_1d_of_length(Y, n=n, name="Y")
 
     # Coerce raw callables into LinearFunctional (README-friendly)
     m = _coerce_functional(m)
@@ -917,7 +903,7 @@ def grr_functional(
                     if not (np.nanmin(y_) >= 0.0 and np.nanmax(y_) <= 1.0):
                         raise ValueError("Bernoulli TMLE requires Y bounded in [0, 1].")
                     eps_hat = _tmle_epsilon_bernoulli(alpha_obs, y_, mu)
-                    mu_star = _expit(_logit(mu) + eps_hat * alpha_obs)
+                    mu_star = sigmoid(_logit(mu) + eps_hat * alpha_obs)
 
                     if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
                         mu1 = cf_cache[f"mu1_{tag}"]
@@ -928,8 +914,8 @@ def grr_functional(
                             raise RuntimeError(
                                 "Missing alpha counterfactual cache for Bernoulli TMLE"
                             )
-                        mu1_star = _expit(_logit(mu1) + eps_hat * a1)
-                        mu0_star = _expit(_logit(mu0) + eps_hat * a0)
+                        mu1_star = sigmoid(_logit(mu1) + eps_hat * a1)
+                        mu0_star = sigmoid(_logit(mu0) + eps_hat * a0)
                         if isinstance(m, ATEFunctional):
                             m_mu_star = mu1_star - mu0_star
                         else:
@@ -1218,7 +1204,7 @@ def grr_att(
 ) -> FunctionalEstimate:
     """Estimate ATT with the GRR API."""
 
-    X_ = _as_2d(X)
+    X_ = as_2d(X)
     D = X_[:, treatment_index]
     pi = float(np.mean(D))
     if pi <= 0 or pi >= 1:
@@ -1239,10 +1225,10 @@ def grr_did(
 ) -> FunctionalEstimate:
     """Panel DID implemented as ATT on ΔY = Y1-Y0."""
 
-    X_ = _as_2d(X)
+    X_ = as_2d(X)
     n = X_.shape[0]
-    y0 = _as_1d(Y0, n=n, name="Y0")
-    y1 = _as_1d(Y1, n=n, name="Y1")
+    y0 = as_1d_of_length(Y0, n=n, name="Y0")
+    y1 = as_1d_of_length(Y1, n=n, name="Y1")
     dy = y1 - y0
 
     D = X_[:, treatment_index]
