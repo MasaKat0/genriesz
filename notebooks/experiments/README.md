@@ -14,6 +14,22 @@ jupyter notebook notebooks/experiments
 
 The IHDP notebook uses the npci-format files under `notebooks/experiments/data/ihdp`. The Lalonde notebook downloads and caches the public MatchIt/Rdatasets Lalonde CSV if it is not already present. No fallback data are generated.
 
+## After re-running a notebook
+
+The Monte Carlo loops emit NumPy `RuntimeWarning`s, and Jupyter stores every one of them in the notebook as an `stderr` output. A single execution of `01_main_simulation_study.ipynb` writes 6508 of them and grows the file past GitHub's 100 MB blob limit, which makes the whole push fail. Before committing a re-run:
+
+```bash
+make notebooks-strip   # drop stderr outputs; figures, tables, and stdout are kept
+```
+
+`make verify` refuses to pass while an executed notebook still carries `stderr` output, and `make install-hooks` installs a pre-commit hook that enforces the same check plus a 50 MB file-size guard.
+
+### The matmul warnings are spurious
+
+On Apple silicon, the `divide by zero`, `overflow`, and `invalid value encountered in matmul` warnings do not indicate a numerical problem in this package. Apple's Accelerate BLAS raises bogus floating-point exception flags for any `@` product above roughly 16x16, and NumPy reports them. `np.eye(40) @ np.eye(40)` reproduces all three warnings while returning the exact identity, and the products agree with `np.einsum` to the last bit. See numpy issues [#28790](https://github.com/numpy/numpy/issues/28790) and [#29820](https://github.com/numpy/numpy/issues/29820); upgrading NumPy does not help, because the defect is in Accelerate.
+
+Do not "harden" `basis.py` or `glm.py` against these. A NumPy built against OpenBLAS instead of Accelerate is silent, and wrapping a loop in `np.errstate(all="ignore")` suppresses the flags without changing any result -- but it would also hide genuine warnings, so prefer leaving them visible in the live session and stripping them from the committed notebook.
+
 
 Display convention: ATE and ATT are never placed in the same table or the same figure. Each notebook filters by `estimand` and then displays a separate table or plot for each target.
 
