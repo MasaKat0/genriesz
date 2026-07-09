@@ -56,6 +56,17 @@ from numpy.typing import ArrayLike, NDArray
 BranchFn = Callable[[NDArray[np.float64]], int]
 
 
+class DomainError(RuntimeError):
+    """Raised when a generator cannot evaluate its link/conjugate at a point.
+
+    This replaces the previous behavior of silently returning a huge objective
+    value and a zero gradient (or silently clipping the pre-image to a value
+    that makes the returned ``alpha`` explode), which could make the optimizer
+    stop at a broken point with ``success=True``. Callers (e.g. ``GRRGLM.fit``)
+    catch this and record an explicit ``status="domain_error"`` failure.
+    """
+
+
 def _as_2d(X: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
     X_ = np.asarray(X, dtype=float)
     if X_.ndim != 2:
@@ -160,6 +171,12 @@ class BregmanGenerator:
     providing analytic ``grad`` and especially ``inv_grad`` is strongly
     recommended.
     """
+
+    #: Whether this generator's link intentionally bounds/caps the representer
+    #: and therefore targets a *modified* estimand. Model selection uses this
+    #: (together with ``domain_binding``) to keep such variants out of the
+    #: admissible set and treat them as target-sensitivity candidates (§9-4).
+    modifies_estimand: bool = False
 
     def __init__(
         self,
@@ -545,6 +562,40 @@ class BPGenerator(BregmanGenerator):
         return k * self.omega * np.power(t, self.omega - 1.0)
 
 
+# ---------------------------------------------------------------------------
+# Shared BKL math (used by both BKLGenerator and BoundedBKLGenerator so the two
+# variants cannot drift apart). The generator function g is identical for both;
+# only the inverse-link (inv_grad) differs: exact-and-raising vs bounded.
+# ---------------------------------------------------------------------------
+def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    t1 = np.maximum(np.abs(a) - C, 1e-12)
+    t2 = np.maximum(np.abs(a) + C, 1e-12)
+    return t1 * np.log(t1) - t2 * np.log(t2)
+
+
+def _bkl_grad(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    t1 = np.maximum(np.abs(a) - C, 1e-12)
+    t2 = np.maximum(np.abs(a) + C, 1e-12)
+    return np.sign(a) * (np.log(t1) - np.log(t2))
+
+
+def _bkl_grad2(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    denom = np.maximum(np.abs(a) * np.abs(a) - C * C, 1e-12)
+    return (2.0 * C) / denom
+
+
+def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    """|alpha| = C (1 + e^u) / (1 - e^u) for the BKL link, valid for u < 0.
+
+    Callers must guarantee ``u < 0`` (``u`` bounded away from 0); this routine
+    does not itself guard the ``u -> 0`` blow-up.
+    """
+
+    t = np.exp(u)  # in (0, 1) for u < 0
+    denom = np.maximum(1.0 - t, 1e-300)
+    return C * (1.0 + t) / denom
+
+
 class BKLGenerator(BregmanGenerator):
     """Binary KL generator (BKL-Riesz).
 
@@ -560,10 +611,23 @@ class BKLGenerator(BregmanGenerator):
 
     The inverse gradient is branch-wise. Let ``s`` be the desired sign branch
     (+1 or -1) and let ``u = s * v``. Since the log-ratio is always negative,
-    the theoretical domain is ``u < 0``. In finite samples (and especially
-    under cross fitting), ``u`` may violate this.
-    Instead of raising an exception, we **clip** ``u`` to a small negative
-    value to keep the link well-defined.
+    the theoretical domain is ``u < 0`` and ``alpha`` diverges as ``u -> 0``.
+
+    This is the **uncapped** (mathematically exact) link: a domain violation
+    (``u >= 0``) raises :class:`DomainError` instead of being silently clipped.
+    The previous clip mapped ``u`` to ``-1e-8``, which produced
+    ``alpha ~ 2C / 1e-8 ~ 2e8``. That value is not ``(g')^{-1}(v)``, so it broke
+    the conjugate identity ``d g*(v)/dv = alpha`` and destroyed the GRR weights.
+    Raising instead lets ``GRRGLM.fit`` report an explicit
+    ``status="domain_error"`` failure (see design item E / coverage-design
+    "KL系lossとcapの修正設計", 方針A).
+
+    Note that ``L-BFGS-B`` cannot optimize this uncapped objective directly: its
+    unconstrained line search steps out of the domain and hits the raise. For a
+    *usable* bounded-representer variant, use :class:`BoundedBKLGenerator`, which
+    keeps ``alpha`` bounded with a consistent objective/gradient but targets a
+    modified (bounded) estimand and is therefore a target-sensitivity candidate,
+    not an admissible one.
 
     If ``branch_fn`` is provided, it selects the sign branch.
     """
@@ -596,54 +660,166 @@ class BKLGenerator(BregmanGenerator):
         v_ = _as_1d(v, n=len(X_), name="v")
         s = self._branch_sign(X_, v_)
 
-        # Enforce u = s*v < 0.
+        # The theoretical domain is u = s*v < 0. A violation has no finite
+        # inverse image, so raise instead of clipping to a value that would
+        # make alpha explode and break the conjugate identity (方針A).
         u = s * v_
-        u = np.clip(u, -700.0, -1e-8)
+        if np.any(u >= 0.0):
+            n_bad = int(np.sum(u >= 0.0))
+            raise DomainError(
+                f"BKLGenerator domain violation: {n_bad}/{u.shape[0]} observation(s) "
+                f"have u = s*v >= 0, where the exact link alpha = (g')^{{-1}}(v) is "
+                f"undefined (alpha -> +inf). Use BoundedBKLGenerator for a bounded, "
+                f"optimizable variant."
+            )
 
-        t = np.exp(u)  # in (0, 1)
-        denom = 1.0 - t
-        denom = np.maximum(denom, 1e-12)
-        a = self.C * (1.0 + t) / denom
-        return s * a
+        # Guard only the exp underflow tail (very negative u -> alpha -> C+),
+        # which does not affect the finite, well-defined side.
+        u = np.maximum(u, -700.0)
+        return s * _bkl_abs_alpha_from_u(u, self.C)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        """Mask of observations where the domain clip in ``inv_grad`` binds.
+        """Mask of observations that violate the BKL domain (``u = s*v >= 0``).
 
-        ``u = s*v >= -1e-8`` is the dangerous side: the theoretical domain is
-        ``u < 0`` and clipping there produces extremely large ``alpha``
-        (order ``2C/1e-8``), which changes the estimand and destroys weights.
+        The exact link has no finite value there; :meth:`inv_grad` raises
+        :class:`DomainError` rather than clipping. This mask lets callers count
+        the violation rate before attempting a fit (or after catching the
+        failure).
         """
 
         X_ = _as_2d(X)
         v_ = _as_1d(v, n=len(X_), name="v")
         u = self._branch_sign(X_, v_) * v_
-        return (u >= -1e-8) | (u <= -700.0)
+        return u >= 0.0
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         a = _as_1d(alpha, n=len(X_), name="alpha")
-        t1 = np.abs(a) - self.C
-        t2 = np.abs(a) + self.C
-        t1 = np.maximum(t1, 1e-12)
-        t2 = np.maximum(t2, 1e-12)
-        return t1 * np.log(t1) - t2 * np.log(t2)
+        return _bkl_g(a, self.C)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         a = _as_1d(alpha, n=len(X_), name="alpha")
-        t1 = np.abs(a) - self.C
-        t2 = np.abs(a) + self.C
-        t1 = np.maximum(t1, 1e-12)
-        t2 = np.maximum(t2, 1e-12)
-        return np.sign(a) * (np.log(t1) - np.log(t2))
+        return _bkl_grad(a, self.C)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = _as_2d(X)
         a = _as_1d(alpha, n=len(X_), name="alpha")
-        abs_a = np.abs(a)
-        denom = abs_a * abs_a - self.C * self.C
-        denom = np.maximum(denom, 1e-12)
-        return (2.0 * self.C) / denom
+        return _bkl_grad2(a, self.C)
+
+
+class BoundedBKLGenerator(BregmanGenerator):
+    """Bounded-representer BKL variant (方針B; target-sensitivity candidate).
+
+    The BKL generator function ``g`` is the same as :class:`BKLGenerator`, but
+    the inverse link is **bounded and smooth** instead of exact-and-raising:
+
+        |alpha| = C (1 + e^u) / (1 - e^u),  with u = s * v clamped to u <= u_min,
+
+    where ``u_min = log((alpha_max - C) / (alpha_max + C)) < 0`` is chosen so
+    that ``|alpha| <= alpha_max``. On the dangerous side (``u -> 0``, where the
+    exact link diverges) ``u`` is clamped to ``u_min`` and ``alpha`` is pinned at
+    ``alpha_max``. Because ``alpha`` is then constant in ``v`` there,
+    ``d alpha / d v = 0`` and the envelope identity ``d g*(v)/d v = alpha`` still
+    holds exactly (unlike the old BKL clip, which clamped the pre-image to a
+    near-zero ``u`` and produced a huge, inconsistent ``alpha``). The objective
+    and gradient therefore stay mutually consistent everywhere, so this variant
+    is optimizable with ``L-BFGS-B``.
+
+    The price is that where the bound binds the estimator no longer targets the
+    exact BKL-Riesz representer: it targets a **modified (bounded) estimand**.
+    Report :meth:`domain_binding` (the bound-binding rate) and treat this as a
+    *target-sensitivity* candidate, not an admissible one (design §9-4).
+
+    Parameters
+    ----------
+    C:
+        Positive generator shift (domain ``|alpha| > C``).
+    alpha_max:
+        Bound on ``|alpha|`` (must be ``> C``). This is a sensitivity knob: sweep
+        it and report how the estimate moves. Defaults to ``50.0``.
+    branch_fn:
+        Optional branch selector (as in :class:`BKLGenerator`).
+    """
+
+    modifies_estimand = True
+
+    def __init__(
+        self,
+        C: float = 1.0,
+        *,
+        alpha_max: float = 50.0,
+        branch_fn: BranchFn | None = None,
+    ):
+        if float(C) <= 0:
+            raise ValueError("C must be > 0 for BoundedBKLGenerator")
+        if float(alpha_max) <= float(C):
+            raise ValueError(
+                f"alpha_max must be > C. Got alpha_max={alpha_max}, C={C}."
+            )
+        if branch_fn is None:
+            warnings.warn(
+                "BoundedBKLGenerator without branch_fn selects the alpha branch "
+                "from sign(v) (positive branch for v <= 0). For GRR with "
+                "functionals that require a fixed sign per observation (e.g. "
+                "ATE/ATT), provide branch_fn.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self.alpha_max = float(alpha_max)
+        # u_min < 0 is the pre-image of alpha_max under the BKL link.
+        self._u_min = float(
+            np.log((self.alpha_max - float(C)) / (self.alpha_max + float(C)))
+        )
+        super().__init__(
+            name=f"BoundedBKL(alpha_max={self.alpha_max:g})",
+            C=float(C),
+            branch_fn=branch_fn,
+        )
+
+    def _branch_sign(
+        self, X: NDArray[np.float64], v: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        # Same convention as BKLGenerator: positive branch corresponds to v <= 0.
+        if self.branch_fn is None:
+            return np.where(v <= 0.0, 1.0, -1.0)
+        return self._sign(X, v)
+
+    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        s = self._branch_sign(X_, v_)
+        # Clamp the dangerous side (u -> 0) to u_min so |alpha| <= alpha_max, and
+        # the exp-underflow tail to -700. Both sides keep u strictly negative.
+        u = np.clip(s * v_, -700.0, self._u_min)
+        return s * _bkl_abs_alpha_from_u(u, self.C)
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where the bound binds (``u = s*v > u_min`` -> ``|alpha| = alpha_max``).
+
+        These are the observations at which the bounded variant departs from the
+        exact BKL-Riesz representer, i.e. the modified-estimand region.
+        """
+
+        X_ = _as_2d(X)
+        v_ = _as_1d(v, n=len(X_), name="v")
+        u = self._branch_sign(X_, v_) * v_
+        return u > self._u_min
+
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        return _bkl_g(a, self.C)
+
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        return _bkl_grad(a, self.C)
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = _as_2d(X)
+        a = _as_1d(alpha, n=len(X_), name="alpha")
+        return _bkl_grad2(a, self.C)
 
 
 class PUGenerator(BregmanGenerator):

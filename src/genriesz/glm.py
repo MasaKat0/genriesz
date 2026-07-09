@@ -29,16 +29,11 @@ from scipy import optimize
 
 from .basis import Basis
 from .functionals import LinearFunctional
-from .generators import BregmanGenerator, SquaredGenerator
+from .generators import BregmanGenerator, DomainError, SquaredGenerator
 
-
-class DomainError(RuntimeError):
-    """Raised when a generator cannot evaluate its link/conjugate at a point.
-
-    This replaces the previous behavior of silently returning a huge objective
-    value and a zero gradient, which could make the optimizer stop at a broken
-    point with ``success=True``.
-    """
+# ``DomainError`` is now defined in ``generators`` (the lower layer, which raises
+# it directly from broken links). glm.py both uses it (in ``fit``) and re-exports
+# it, so ``from genriesz.glm import DomainError`` keeps working.
 
 
 def _as_2d(X: ArrayLike) -> NDArray[np.float64]:

@@ -46,9 +46,11 @@ Generators
 .. autoclass:: genriesz.SquaredGenerator
 .. autoclass:: genriesz.UKLGenerator
 .. autoclass:: genriesz.BKLGenerator
+.. autoclass:: genriesz.BoundedBKLGenerator
 .. autoclass:: genriesz.BPGenerator
 .. autoclass:: genriesz.PUGenerator
 .. autoclass:: genriesz.BregmanGenerator
+.. autoexception:: genriesz.DomainError
 
 Results
 -------

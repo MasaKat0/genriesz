@@ -43,6 +43,11 @@ def test_conjugate_gradient_identity_in_valid_region(gen, v_lo, v_hi):
     rng = np.random.default_rng(0)
     n = 9
     X = rng.normal(size=(n, 2))
+    # Force the positive branch (x[0] >= 0) everywhere so that, together with the
+    # negative v-ranges chosen above for the branchwise generators, every point
+    # stays strictly inside the domain. Otherwise the (now uncapped) BKL link
+    # raises DomainError on the s=-1, v<0 rows instead of silently clipping.
+    X[:, 0] = np.abs(X[:, 0]) + 0.1
     v = np.linspace(v_lo, v_hi, n)
 
     _, alpha = gen.conjugate(X, v)
@@ -61,7 +66,7 @@ def test_bkl_domain_binding_flags_violations():
     ok = gen.domain_binding(X, np.full(n, -0.5))
     assert not np.any(ok)
 
-    # u = s*v > 0 violates the BKL domain; the internal clip binds there.
+    # u = s*v >= 0 violates the BKL domain; inv_grad raises there (no clip).
     bad = gen.domain_binding(X, np.full(n, +0.5))
     assert np.all(bad)
 

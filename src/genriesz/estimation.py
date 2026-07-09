@@ -42,7 +42,13 @@ from .functionals import (
     DIDFunctional,
     LinearFunctional,
 )
-from .generators import BKLGenerator, BPGenerator, BregmanGenerator, UKLGenerator
+from .generators import (
+    BKLGenerator,
+    BoundedBKLGenerator,
+    BPGenerator,
+    BregmanGenerator,
+    UKLGenerator,
+)
 from .glm import GRRGLM, OutcomeGLM
 from .matching import (
     LocalPolynomialLSIFWeights,
@@ -463,13 +469,13 @@ def grr_functional(
             generator = BregmanGenerator(g=g, grad=grad_g, inv_grad=inv_grad_g, grad2=grad2_g)
 
         if isinstance(m, (ATTFunctional, DIDFunctional)) and isinstance(
-            generator, (UKLGenerator, BPGenerator, BKLGenerator)
+            generator, (UKLGenerator, BPGenerator, BKLGenerator, BoundedBKLGenerator)
         ):
             c_value = float(getattr(generator, "C", 0.0))
             warn = False
             if isinstance(generator, (UKLGenerator, BPGenerator)) and c_value > 0.0:
                 warn = True
-            if isinstance(generator, BKLGenerator):
+            if isinstance(generator, (BKLGenerator, BoundedBKLGenerator)):
                 warn = True
             if warn:
                 warnings.warn(

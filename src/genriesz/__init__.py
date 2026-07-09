@@ -46,8 +46,10 @@ from .functionals import (
 # Generators
 from .generators import (
     BKLGenerator,
+    BoundedBKLGenerator,
     BPGenerator,
     BregmanGenerator,
+    DomainError,
     PUGenerator,
     SquaredGenerator,
     UKLGenerator,
@@ -116,8 +118,10 @@ __all__ = [
     "SquaredGenerator",
     "UKLGenerator",
     "BKLGenerator",
+    "BoundedBKLGenerator",
     "BPGenerator",
     "PUGenerator",
+    "DomainError",
     # Matching
     "nn_matching_inverse_propensity_weights",
     "local_polynomial_nn_lsif_density_ratio",
