@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ---- Project-specific (genriesz) ----
+
+# Working-snapshot backup archives (not source of truth; the notebooks themselves are)
+/notebooks*.zip
+notebooks/**/*.zip
+/Main (12).tex
+
+# Paper artifacts kept on disk but out of the code repo (design notes stay as doc/*.md)
+doc/*.tex
+doc/*.pdf
+
+# Generated experiment outputs (keep the directory, ignore its contents)
+notebooks/experiments/data/*
+!notebooks/experiments/data/.gitkeep
+notebooks/scorematchingriesz/data/*
+!notebooks/scorematchingriesz/data/.gitkeep
+
+
+
