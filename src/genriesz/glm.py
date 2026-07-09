@@ -19,8 +19,10 @@ We solve the resulting convex (often smooth) problem with L-BFGS-B.
 
 from __future__ import annotations
 
+import contextlib
 import time
 import warnings
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -30,6 +32,13 @@ from scipy import optimize
 from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError, SquaredGenerator
+
+
+def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
+    """Memoize a generator's branch signs, if it knows how (duck-typed)."""
+
+    cache = getattr(generator, "branch_cache", None)
+    return cache() if callable(cache) else contextlib.nullcontext()
 
 # ``DomainError`` is now defined in ``generators`` (the lower layer, which raises
 # it directly from broken links). glm.py both uses it (in ``fit``) and re-exports
@@ -276,35 +285,41 @@ class GRRGLM:
         opts: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
         if verbose:
             opts["iprint"] = 1
-        try:
-            res = optimize.minimize(fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts)
-        except DomainError as exc:
-            out = FitResult(
-                beta=beta0_,
-                success=False,
-                message=str(exc),
-                n_iter=0,
-                status="domain_error",
-                fit_time=time.perf_counter() - t0,
-            )
-            self.beta_ = beta0_
-            self.fit_result_ = out
-            self._Phi = None
-            self._M = None
-            return out
 
-        beta_hat = np.asarray(res.x, dtype=float)
-        return self._finalize_fit(
-            X_,
-            Phi,
-            M,
-            beta_hat,
-            success=bool(res.success),
-            message=str(res.message),
-            status="converged" if bool(res.success) else "optimizer_failure",
-            n_iter=int(getattr(res, "nit", -1)),
-            t0=t0,
-        )
+        # The branch signs depend on X only, but fun/jac are evaluated many
+        # times on the same X. Memoize them for the duration of the fit.
+        with _branch_cache_of(self.generator):
+            try:
+                res = optimize.minimize(
+                    fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts
+                )
+            except DomainError as exc:
+                out = FitResult(
+                    beta=beta0_,
+                    success=False,
+                    message=str(exc),
+                    n_iter=0,
+                    status="domain_error",
+                    fit_time=time.perf_counter() - t0,
+                )
+                self.beta_ = beta0_
+                self.fit_result_ = out
+                self._Phi = None
+                self._M = None
+                return out
+
+            beta_hat = np.asarray(res.x, dtype=float)
+            return self._finalize_fit(
+                X_,
+                Phi,
+                M,
+                beta_hat,
+                success=bool(res.success),
+                message=str(res.message),
+                status="converged" if bool(res.success) else "optimizer_failure",
+                n_iter=int(getattr(res, "nit", -1)),
+                t0=t0,
+            )
 
     def _finalize_fit(
         self,

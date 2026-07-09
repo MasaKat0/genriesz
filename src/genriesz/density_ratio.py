@@ -57,7 +57,7 @@ from .generators import (
     SquaredGenerator,
     UKLGenerator,
 )
-from .glm import DomainError, _Penalty
+from .glm import DomainError, _branch_cache_of, _Penalty
 from .utils import kfold_splits
 
 
@@ -338,7 +338,11 @@ def _fit_numeric(
     if verbose:
         opts_num['iprint'] = 1
     try:
-        res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num)
+        # Branch signs depend on X_den only; fun/jac re-evaluate them every step.
+        with _branch_cache_of(generator):
+            res = optimize.minimize(
+                fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num
+            )
     except DomainError as exc:
         raise RuntimeError(f"Density-ratio optimization failed: {exc}") from exc
 
