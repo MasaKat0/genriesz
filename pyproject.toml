@@ -54,6 +54,8 @@ dev = [
   "pytest-cov>=5.0",
   "ruff>=0.4",
   "mypy>=1.8",
+  # tools/strip_notebook_stderr.py, run by `make verify` via notebooks-check
+  "nbformat>=5.0",
 ]
 
 docs = [
