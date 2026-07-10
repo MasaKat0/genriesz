@@ -74,6 +74,50 @@ class _MetadataCarryingCallable:
         return np.column_stack([np.ones(len(X)), X])
 
 
+class _NonDeepcopyableCallable:
+    """A valid plain feature map that refuses to be deep-copied.
+
+    Nothing in the public API asks a feature map to be deepcopy-able, so
+    ``CallableBasis.copy`` must share it rather than copy it.
+    """
+
+    def __deepcopy__(self, memo):
+        raise TypeError("cannot deepcopy this feature map")
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+
+class _ShadowedCopyBasis(BaseBasis):
+    """A protocol violation: a data attribute named ``copy`` hides the method."""
+
+    def __init__(self):
+        self.copy = True  # e.g. a scikit-learn style ``copy=True`` parameter
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+
+class _UncopyableBasis(BaseBasis):
+    """A stateful Basis that refuses to be copied. Neither path can honour it."""
+
+    def __init__(self):
+        self.fitted_on = None
+
+    def __deepcopy__(self, memo):
+        raise TypeError("cannot deepcopy this basis")
+
+    def fit(self, X, y=None):
+        self.fitted_on = len(np.asarray(X))
+        return self
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+
 def _two_samples(seed: int = 0):
     rng = np.random.default_rng(seed)
     return rng.normal(size=(60, 2)), rng.normal(loc=0.4, size=(80, 2))
@@ -152,16 +196,40 @@ def test_grr_ate_accepts_a_callable_carrying_non_callable_metadata():
     assert result.estimand == "ATE"
 
 
-def test_every_coerced_basis_exposes_a_callable_copy():
-    """density_ratio calls .copy() unconditionally; coerce_basis must guarantee it."""
+def test_every_coerced_basis_can_actually_be_copied_and_fitted():
+    """density_ratio calls .copy().fit(...) unconditionally, so exercise both.
 
+    Checking ``callable(obj.copy)`` alone would not support removing the old
+    try/except: a callable ``copy`` can still raise when called.
+    """
+
+    X = np.linspace(-1.0, 1.0, 12).reshape(6, 2)
     for spec in [
         PolynomialBasis(degree=2),
         StatefulDuckBasis(),
         _MetadataCarryingCallable(),
-        lambda X: np.asarray(X, dtype=float),
+        _NonDeepcopyableCallable(),
+        lambda Z: np.column_stack([np.ones(len(Z)), Z]),
     ]:
-        assert callable(coerce_basis(spec).copy)
+        fitted = coerce_basis(spec).copy().fit(X)
+        assert np.asarray(fitted(X)).shape[0] == X.shape[0]
+
+
+def test_callable_basis_copy_shares_the_wrapped_feature_map():
+    """It must not deepcopy the user's callable, which may refuse to be copied."""
+
+    func = _NonDeepcopyableCallable()
+    wrapper = CallableBasis(func)
+    clone = wrapper.copy()
+    assert clone is not wrapper
+    assert clone.func is func
+
+
+def test_coerce_basis_rejects_a_base_basis_that_shadows_copy():
+    """A legible error, not 'NoneType' object is not callable from deep inside."""
+
+    with pytest.raises(TypeError, match="shadows the Basis method 'copy'"):
+        coerce_basis(_ShadowedCopyBasis())
 
 
 # ------------------------------------------------- basis parity across modules
@@ -191,6 +259,58 @@ def test_fit_density_ratio_does_not_mutate_the_caller_s_basis():
     assert duck.fit_calls == 0
     with pytest.raises(RuntimeError, match="before fit"):
         duck(Xn)
+
+
+def test_fit_density_ratio_accepts_a_non_deepcopyable_callable():
+    """Removing the try/except must not break a feature map that refuses deepcopy."""
+
+    Xn, Xd = _two_samples()
+    result = genriesz.fit_density_ratio(Xn, Xd, basis=_NonDeepcopyableCallable(), lam=0.1)
+    assert np.shape(result.beta) == (3,)
+
+
+def test_grr_ate_accepts_a_non_deepcopyable_callable():
+    X, Y = _ate_sample()
+    result = genriesz.grr_ate(
+        X=X, Y=Y, basis=_NonDeepcopyableCallable(), generator=SquaredGenerator(C=0.0)
+    )
+    assert result.estimand == "ATE"
+
+
+def test_fit_density_ratio_reports_a_shadowed_copy_instead_of_fitting_in_place():
+    """main swallowed the failure and fitted the caller's basis in place."""
+
+    Xn, Xd = _two_samples()
+    with pytest.raises(TypeError, match="shadows the Basis method 'copy'"):
+        genriesz.fit_density_ratio(Xn, Xd, basis=_ShadowedCopyBasis(), lam=0.1)
+
+
+def test_an_uncopyable_basis_fails_the_same_way_on_both_paths():
+    """The heart of item X-2.
+
+    On main, a Basis that refuses to be copied made ``fit_density_ratio``
+    silently succeed -- fitting the caller's object in place, against the
+    contract -- while ``grr_ate`` raised. Both must now raise.
+    """
+
+    Xn, Xd = _two_samples()
+    X, Y = _ate_sample()
+
+    with pytest.raises(TypeError, match="cannot deepcopy"):
+        genriesz.fit_density_ratio(Xn, Xd, basis=_UncopyableBasis(), lam=0.1)
+
+    with pytest.raises(TypeError, match="cannot deepcopy"):
+        genriesz.grr_ate(
+            X=X, Y=Y, basis=_UncopyableBasis(), generator=SquaredGenerator(C=0.0)
+        )
+
+
+def test_an_uncopyable_basis_is_not_fitted_in_place():
+    Xn, Xd = _two_samples()
+    basis = _UncopyableBasis()
+    with pytest.raises(TypeError, match="cannot deepcopy"):
+        genriesz.fit_density_ratio(Xn, Xd, basis=basis, lam=0.1)
+    assert basis.fitted_on is None
 
 
 def test_both_modules_delegate_to_the_shared_coerce_basis():

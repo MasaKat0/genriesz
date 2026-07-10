@@ -108,6 +108,20 @@ class CallableBasis(BaseBasis):
         self._derivative = derivative
         self._n_features: int | None = None
 
+    def copy(self) -> CallableBasis:
+        """Copy the wrapper, sharing the wrapped feature map.
+
+        ``BaseBasis.copy`` deep-copies, which would recurse into the user's
+        callable. A feature map is a pure function of ``X`` by contract, so
+        sharing it is safe, and it keeps working for callables that refuse to
+        be deep-copied (a bound resource, an open handle, a ``__deepcopy__``
+        that raises). Only ``_n_features``, which ``fit`` infers, is per-copy.
+        """
+
+        new = CallableBasis(self.func, derivative=self._derivative)
+        new._n_features = self._n_features
+        return new
+
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> CallableBasis:
         Phi = np.asarray(self.__call__(X), dtype=float)
         if Phi.ndim == 1:
@@ -169,8 +183,11 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     infers ``n_features`` by *calling* the wrapped object rather than by
     delegating to its ``fit``, so the user's ``fit`` would never run.
 
-    Every returned object has a callable ``copy``, either from
-    :class:`BaseBasis` or from the duck-typing check, so callers may rely on it.
+    Every returned object has a callable ``copy``: a :class:`BaseBasis` is
+    checked here, a duck-typed Basis by the predicate below, and
+    :class:`CallableBasis` supplies its own. Callers may therefore call
+    ``.copy()`` without guarding. Whether that call *succeeds* is the basis's
+    own responsibility, and a failure is reported rather than swallowed.
 
     Notes
     -----
@@ -184,6 +201,13 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.
     if isinstance(basis, BaseBasis):
+        if not callable(getattr(basis, "copy", None)):
+            raise TypeError(
+                f"{type(basis).__name__} shadows the Basis method 'copy' with a "
+                f"{type(getattr(basis, 'copy', None)).__name__}. genriesz fits a copy of "
+                "the basis, so 'copy' must be a method returning a new basis. Rename the "
+                "attribute."
+            )
         return basis
 
     # A user-defined Basis: ``copy`` and ``fit`` are part of the protocol, and
