@@ -161,10 +161,21 @@ class CallableBasis(BaseBasis):
         return np.asarray(out, dtype=float)
 
 
-# Descriptors whose ``__get__`` runs no user code, so resolving them is free of
-# side effects: plain functions and the C-level routines, the two method
-# wrappers, and the slot accessors that ``__slots__`` installs on the class.
-_INERT_DESCRIPTORS = (staticmethod, classmethod, types.MemberDescriptorType)
+# Attributes we may resolve with a normal lookup because binding them runs no
+# code the caller wrote: plain functions and the C-level routines, the two
+# method wrappers, and the slot accessors that ``__slots__`` installs.
+#
+# Spelled out rather than tested with ``inspect.isroutine``, which is duck-typed:
+# it answers True for any non-data descriptor, whose ``__get__`` is arbitrary.
+_INERT_DESCRIPTORS = (
+    types.FunctionType,
+    types.BuiltinFunctionType,
+    types.MethodDescriptorType,
+    types.WrapperDescriptorType,
+    staticmethod,
+    classmethod,
+    types.MemberDescriptorType,
+)
 
 
 def _instances_define_getattr(cls: type) -> bool:
@@ -189,8 +200,9 @@ def _lookup_method(obj: object, name: str) -> object | None:
     A static lookup returns the descriptor rather than the value, which is wrong
     for the ones that merely fetch: a method must come back bound, and a value
     stored in a ``__slots__`` member must come back as the value. Resolve those,
-    and only those. A ``@property`` stays unresolved, and therefore is not a
-    method.
+    and only those. A ``@property``, or any descriptor the caller wrote, stays
+    unresolved, and an object whose ``fit`` is one is therefore a feature map
+    rather than a Basis.
 
     An object that defines ``__getattr__`` has asked for dynamic resolution, and
     a Basis may legitimately be a proxy, so a name the static lookup missed is
@@ -203,7 +215,7 @@ def _lookup_method(obj: object, name: str) -> object | None:
         if _instances_define_getattr(type(obj)):
             return getattr(obj, name, None)
         return None
-    if inspect.isroutine(attr) or isinstance(attr, _INERT_DESCRIPTORS):
+    if isinstance(attr, _INERT_DESCRIPTORS):
         return getattr(obj, name, None)
     return attr
 

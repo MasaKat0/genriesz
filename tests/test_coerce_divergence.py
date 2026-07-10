@@ -490,6 +490,34 @@ def test_a_metaclass_getattr_does_not_make_instances_look_dynamic():
     assert isinstance(coerce_basis(_Map()), CallableBasis)
 
 
+def test_coerce_basis_does_not_run_a_custom_descriptor_named_fit():
+    """inspect.isroutine is duck-typed and answers True for any non-data descriptor.
+
+    Resolving one would run the caller's ``__get__``, which is what main's
+    grr_ate did. Only the descriptor types that merely fetch are resolved.
+    """
+
+    class _RaisingDescriptor:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("custom __get__ ran")
+
+    class _Map:
+        fit = _RaisingDescriptor()
+        copy = _RaisingDescriptor()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    X, Y = _ate_sample()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+    estimate = genriesz.grr_ate(X=X, Y=Y, basis=_Map(), generator=SquaredGenerator(C=0.0))
+    assert estimate.estimand == "ATE"
+
+
 def test_instances_define_getattr_sees_the_class_and_its_bases():
     class _Base:
         def __getattr__(self, name):
