@@ -589,7 +589,17 @@ def test_a_classmethod_is_inert_exactly_when_the_interpreter_stops_chaining():
     binding it, on every version, so it is inert whatever it holds.
     """
 
-    from genriesz.basis import _CLASSMETHOD_DELEGATES, _is_inert
+    from genriesz.basis import (
+        _CLASSMETHOD_DELEGATES,
+        _DELEGATING_WRAPPERS,
+        _INERT_DESCRIPTORS,
+        _is_inert,
+    )
+
+    # The invariant, stated where it can fail on either kind of interpreter. On
+    # one of them each half is vacuous, so only the pair pins the placement.
+    assert (classmethod in _DELEGATING_WRAPPERS) is _CLASSMETHOD_DELEGATES
+    assert (classmethod in _INERT_DESCRIPTORS) is not _CLASSMETHOD_DELEGATES
 
     class _RaisingDescriptor:
         """Raises if bound, and answers with a working basis if merely called."""
