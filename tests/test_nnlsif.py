@@ -77,3 +77,46 @@ def test_local_polynomial_nn_lsif_exclude_self_requires_room_for_neighbor():
             degree=0,
             exclude_self=True,
         )
+
+
+def test_non_euclidean_metric_raises_instead_of_being_ignored():
+    # An unsupported metric fails loudly with NotImplementedError, rather than
+    # being accepted and quietly ignored.
+    Z = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=float)
+    D = np.array([1, 1, 0, 0], dtype=int)
+
+    with pytest.raises(NotImplementedError, match="euclidean"):
+        nn_matching_inverse_propensity_weights(X=Z, D=D, M=1, metric="manhattan")
+
+
+def _algorithm_deprecation_cases():
+    Z = np.array([[0.0], [1.0], [2.0], [3.0]], dtype=float)
+    D = np.array([1, 1, 0, 0], dtype=int)
+    return [
+        lambda alg: nn_matching_inverse_propensity_weights(X=Z, D=D, M=1, algorithm=alg),
+        lambda alg: local_polynomial_nn_lsif_density_ratio(
+            numerator=Z, denominator=Z, eval_points=Z, M=2, algorithm=alg
+        ),
+        lambda alg: local_polynomial_nn_lsif_inverse_propensity_weights(
+            X=Z, D=D, M=1, algorithm=alg
+        ),
+    ]
+
+
+@pytest.mark.parametrize("call", _algorithm_deprecation_cases())
+def test_algorithm_keyword_is_deprecated_but_still_accepted(call):
+    # ``algorithm`` is a no-op kept for backward compatibility. A non-default
+    # value must warn (rather than be silently ignored) but still succeed.
+    with pytest.warns(DeprecationWarning, match="algorithm") as record:
+        call("kd_tree")
+    # Exactly one warning: the IPW wrapper must not double-warn by also
+    # forwarding `algorithm` to the inner density-ratio helper.
+    deprecations = [w for w in record if issubclass(w.category, DeprecationWarning)]
+    assert len(deprecations) == 1
+
+
+@pytest.mark.parametrize("call", _algorithm_deprecation_cases())
+def test_algorithm_default_does_not_warn(call, recwarn):
+    # The default "auto" must stay quiet, so ordinary callers see no warning.
+    call("auto")
+    assert not [w for w in recwarn.list if issubclass(w.category, DeprecationWarning)]

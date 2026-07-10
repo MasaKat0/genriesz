@@ -29,6 +29,7 @@ References:
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from functools import lru_cache
 from math import factorial
@@ -38,6 +39,25 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .utils import as_2d, standardize_columns
+
+
+def _warn_if_algorithm_requested(algorithm: str) -> None:
+    """Warn that the ``algorithm`` argument is a deprecated no-op.
+
+    The kNN search always uses SciPy's cKDTree, so ``algorithm`` has never had
+    any effect. It is kept for backward compatibility (the package is published)
+    and will be removed in a future release; anything other than the default
+    ``"auto"`` earns a ``DeprecationWarning`` rather than being silently ignored.
+    """
+
+    if algorithm != "auto":
+        warnings.warn(
+            "The 'algorithm' argument is deprecated and has no effect: the kNN "
+            "search always uses SciPy's cKDTree. It will be removed in a future "
+            "release.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
 
 
 def _as_1d_binary(x: ArrayLike, name: str) -> NDArray[np.int64]:
@@ -100,11 +120,15 @@ def nn_matching_inverse_propensity_weights(
         Number of nearest neighbors.
     standardize:
         If True, standardize X column-wise using the full sample (recommended).
-    metric, algorithm, n_jobs:
+    metric, n_jobs:
         Parameters for the kNN search, which always uses SciPy's cKDTree.
-        Only ``metric="euclidean"`` is implemented; ``algorithm`` is accepted
-        for API compatibility but ignored. ``n_jobs`` is passed to cKDTree as
+        Only ``metric="euclidean"`` is implemented; passing any other value
+        raises ``NotImplementedError``. ``n_jobs`` is passed to cKDTree as
         ``workers``.
+    algorithm:
+        Deprecated and ignored; the search always uses cKDTree. Passing any
+        value other than ``"auto"`` emits a ``DeprecationWarning``, and the
+        argument will be removed in a future release.
 
     Returns
     -------
@@ -139,6 +163,8 @@ def nn_matching_inverse_propensity_weights(
         raise ValueError("Both treatment groups must be non-empty.")
     if M > min(n0, n1):
         raise ValueError(f"M={M} is larger than min(n0, n1)={min(n0, n1)}.")
+
+    _warn_if_algorithm_requested(algorithm)
 
     if metric != "euclidean":
         raise NotImplementedError(
@@ -299,14 +325,20 @@ def local_polynomial_nn_lsif_density_ratio(
     exclude_self:
         If True, then when an eval point equals a denominator sample point, we attempt to
         exclude that identical point when defining the M-th neighbor radius.
-        This is mostly relevant for in-sample evaluation.
+        This is mostly relevant for in-sample evaluation. Only a single coincident
+        point (the nearest, at distance ~0) is dropped; if the same point occurs
+        several times among the neighbors, the exclusion is incomplete.
     ridge:
         A small ridge term added to H_hat(x) for numerical stability.
-    metric, algorithm, n_jobs:
+    metric, n_jobs:
         Parameters for the kNN search, which always uses SciPy's cKDTree.
-        Only ``metric="euclidean"`` is implemented; ``algorithm`` is accepted
-        for API compatibility but ignored. ``n_jobs`` is passed to cKDTree as
+        Only ``metric="euclidean"`` is implemented; passing any other value
+        raises ``NotImplementedError``. ``n_jobs`` is passed to cKDTree as
         ``workers``.
+    algorithm:
+        Deprecated and ignored; the search always uses cKDTree. Passing any
+        value other than ``"auto"`` emits a ``DeprecationWarning``, and the
+        argument will be removed in a future release.
     verbose:
         If True, prints progress every ~500 eval points.
 
@@ -342,6 +374,8 @@ def local_polynomial_nn_lsif_density_ratio(
 
     N1 = float(len(Z))
     N0 = float(len(X))
+
+    _warn_if_algorithm_requested(algorithm)
 
     if metric != "euclidean":
         raise NotImplementedError(
@@ -472,12 +506,20 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
     clip_min:
         Optional lower bound for weights. If not None, we set w = max(w, clip_min).
         This is a pragmatic safeguard because unconstrained LSIF may yield negative estimates.
+    kernel, exclude_self, ridge, metric, n_jobs, verbose:
+        Passed through to :func:`local_polynomial_nn_lsif_density_ratio`; see its
+        documentation.
+    algorithm:
+        Deprecated and ignored; emits a ``DeprecationWarning`` if set to anything
+        other than ``"auto"``. Will be removed in a future release.
 
     Returns
     -------
     LocalPolynomialLSIFWeights
         w aligns with the original sample order.
     """
+
+    _warn_if_algorithm_requested(algorithm)
 
     X_ = as_2d(X, name="X")
     D_ = _as_1d_binary(D, "D")
@@ -506,7 +548,6 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
         exclude_self=exclude_self,
         ridge=ridge,
         metric=metric,
-        algorithm=algorithm,
         n_jobs=n_jobs,
         verbose=verbose,
     )
@@ -522,7 +563,6 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
         exclude_self=exclude_self,
         ridge=ridge,
         metric=metric,
-        algorithm=algorithm,
         n_jobs=n_jobs,
         verbose=verbose,
     )
