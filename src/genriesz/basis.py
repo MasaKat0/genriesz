@@ -156,6 +156,43 @@ class CallableBasis(BaseBasis):
         return np.asarray(out, dtype=float)
 
 
+def coerce_basis(basis: Basis | Callable) -> Basis:
+    """Coerce a basis specification into a :class:`Basis`.
+
+    The public API documents that users may pass either a Basis instance or a
+    plain callable ``basis(X) -> Phi``. Only the latter is wrapped in
+    :class:`CallableBasis`.
+
+    A stateful basis defined outside this package satisfies :class:`Basis`
+    without inheriting from :class:`BaseBasis`, so it is recognised by duck
+    typing. Wrapping such an object would be wrong: ``CallableBasis.fit``
+    infers ``n_features`` by *calling* the wrapped object rather than by
+    delegating to its ``fit``, so the user's ``fit`` would never run.
+
+    Notes
+    -----
+    Do **not** probe ``basis.n_features`` here. Many bases (e.g.
+    :class:`PolynomialBasis` and :class:`TreatmentInteractionBasis`) expose
+    ``n_features`` as a property that is only valid *after* ``fit()``.
+    Accessing it early would raise, and ``hasattr(obj, 'n_features')`` would
+    inadvertently trigger that property.
+    """
+
+    # CallableBasis is a BaseBasis, so this covers every built-in basis.
+    if isinstance(basis, BaseBasis):
+        return basis
+
+    # A user-defined Basis: ``copy`` and ``fit`` are part of the protocol.
+    if hasattr(basis, "fit") and hasattr(basis, "copy") and callable(basis):
+        return basis  # type: ignore[return-value]
+
+    # Otherwise, interpret it as a raw callable feature map.
+    if callable(basis):
+        return CallableBasis(basis)
+
+    raise TypeError("basis must be a Basis instance or a callable basis(X)->Phi")
+
+
 class PolynomialBasis(BaseBasis):
     """Full polynomial features up to a given total degree.
 
