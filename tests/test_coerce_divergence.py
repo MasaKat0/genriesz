@@ -1103,28 +1103,53 @@ def test_a_bound_method_is_a_method():
     assert np.shape(ratio.beta) == (3,)
 
 
-def test_is_inert_walks_a_deep_nest_and_stops_on_any_cycle():
-    """A finite nest is what the interpreter would bind. Only a cycle is refused."""
+def test_is_inert_walks_a_deep_nest_and_stops_on_any_cycle(monkeypatch):
+    """A finite nest is what the interpreter would bind. Only a cycle is refused.
 
-    import functools
+    The wrappers this module knows cannot express a deep nest on every version:
+    ``functools.partialmethod`` flattens in its constructor, and ``classmethod``
+    is unwrapped only where the interpreter chains descriptors. So the algorithm
+    is exercised through a wrapper registered for the test, which is the thing a
+    fixed depth bound would get wrong.
+    """
 
-    from genriesz.basis import _is_inert
+    from genriesz import basis as basis_module
+
+    class _Chain:
+        def __init__(self, wrapped):
+            self.wrapped = wrapped
+
+        def __get__(self, obj, objtype=None):
+            return self.wrapped.__get__(obj, objtype)
+
+    monkeypatch.setitem(basis_module._DELEGATING_WRAPPERS, _Chain, lambda attr: attr.wrapped)
 
     def _f(self, X=None, y=None):
         return self
 
-    deep = functools.partialmethod(_f)
-    for _ in range(25):  # deeper than any fixed bound this module used to carry
-        deep = functools.partialmethod(deep)
-    assert _is_inert(deep)
+    deep = _f
+    for _ in range(64):  # deeper than any fixed bound this module used to carry
+        deep = _Chain(deep)
+    assert basis_module._is_inert(deep)
 
-    cyclic = functools.partialmethod(_f)
-    cyclic.func = cyclic
-    assert not _is_inert(cyclic)
+    self_cycle = _Chain(None)
+    self_cycle.wrapped = self_cycle
+    assert not basis_module._is_inert(self_cycle)
 
-    left, right = functools.partialmethod(_f), functools.partialmethod(_f)
-    left.func, right.func = right, left  # a cycle no depth counter distinguishes
-    assert not _is_inert(left)
+    left, right = _Chain(None), _Chain(None)
+    left.wrapped, right.wrapped = right, left  # a cycle a depth counter cannot name
+    assert not basis_module._is_inert(left)
+
+
+def test_partialmethod_flattens_so_its_nesting_cannot_go_deep():
+    """Recorded because it is why the wrapper walk needs a synthetic wrapper to test."""
+
+    import functools
+
+    def _f(self, X=None, y=None):
+        return self
+
+    assert functools.partialmethod(functools.partialmethod(_f)).func is _f
 
 
 def test_only_the_standard_getattribute_is_trusted():
