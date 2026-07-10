@@ -583,6 +583,9 @@ def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
     check written against 3.13 alone would let the caller's ``__get__`` run on
     every other supported version. Decide by type, not by what today's
     interpreter happens to do.
+
+    ``staticmethod`` is the contrast: it hands back what it wraps without
+    binding it, on every version, so it is inert whatever it holds.
     """
 
     from genriesz.basis import _is_inert
@@ -596,7 +599,8 @@ def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
 
     assert _is_inert(classmethod(_plain_fit))
     assert not _is_inert(classmethod(_RaisingDescriptor()))
-    assert not _is_inert(staticmethod(_RaisingDescriptor()))
+    assert _is_inert(staticmethod(_RaisingDescriptor()))
+    assert staticmethod(_RaisingDescriptor()).__get__(object(), object) is not None
 
     class _Map:
         fit = classmethod(_RaisingDescriptor())
@@ -610,6 +614,210 @@ def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
 
     Xn, Xd = _two_samples()
     assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_setter_only_descriptor_does_not_outrank_the_instance_dict():
+    """A data descriptor needs a ``__get__`` to answer a *read*.
+
+    ``__set__`` alone does not shadow the instance dict. Treating it as though it
+    did reports the class attribute as the method, and the object is called a
+    Basis on the strength of a value attribute access would never return.
+    """
+
+    class _SetterOnly:
+        def __set__(self, obj, value):
+            pass
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    class _Map:
+        fit = _SetterOnly()
+        copy = _SetterOnly()
+
+        def __init__(self):
+            object.__getattribute__(self, "__dict__").update(fit=None, copy=None)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert _Map().copy is None  # what attribute access actually returns
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_class_object_is_a_feature_map_not_a_basis():
+    """The Basis protocol lives on instances. A class passed as a basis is a callable."""
+
+    class _Trap:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("custom __get__ ran")
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    class _ClassFeature:
+        fit = _Trap()
+        copy = _Trap()
+
+        def __new__(cls, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_ClassFeature), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    ratio = genriesz.fit_density_ratio(Xn, Xd, basis=_ClassFeature, lam=0.1)
+    assert np.shape(ratio.beta) == (3,)
+
+
+def test_an_object_that_writes_getattribute_is_not_certified_as_a_basis():
+    """A static answer says nothing about what ``basis.fit`` will return."""
+
+    class _Map:
+        def fit(self, X, y=None):
+            return self
+
+        def copy(self):
+            return _Map()
+
+        def __getattribute__(self, name):
+            if name in ("fit", "copy"):
+                raise RuntimeError(f"blocked {name}")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_builtin_getattribute_does_not_disqualify_a_basis():
+    """dict, list and the rest install their own ``__getattribute__`` in C.
+
+    Only a ``__getattribute__`` the caller wrote makes the static answer a lie.
+    """
+
+    class _DictBasis(dict):  # dict.__dict__ carries a __getattribute__ slot wrapper
+        def fit(self, X, y=None):
+            return self
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _DictBasis()
+    assert coerce_basis(basis) is basis
+
+
+def test_a_staticmethod_is_inert_whatever_it_wraps():
+    """staticmethod.__get__ returns the wrapped object; it never binds it.
+
+    Unwrapping it as though it delegated refuses a basis main accepted.
+    """
+
+    class _CallableTrap:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("__get__ must not run")
+
+        def __call__(self, *args, **kwargs):
+            return _StaticBasis()
+
+    class _StaticBasis(BaseBasis):
+        fit = staticmethod(_CallableTrap())
+        copy = staticmethod(_CallableTrap())
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _StaticBasis()
+    assert coerce_basis(basis) is basis
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_StaticBasis(), lam=0.1).beta) == (3,)
+
+
+def test_an_unset_slot_falls_through_to_getattr():
+    """Attribute access answers an unset slot by consulting ``__getattr__`` next."""
+
+    class _DynamicSlot(BaseBasis):
+        __slots__ = ("copy",)
+
+        def __getattr__(self, name):
+            if name == "copy":
+                return lambda: _DynamicSlot()
+            raise AttributeError(name)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _DynamicSlot()
+    assert callable(basis.copy)
+    assert coerce_basis(basis) is basis
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_DynamicSlot(), lam=0.1).beta) == (3,)
+
+
+def test_a_descriptor_lifted_from_an_unrelated_class_is_not_bound():
+    """A slot accessor carries the class it was defined on, and refuses others."""
+
+    class _Donor:
+        __slots__ = ("fit",)
+
+    class _DonorDict:
+        pass
+
+    class _ForeignSlotMap:
+        fit = _Donor.__dict__["fit"]
+
+        def copy(self):
+            return _ForeignSlotMap()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    class _ForeignDictMap:
+        __dict__ = _DonorDict.__dict__["__dict__"]
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    Xn, Xd = _two_samples()
+    for factory in (_ForeignSlotMap, _ForeignDictMap):
+        assert isinstance(coerce_basis(factory()), CallableBasis)
+        assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=factory(), lam=0.1).beta) == (3,)
+
+
+def test_the_shadowed_copy_error_does_not_consult_a_hostile_metaclass():
+    """Naming the offending type must not read ``__name__`` through the metaclass."""
+
+    class _NameBlockingMeta(type):
+        def __getattribute__(cls, name):
+            if name == "__name__":
+                raise RuntimeError("metaclass __name__ ran")
+            return type.__getattribute__(cls, name)
+
+    class _BadCopy(BaseBasis, metaclass=_NameBlockingMeta):
+        copy = None
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    with pytest.raises(TypeError, match="shadows the Basis method 'copy'"):
+        coerce_basis(_BadCopy())
 
 
 def test_a_data_descriptor_outranks_the_instance_dict():
