@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import types
 import warnings
 from collections.abc import Callable
 from typing import Protocol
@@ -160,23 +161,39 @@ class CallableBasis(BaseBasis):
         return np.asarray(out, dtype=float)
 
 
+# Descriptors whose ``__get__`` runs no user code, so resolving them is free of
+# side effects: plain functions and the C-level routines, the two method
+# wrappers, and the slot accessors that ``__slots__`` installs on the class.
+_INERT_DESCRIPTORS = (staticmethod, classmethod, types.MemberDescriptorType)
+
+
 def _lookup_method(obj: object, name: str) -> object | None:
-    """Find a method without running descriptors that we can avoid running.
+    """Find a method without running code that deciding a type should not run.
 
-    Deciding whether ``obj`` is a Basis must not execute the user's code, so
-    the attribute is read statically: a ``@property`` named ``fit`` comes back
-    as the property object, not as whatever the getter would raise or return.
+    Reading the attribute normally would execute any descriptor behind it. This
+    module already refuses to probe ``n_features`` for that reason, and ``fit``
+    and ``copy`` are no different: a caller's feature map may define either as a
+    ``@property`` whose getter raises. So look the name up statically first.
 
-    An object that defines ``__getattr__`` has asked for dynamic attribute
-    resolution, and a Basis may legitimately be a proxy. Only there do we fall
-    back to a normal lookup, and only for names the static lookup did not find.
+    A static lookup returns the descriptor rather than the value, which is wrong
+    for the ones that merely fetch: a method must come back bound, and a value
+    stored in a ``__slots__`` member must come back as the value. Resolve those,
+    and only those. A ``@property`` stays unresolved, and therefore is not a
+    method.
+
+    An object that defines ``__getattr__`` has asked for dynamic resolution, and
+    a Basis may legitimately be a proxy, so a name the static lookup missed is
+    fetched normally. Its ``__getattr__`` must raise ``AttributeError`` for a
+    missing name, as the data model requires; anything else propagates.
     """
 
     attr = inspect.getattr_static(obj, name, None)
-    if attr is None and hasattr(type(obj), "__getattr__"):
-        attr = getattr(obj, name, None)
-    if isinstance(attr, (staticmethod, classmethod)):
-        return attr.__func__
+    if attr is None:
+        if hasattr(type(obj), "__getattr__"):
+            return getattr(obj, name, None)
+        return None
+    if inspect.isroutine(attr) or isinstance(attr, _INERT_DESCRIPTORS):
+        return getattr(obj, name, None)
     return attr
 
 
@@ -201,12 +218,17 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
 
     Notes
     -----
-    Deciding what ``basis`` *is* must not run ``basis``'s code. Do not probe
-    ``basis.n_features``: many bases (e.g. :class:`PolynomialBasis` and
-    :class:`TreatmentInteractionBasis`) expose it as a property that only works
-    after ``fit()``, and ``hasattr(obj, 'n_features')`` would trigger it. The
-    same hazard applies to ``fit`` and ``copy``, which a caller's feature map
-    may define as properties, so both go through :func:`_lookup_method`.
+    Deciding what ``basis`` *is* must not run ``basis``'s code where that can be
+    avoided. Do not probe ``basis.n_features``: many bases (e.g.
+    :class:`PolynomialBasis` and :class:`TreatmentInteractionBasis`) expose it as
+    a property that only works after ``fit()``, and ``hasattr(obj, 'n_features')``
+    would trigger it. The same hazard applies to ``fit`` and ``copy``, which a
+    caller's feature map may define as properties, so both go through
+    :func:`_lookup_method`. The one place code does run is that helper's
+    ``__getattr__`` fallback, for objects that opted into dynamic attributes.
+
+    Define ``fit`` and ``copy`` as methods. A property named ``fit`` is read as
+    a property, not as a method, and the object is treated as a feature map.
     """
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.

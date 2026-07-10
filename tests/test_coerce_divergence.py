@@ -117,6 +117,22 @@ class _ProxyBasis:
         return self._inner(X)
 
 
+class _BadGetattrCallable:
+    """``__getattr__`` raises ValueError for a missing name, breaking the data model.
+
+    The dynamic fallback in ``_lookup_method`` cannot ask such an object a
+    question safely, so the error propagates. ``hasattr`` on main behaved the
+    same way, which is why main's ``grr_ate`` already raised.
+    """
+
+    def __getattr__(self, name):
+        raise ValueError(f"no attribute {name}")
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+
 class _StatefulCallable:
     """A feature map that caches the first sample it sees.
 
@@ -264,15 +280,21 @@ def test_coercing_a_copyable_basis_yields_something_copy_and_fit_can_be_called_o
 
 
 def test_callable_basis_copy_isolates_the_wrapped_feature_map():
-    """Cross-fitting refits a copy per fold, so the copy must not share state."""
+    """Cross-fitting refits a copy per fold, so no two copies may share state."""
 
     func = _StatefulCallable()
     wrapper = CallableBasis(func)
-    clone = wrapper.copy()
+    fold_a, fold_b = wrapper.copy(), wrapper.copy()
 
-    assert clone.func is not func
-    clone.func(np.zeros((3, 2)))
-    assert func.seen is None  # the original never saw the clone's data
+    # Distinct from the original and, crucially, from each other.
+    assert fold_a.func is not func
+    assert fold_b.func is not func
+    assert fold_a.func is not fold_b.func
+
+    fold_a.func(np.zeros((3, 2)))
+    fold_b.func(np.ones((3, 2)))
+    assert func.seen is None
+    assert not np.array_equal(fold_a.func.seen, fold_b.func.seen)
 
 
 def test_coerce_basis_rejects_a_base_basis_that_shadows_copy():
@@ -311,6 +333,117 @@ def test_coerce_basis_still_recognises_a_basis_behind_getattr():
 
     proxy = _ProxyBasis()
     assert coerce_basis(proxy) is proxy
+
+
+def test_coerce_basis_propagates_a_getattr_that_breaks_the_data_model():
+    """Deliberate. __getattr__ must raise AttributeError for a missing name.
+
+    main's grr_ate raised here too, for the same reason: hasattr only swallows
+    AttributeError. Only main's fit_density_ratio 'worked', by never asking.
+    """
+
+    with pytest.raises(ValueError, match="no attribute fit"):
+        coerce_basis(_BadGetattrCallable())
+
+
+def test_coerce_basis_handles_slots_staticmethod_and_classmethod_bases():
+    """getattr_static returns the raw descriptor, so unwrap the two that need it."""
+
+    class SlotsDuck:
+        __slots__ = ("_seen",)
+
+        def __init__(self):
+            self._seen = None
+
+        def fit(self, X, y=None):
+            self._seen = np.asarray(X, dtype=float).mean(axis=0)
+            return self
+
+        def copy(self):
+            return SlotsDuck()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    class StaticDuck:
+        @staticmethod
+        def fit(X, y=None):
+            return StaticDuck()
+
+        @staticmethod
+        def copy():
+            return StaticDuck()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    class ClassDuck:
+        @classmethod
+        def fit(cls, X, y=None):
+            return cls()
+
+        @classmethod
+        def copy(cls):
+            return cls()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    for duck in [SlotsDuck(), StaticDuck(), ClassDuck()]:
+        assert coerce_basis(duck) is duck
+
+
+def test_coerce_basis_recognises_methods_stored_in_slots():
+    """getattr_static returns the slot descriptor, not the callable inside it.
+
+    Reading a slot runs no user code, so it is safe to resolve. Failing to do so
+    wrapped the basis and skipped its fit -- the very bug X-2 removes.
+    """
+
+    class SlotMethodBasis:
+        __slots__ = ("fit", "copy", "_seen")
+
+        def __init__(self):
+            self._seen = None
+            self.fit = self._fit
+            self.copy = lambda: SlotMethodBasis()
+
+        def _fit(self, X, y=None):
+            self._seen = np.asarray(X, dtype=float).mean(axis=0)
+            return self
+
+        def __call__(self, X):
+            if self._seen is None:
+                raise RuntimeError("SlotMethodBasis used before fit()")
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X - self._seen])
+
+    basis = SlotMethodBasis()
+    assert coerce_basis(basis) is basis
+
+    X, Y = _ate_sample()
+    result = genriesz.grr_ate(
+        X=X, Y=Y, basis=SlotMethodBasis(), generator=SquaredGenerator(C=0.0)
+    )
+    assert result.estimand == "ATE"
+
+    Xn, Xd = _two_samples()
+    ratio = genriesz.fit_density_ratio(Xn, Xd, basis=SlotMethodBasis(), lam=0.1)
+    assert np.shape(ratio.beta) == (3,)
+
+
+def test_coerce_basis_wraps_a_partial_and_a_ufunc():
+    import functools
+
+    def phi(X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(functools.partial(phi)), CallableBasis)
+    assert isinstance(coerce_basis(np.exp), CallableBasis)
 
 
 def test_both_paths_accept_a_proxy_basis():
@@ -382,7 +515,32 @@ def test_a_stateful_callable_basis_does_not_leak_across_cross_fitting_folds():
     X, Y = _ate_sample()
     func = _StatefulCallable()
     genriesz.grr_ate(X=X, Y=Y, basis=func, generator=SquaredGenerator(C=0.0))
-    assert func.seen is None
+    assert func.seen is None  # the caller's object was never fitted
+
+
+def test_each_fold_gets_its_own_copy_of_a_stateful_callable():
+    """Pin what the leak test above can only imply: the folds see different data.
+
+    Every copy records the sample it was fitted on. Cross-fitting must produce
+    more than one distinct record, which sharing the callable could not.
+    """
+
+    X, Y = _ate_sample()
+    seen: list[np.ndarray] = []
+
+    class _Recording(_StatefulCallable):
+        def __call__(self, Z):
+            first = self.seen is None
+            out = super().__call__(Z)
+            if first:
+                seen.append(np.asarray(self.seen, dtype=float).copy())
+            return out
+
+    genriesz.grr_ate(X=X, Y=Y, basis=_Recording(), generator=SquaredGenerator(C=0.0))
+
+    assert len(seen) >= 2
+    distinct = {tuple(np.round(row, 12)) for row in seen}
+    assert len(distinct) >= 2
 
 
 def test_fit_density_ratio_reports_a_shadowed_copy_instead_of_fitting_in_place():
