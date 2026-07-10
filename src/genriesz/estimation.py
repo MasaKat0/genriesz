@@ -33,7 +33,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize
 
-from .basis import BaseBasis, Basis, CallableBasis
+from .basis import Basis, coerce_basis
 from .functionals import (
     AMEFunctional,
     ATEFunctional,
@@ -48,6 +48,7 @@ from .generators import (
     BPGenerator,
     BregmanGenerator,
     UKLGenerator,
+    coerce_generator,
 )
 from .glm import GRRGLM, OutcomeGLM
 from .matching import (
@@ -197,43 +198,6 @@ def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...
     return tuple(out)
 
 
-def _coerce_basis(basis: Basis | Callable) -> Basis:
-    """Coerce a raw callable into a Basis implementation.
-
-    The public API documents that users may pass either a Basis instance
-    or a plain callable ``basis(X) -> Phi``. The latter is wrapped in
-    :class:`genriesz.CallableBasis`.
-
-    Notes
-    -----
-    Do **not** probe ``basis.n_features`` here. Many bases (e.g.
-    :class:`~genriesz.PolynomialBasis` and
-    :class:`~genriesz.TreatmentInteractionBasis`) expose ``n_features`` as
-    a property that is only valid *after* ``fit()``. Accessing it early
-    would raise, and ``hasattr(obj, 'n_features')`` would inadvertently
-    trigger that property.
-    """
-
-    # If it already behaves like a Basis, keep it.
-    if isinstance(basis, CallableBasis):
-        return basis
-
-    # All built-in bases inherit from BaseBasis.
-    if isinstance(basis, BaseBasis):
-        return basis
-
-    # Accept user-defined basis objects via duck typing, without touching
-    # the potentially-unfitted ``n_features`` property.
-    if hasattr(basis, 'fit') and hasattr(basis, 'copy') and callable(basis):  # type: ignore[arg-type]
-        return basis  # type: ignore[return-value]
-
-    # Otherwise, interpret it as a raw callable feature map.
-    if callable(basis):
-        return CallableBasis(basis)
-
-    raise TypeError('basis must be a Basis instance or a callable basis(X)->Phi')
-
-
 def _coerce_functional(m: LinearFunctional | Callable) -> LinearFunctional:
     """Coerce a functional argument into a :class:`LinearFunctional`.
 
@@ -334,7 +298,7 @@ def grr_functional(
     Y: ArrayLike,
     m: LinearFunctional | Callable,
     basis: Basis | Callable,
-    generator: BregmanGenerator | None = None,
+    generator: BregmanGenerator | str | None = None,
     g: Callable | None = None,
     grad_g: Callable | None = None,
     inv_grad_g: Callable | None = None,
@@ -391,7 +355,14 @@ def grr_functional(
     generator:
         Bregman generator used for GRR. If None, you can pass a generator
         function via ``g`` (and optionally ``grad_g``, ``inv_grad_g``,
-        ``grad2_g``).
+        ``grad2_g``). The name ``'sq'`` (or ``'squared'``, ``'lsif'``) is
+        accepted as a shorthand for ``SquaredGenerator(C=0.0)``. Branch-wise
+        generators cannot be named here: a Riesz representer is negative on
+        the control units, so the branch depends on the estimand and must be
+        supplied explicitly, e.g.
+        ``BKLGenerator(C=1.0, branch_fn=lambda x: int(x[treatment_index] == 1.0))``.
+        Contrast :func:`genriesz.fit_density_ratio`, where a density ratio is
+        nonnegative and every branch-wise name is therefore well defined.
     riesz_method:
         - "grr"            : solve the GRR optimization problem
         - "nn_matching"    : NN-matching inverse propensity weights (**ATE-only** convenience)
@@ -412,9 +383,9 @@ def grr_functional(
     m = _coerce_functional(m)
 
     # Coerce raw callables into Basis objects (README-friendly)
-    basis = _coerce_basis(basis)
+    basis = coerce_basis(basis)
     if outcome_basis is not None:
-        outcome_basis = _coerce_basis(outcome_basis)
+        outcome_basis = coerce_basis(outcome_basis)
 
     ests = _canonical_estimators(estimators)
 
@@ -453,6 +424,11 @@ def grr_functional(
             if g is None:
                 raise ValueError("When riesz_method='grr', you must provide generator or g.")
             generator = BregmanGenerator(g=g, grad=grad_g, inv_grad=inv_grad_g, grad2=grad2_g)
+        else:
+            # Reject anything that is not a generator before it reaches the solver,
+            # and refuse branch-wise names: a Riesz representer is signed, so the
+            # branch cannot be inferred from the name (a density ratio's can).
+            generator = coerce_generator(generator, allow_branchwise_names=False)
 
         if isinstance(m, (ATTFunctional, DIDFunctional)) and isinstance(
             generator, (UKLGenerator, BPGenerator, BKLGenerator, BoundedBKLGenerator)
@@ -1184,7 +1160,7 @@ def grr_ate(
     Y: ArrayLike,
     treatment_index: int = 0,
     basis: Basis | Callable,
-    generator: BregmanGenerator | None = None,
+    generator: BregmanGenerator | str | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
     """Estimate ATE with the GRR API."""
@@ -1199,7 +1175,7 @@ def grr_att(
     Y: ArrayLike,
     treatment_index: int = 0,
     basis: Basis | Callable,
-    generator: BregmanGenerator | None = None,
+    generator: BregmanGenerator | str | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
     """Estimate ATT with the GRR API."""
@@ -1220,7 +1196,7 @@ def grr_did(
     Y1: ArrayLike,
     treatment_index: int = 0,
     basis: Basis | Callable,
-    generator: BregmanGenerator | None = None,
+    generator: BregmanGenerator | str | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
     """Panel DID implemented as ATT on ΔY = Y1-Y0."""
@@ -1245,7 +1221,7 @@ def grr_ame(
     Y: ArrayLike,
     coordinate: int = 0,
     basis: Basis | Callable,
-    generator: BregmanGenerator | None = None,
+    generator: BregmanGenerator | str | None = None,
     **kwargs,
 ) -> FunctionalEstimate:
     """Estimate an average marginal effect (average derivative) wrt x_coordinate."""

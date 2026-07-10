@@ -16,6 +16,8 @@ All docstrings and comments are in English as requested.
 from __future__ import annotations
 
 import copy
+import functools
+import types
 import warnings
 from collections.abc import Callable
 from typing import Protocol
@@ -68,6 +70,9 @@ class BaseBasis:
         return self
 
     def copy(self):
+        # Cross-fitting refits a copy per fold, so the copy must not share state
+        # with the original or with the other folds. Sharing anything mutable
+        # here would let one fold's training data reach another fold's features.
         return copy.deepcopy(self)
 
     @property
@@ -154,6 +159,397 @@ class CallableBasis(BaseBasis):
             return super().derivative(X, coordinate)
         out = self._derivative(X, int(coordinate))
         return np.asarray(out, dtype=float)
+
+
+# A class's ``__mro__``, ``__dict__`` and ``__name__`` read through the
+# *metaclass*, whose ``__getattribute__`` the caller may have written. Invoke
+# type's own accessors instead: they read the C-level slots and run nothing.
+_type_mro = type.__dict__["__mro__"].__get__
+_type_dict = type.__dict__["__dict__"].__get__
+_type_name = type.__dict__["__name__"].__get__
+
+
+# A distinct absence marker: ``None`` is a legitimate attribute value.
+_MISSING = object()
+
+
+def _classmethod_delegates() -> bool:
+    """Whether ``classmethod.__get__`` calls the ``__get__`` of what it wraps.
+
+    Chained classmethod descriptors were deprecated in 3.11 and removed in 3.13.
+    Ask the interpreter rather than the version: the answer is what decides
+    whether wrapping a descriptor in ``classmethod`` can run the caller's code.
+    """
+
+    class _Probe:
+        ran = False
+
+        def __get__(self, obj, objtype=None):
+            _Probe.ran = True
+
+    class _Holder:
+        attr = classmethod(_Probe())
+
+    bound = _Holder().attr  # noqa: F841 - the point is the binding, not the value
+    return _Probe.ran
+
+
+_CLASSMETHOD_DELEGATES = _classmethod_delegates()
+
+
+# Descriptor types whose ``__get__`` is implemented in C and merely fetches:
+# plain functions and the C-level routines, the slot accessors that ``__slots__``
+# installs, a bound method (which returns itself, and became a descriptor in
+# 3.13), and ``staticmethod``, which hands back what it wraps without binding it.
+# Membership is tested by *exact* type, never with ``isinstance``: a subclass may
+# override ``__get__`` with anything at all.
+#
+# Spelled out rather than tested with ``inspect.isroutine``, which is duck-typed:
+# it answers True for any non-data descriptor, whose ``__get__`` is arbitrary.
+_INERT_DESCRIPTORS = frozenset(
+    {
+        types.FunctionType,
+        types.BuiltinFunctionType,
+        types.MethodType,
+        types.MethodDescriptorType,
+        types.WrapperDescriptorType,
+        types.MemberDescriptorType,
+        types.ClassMethodDescriptorType,
+        staticmethod,
+    }
+    | (set() if _CLASSMETHOD_DELEGATES else {classmethod})
+)
+
+
+# Wrappers whose ``__get__`` delegates to the object they wrap, and so are inert
+# only as far as that object is. ``partialmethod`` delegates on every version;
+# ``classmethod`` only where the interpreter still chains descriptors, and it is
+# inert outright everywhere else. ``staticmethod`` never delegates -- it returns
+# what it wraps untouched. Keyed by exact type, for the reason given above.
+_DELEGATING_WRAPPERS = {functools.partialmethod: lambda attr: attr.func}
+if _CLASSMETHOD_DELEGATES:
+    _DELEGATING_WRAPPERS[classmethod] = lambda attr: attr.__func__
+
+
+# Descriptors that carry the class they were defined on and refuse to bind to
+# anything else. A plain function's ``__objclass__``, if the caller sets one, is
+# metadata and constrains nothing, so only these types are asked.
+_BINDING_CONSTRAINED = frozenset(
+    {
+        types.MemberDescriptorType,
+        types.GetSetDescriptorType,
+        types.MethodDescriptorType,
+        types.WrapperDescriptorType,
+        types.ClassMethodDescriptorType,
+    }
+)
+
+
+def _dict_lookup(namespace, name: str) -> object:
+    """Find a string key without letting the caller's keys answer the question.
+
+    ``name in namespace`` hashes ``name`` and compares it against every colliding
+    entry, and a namespace -- a class body, or an instance dict written through
+    ``obj.__dict__`` -- may hold a key whose ``__hash__`` collides and whose
+    ``__eq__`` is the caller's code. Iterating compares nothing.
+    """
+
+    for key, value in namespace.items():
+        if type(key) is str and key == name:
+            return value
+    return _MISSING
+
+
+def _class_lookup(cls: type, name: str) -> object:
+    """Find ``name`` in ``cls``'s MRO without consulting the metaclass."""
+
+    for klass in _type_mro(cls):
+        found = _dict_lookup(_type_dict(klass), name)
+        if found is not _MISSING:
+            return found
+    return _MISSING
+
+
+def _defines(cls: type, name: str) -> bool:
+    return _class_lookup(cls, name) is not _MISSING
+
+
+def _is_subclass(cls: type, parent: type) -> bool:
+    """``issubclass`` without the ``__class__`` and ``__subclasscheck__`` hooks.
+
+    ``isinstance(obj, C)`` reads ``obj.__class__`` when the type check misses,
+    and that is the caller's ``__getattribute__``. Deciding what an object *is*
+    must not ask the object.
+    """
+
+    return any(klass is parent for klass in _type_mro(cls))
+
+
+def _is_inert(attr: object) -> bool:
+    """Whether binding ``attr`` would run code the caller wrote.
+
+    An object that is not a descriptor at all binds to itself, so it is inert.
+    A descriptor is inert only if its ``__get__`` is one of the C fetchers, or
+    if it is a wrapper (see ``_DELEGATING_WRAPPERS``) around something inert:
+    ``partialmethod(f)`` is safe for a function ``f`` and unsafe for a descriptor
+    the caller defined, because its ``__get__`` delegates to the wrapped one's.
+
+    A wrapper reached twice is a cycle -- ``pm.func = pm`` -- and is reported as
+    not inert, which leaves it unresolved. A deep but finite nest is walked to
+    the end, because binding it is what the interpreter would do.
+    """
+
+    seen: list[object] = []
+    while True:
+        cls = type(attr)
+        unwrap = _DELEGATING_WRAPPERS.get(cls)
+        if unwrap is None:
+            return cls in _INERT_DESCRIPTORS or not _defines(cls, "__get__")
+        if any(attr is wrapper for wrapper in seen):
+            return False
+        seen.append(attr)
+        attr = unwrap(attr)
+        if _overrides_attribute_access(type(attr)):
+            # ``partialmethod.__get__`` delegates by *reading* ``func.__get__``,
+            # so the wrapped object's own attribute access runs before any of the
+            # reasoning below applies.
+            return False
+
+
+def _is_data_descriptor(attr: object) -> bool:
+    """Whether ``attr`` outranks the instance dict when the attribute is *read*.
+
+    A ``__set__`` alone does not do it. Reading consults the instance dict first
+    unless the class attribute can answer the read, which means it needs a
+    ``__get__`` as well.
+    """
+
+    cls = type(attr)
+    if not _defines(cls, "__get__"):
+        return False
+    return _defines(cls, "__set__") or _defines(cls, "__delete__")
+
+
+def _descriptor_binds_to(descriptor: object, cls: type) -> bool:
+    """Whether ``descriptor.__get__`` would accept an instance of ``cls``.
+
+    A slot accessor or a C routine carries the class it was defined on. Lifted
+    onto an unrelated class it still looks like the right type, but binding it
+    raises. Only those types are asked: a caller may set ``__objclass__`` on a
+    plain function as metadata, where it constrains nothing, and reading it off
+    an arbitrary object would run that object's ``__getattribute__``.
+    """
+
+    if type(descriptor) not in _BINDING_CONSTRAINED:
+        return True
+    owner = descriptor.__objclass__  # type: ignore[attr-defined]
+    return any(klass is owner for klass in _type_mro(cls))
+
+
+def _overrides_attribute_access(cls: type) -> bool:
+    """Whether ``cls`` decides for itself what attribute access returns.
+
+    A static answer then says nothing about what ``obj.fit`` will hand back, so
+    the object cannot be certified as a Basis on the strength of one.
+
+    Only the first ``__getattribute__`` in the MRO is consulted, since that is
+    the one attribute access uses. ``object``, ``dict`` and the other built-ins
+    each install their own as a C slot wrapper bound to themselves; anything else
+    -- a function, ``None``, or a slot wrapper lifted off an unrelated class --
+    is not the standard machinery and is not trusted.
+    """
+
+    for klass in _type_mro(cls):
+        getattribute = _dict_lookup(_type_dict(klass), "__getattribute__")
+        if getattribute is _MISSING:
+            continue
+        if type(getattribute) is not types.WrapperDescriptorType:
+            return True
+        return not _descriptor_binds_to(getattribute, cls)
+    return False
+
+
+def _instance_dict(obj: object) -> dict | None:
+    """``obj``'s own attribute dict, or None if it has none we can read safely."""
+
+    descriptor = _class_lookup(type(obj), "__dict__")
+    if type(descriptor) is not types.GetSetDescriptorType:
+        return None  # ``__slots__``, or a ``__dict__`` the caller has shadowed
+    if not _descriptor_binds_to(descriptor, type(obj)):
+        return None  # a ``__dict__`` accessor lifted from an unrelated class
+    return descriptor.__get__(obj)
+
+
+def _instances_define_getattr(cls: type) -> bool:
+    """Whether ``cls``'s *instances* resolve missing attributes dynamically.
+
+    Scanning the MRO dicts runs no code and asks the right question. Reading
+    ``cls.__getattr__`` would instead find one defined on the metaclass, which
+    governs attribute access on the class object, not on its instances.
+    """
+
+    return any(
+        _dict_lookup(_type_dict(klass), "__getattr__") is not _MISSING
+        for klass in _type_mro(cls)
+    )
+
+
+def _static_lookup(obj: object, name: str) -> tuple[object, bool]:
+    """Find ``name`` as attribute access would, but run no code at all.
+
+    Returns the raw attribute and whether it came from the class, since only a
+    class attribute goes through the descriptor protocol. Data descriptors take
+    precedence over the instance dict, as the data model prescribes.
+    """
+
+    from_class = _class_lookup(type(obj), name)
+    if from_class is not _MISSING and _is_data_descriptor(from_class):
+        return from_class, True
+    namespace = _instance_dict(obj)
+    if namespace is not None:
+        from_instance = _dict_lookup(namespace, name)
+        if from_instance is not _MISSING:
+            return from_instance, False
+    return from_class, True
+
+
+def _lookup_method(obj: object, name: str) -> object | None:
+    """Find a method without running code that deciding a type should not run.
+
+    Reading the attribute normally would execute any descriptor behind it, and
+    also the caller's ``__getattribute__``. This module already refuses to probe
+    ``n_features`` for that reason, and ``fit`` and ``copy`` are no different: a
+    caller's feature map may define either as a ``@property`` whose getter raises.
+    So the name is looked up statically, walking the MRO dicts directly.
+
+    A static lookup finds the descriptor rather than the value, which is wrong
+    for the ones that merely fetch: a method must come back bound, and a value
+    stored in a ``__slots__`` member must come back as the value. Bind those, and
+    only those -- see :func:`_is_inert`. A ``@property``, or any descriptor the
+    caller wrote, stays unresolved and is reported as absent, so an object whose
+    ``fit`` is one is a feature map rather than a Basis. Note that such a
+    descriptor may itself be callable: returning it would be enough to mistake
+    the feature map for a Basis, and its ``__get__`` would then run after all.
+
+    An object that defines ``__getattr__`` has asked for dynamic resolution, and
+    a Basis may legitimately be a proxy, so a name the static lookup missed is
+    fetched normally. Its ``__getattr__`` must raise ``AttributeError`` for a
+    missing name, as the data model requires; anything else propagates.
+
+    A class object is never a Basis: the protocol lives on instances, and a class
+    passed here is a feature map that builds its features in ``__new__``. Saying
+    so early also avoids the separate lookup rules attribute access on a class
+    obeys.
+    """
+
+    if _is_subclass(type(obj), type):
+        return None
+    attr, from_class = _static_lookup(obj, name)
+    if attr is _MISSING:
+        return _dynamic_lookup(obj, name)
+    if not from_class:
+        return attr  # an instance-dict value is returned unbound, as attribute access does
+    if not _is_inert(attr) or not _descriptor_binds_to(attr, type(obj)):
+        return None
+    if not _defines(type(attr), "__get__"):
+        return attr  # not a descriptor: it binds to itself
+    if type(attr) is types.MemberDescriptorType:
+        # Reading an unset slot raises AttributeError, the data model's way of
+        # saying the attribute is absent. That is the one meaning it can carry,
+        # and attribute access answers it by consulting ``__getattr__`` next.
+        try:
+            return _bind(attr, obj)
+        except AttributeError:
+            return _dynamic_lookup(obj, name)
+    return _bind(attr, obj)
+
+
+def _bind(descriptor: object, obj: object) -> object:
+    """Invoke the descriptor protocol the way the interpreter invokes it.
+
+    ``descriptor.__get__`` is an attribute lookup *on the descriptor*, and an
+    instance dict entry named ``__get__`` shadows the slot for every type whose
+    own ``__get__`` is a non-data descriptor -- which is all of the inert ones.
+    The protocol uses the type's slot, and so must this.
+    """
+
+    return type(descriptor).__get__(descriptor, obj, type(obj))  # type: ignore[attr-defined]
+
+
+def _dynamic_lookup(obj: object, name: str) -> object | None:
+    """Ask an object that opted into dynamic attributes, and only such an object."""
+
+    if _instances_define_getattr(type(obj)):
+        return getattr(obj, name, None)
+    return None
+
+
+def coerce_basis(basis: Basis | Callable) -> Basis:
+    """Coerce a basis specification into a :class:`Basis`.
+
+    The public API documents that users may pass either a Basis instance or a
+    plain callable ``basis(X) -> Phi``. Only the latter is wrapped in
+    :class:`CallableBasis`.
+
+    A stateful basis defined outside this package satisfies :class:`Basis`
+    without inheriting from :class:`BaseBasis`, so it is recognised by duck
+    typing. Wrapping such an object would be wrong: ``CallableBasis.fit``
+    infers ``n_features`` by *calling* the wrapped object rather than by
+    delegating to its ``fit``, so the user's ``fit`` would never run.
+
+    Every returned object has a callable ``copy``: a :class:`BaseBasis` is
+    checked here, a duck-typed Basis by the predicate below, and
+    :class:`CallableBasis` supplies its own. Callers may therefore call
+    ``.copy()`` without guarding. Whether that call *succeeds* is the basis's
+    own responsibility, and a failure is reported rather than swallowed.
+
+    Notes
+    -----
+    Deciding what ``basis`` *is* must not run ``basis``'s code where that can be
+    avoided. Do not probe ``basis.n_features``: many bases (e.g.
+    :class:`PolynomialBasis` and :class:`TreatmentInteractionBasis`) expose it as
+    a property that only works after ``fit()``, and ``hasattr(obj, 'n_features')``
+    would trigger it. The same hazard applies to ``fit`` and ``copy``, which a
+    caller's feature map may define as properties, so both go through
+    :func:`_lookup_method`. The one place code does run is that helper's
+    ``__getattr__`` fallback, for objects that opted into dynamic attributes.
+
+    Define ``fit`` and ``copy`` as methods. A property named ``fit`` is read as
+    a property, not as a method, and the object is treated as a feature map.
+    """
+
+    # CallableBasis is a BaseBasis, so this covers every built-in basis.
+    if _is_subclass(type(basis), BaseBasis):
+        if not callable(_lookup_method(basis, "copy")):
+            shadow, _ = _static_lookup(basis, "copy")
+            raise TypeError(
+                f"{_type_name(type(basis))} shadows the Basis method 'copy' with a "
+                f"{_type_name(type(shadow))}. genriesz fits a copy of the basis, so "
+                "'copy' must be a method returning a new basis. Rename the attribute."
+            )
+        return basis
+
+    # A user-defined Basis: ``copy`` and ``fit`` are part of the protocol, and
+    # both must be *callable*. A plain feature map carrying unrelated ``fit`` or
+    # ``copy`` attributes is not a Basis, and belongs in the CallableBasis branch
+    # below; ``hasattr`` alone would misroute it and then fail on ``basis.copy()``.
+    #
+    # An object that writes its own ``__getattribute__`` is not certified here.
+    # What the static lookup found is not what ``basis.fit`` will return, so the
+    # evidence for calling it a Basis does not exist. It is a feature map.
+    if (
+        not _overrides_attribute_access(type(basis))
+        and callable(_lookup_method(basis, "fit"))
+        and callable(_lookup_method(basis, "copy"))
+        and callable(basis)
+    ):
+        return basis  # type: ignore[return-value]
+
+    # Otherwise, interpret it as a raw callable feature map.
+    if callable(basis):
+        return CallableBasis(basis)
+
+    raise TypeError("basis must be a Basis instance or a callable basis(X)->Phi")
 
 
 class PolynomialBasis(BaseBasis):

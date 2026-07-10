@@ -48,25 +48,21 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 from scipy import optimize
 
-from .basis import BaseBasis, CallableBasis, GaussianRKHSBasis
+from .basis import Basis, GaussianRKHSBasis, coerce_basis
 from .generators import (
     BKLGenerator,
-    BPGenerator,
     BregmanGenerator,
-    PUGenerator,
     SquaredGenerator,
-    UKLGenerator,
+    coerce_generator,
 )
 from .glm import DomainError, _branch_cache_of, _Penalty
 from .utils import as_2d, kfold_splits, sigmoid
 
 
-def _coerce_basis(basis: BaseBasis | CallableBasis | Callable) -> BaseBasis | CallableBasis:
-    if isinstance(basis, (BaseBasis, CallableBasis)):
-        return basis
-    if callable(basis):
-        return CallableBasis(basis)
-    raise TypeError('basis must be a BaseBasis instance or a callable basis(X)->Phi')
+def _positive_branch(_x: NDArray[np.float64]) -> int:
+    """A density ratio is nonnegative, so every row takes the positive branch."""
+
+    return 1
 
 
 def _coerce_generator(
@@ -86,30 +82,7 @@ def _coerce_generator(
     if generator is None:
         return SquaredGenerator(C=0.0)
 
-    if isinstance(generator, str):
-        key = generator.strip().lower()
-        # Density ratios are nonnegative, so by default we use the positive branch.
-        def pos_branch(_x):
-            return 1
-        if key in {'sq', 'squared', 'lsif'}:
-            return SquaredGenerator(C=0.0)
-        if key in {'ukl'}:
-            return UKLGenerator(C=0.0, branch_fn=pos_branch)
-        if key in {'bkl'}:
-            return BKLGenerator(C=1.0, branch_fn=pos_branch)
-        if key in {'bp', 'power'}:
-            return BPGenerator(C=0.0, omega=0.5, branch_fn=pos_branch)
-        if key in {'pu'}:
-            return PUGenerator(C=1.0, branch_fn=pos_branch)
-        raise ValueError(
-            "Unknown generator name. Use a generator instance or one of: "
-            "'sq', 'ukl', 'bkl', 'bp', 'pu'."
-        )
-
-    if isinstance(generator, BregmanGenerator):
-        return generator
-
-    raise TypeError('generator must be a BregmanGenerator instance, a supported name, or None')
+    return coerce_generator(generator, branch_fn=_positive_branch)
 
 
 @dataclass(frozen=True)
@@ -137,7 +110,7 @@ class DensityRatioResult:
         ``class_prior_ratio * exp(v)`` -- ``generator.inv_grad`` is NOT used.
     """
 
-    basis: BaseBasis | CallableBasis
+    basis: Basis
     generator: BregmanGenerator
     beta: NDArray[np.float64]
 
@@ -341,7 +314,7 @@ def fit_density_ratio(
     X_den: ArrayLike,
     *,
     # Feature map / basis
-    basis: BaseBasis | CallableBasis | Callable | None = None,
+    basis: Basis | Callable | None = None,
     n_centers: int = 200,
     sigma: float | None = 1.0,
     standardize: bool = True,
@@ -426,7 +399,7 @@ def fit_density_ratio(
         idx = rng.choice(n_all, size=m, replace=False)
         centers = np.asarray(X_all[idx], dtype=float)
         sigma_used = float(sigma)
-        basis_obj: BaseBasis | CallableBasis = GaussianRKHSBasis(
+        basis_obj: Basis = GaussianRKHSBasis(
             centers=centers,
             sigma=sigma_used,
             standardize=standardize,
@@ -434,13 +407,9 @@ def fit_density_ratio(
             random_state=random_state,
         ).fit(X_all)
     else:
-        basis_obj = _coerce_basis(basis)
+        # ``copy`` belongs to the Basis protocol, so coerce_basis guarantees it.
         # Fit on the combined sample by default.
-        try:
-            basis_obj = basis_obj.copy().fit(np.vstack([Xn, Xd]))  # type: ignore[attr-defined]
-        except Exception:
-            # Some user bases may not implement copy(); fall back to in-place fit.
-            basis_obj.fit(np.vstack([Xn, Xd]))  # type: ignore[attr-defined]
+        basis_obj = coerce_basis(basis).copy().fit(np.vstack([Xn, Xd]))
 
     def solve_beta(
         b,

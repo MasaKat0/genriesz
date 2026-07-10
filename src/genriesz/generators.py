@@ -999,3 +999,71 @@ class PUGenerator(BregmanGenerator):
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
         return self.C / (t * (1.0 - t))
+
+
+_SQUARED_NAMES = frozenset({"sq", "squared", "lsif"})
+
+# Names whose generator is branch-wise: the sign of alpha decides which branch
+# of (g')^{-1} applies, so they cannot be built from a name alone.
+_BRANCHWISE_NAMES = frozenset({"ukl", "bkl", "bp", "power", "pu"})
+
+
+def coerce_generator(
+    generator: BregmanGenerator | str,
+    *,
+    branch_fn: BranchFn | None = None,
+    allow_branchwise_names: bool = True,
+) -> BregmanGenerator:
+    """Resolve a generator instance or a supported name to a generator.
+
+    Parameters
+    ----------
+    generator:
+        A :class:`BregmanGenerator`, or one of ``'sq'``, ``'ukl'``, ``'bkl'``,
+        ``'bp'``, ``'pu'`` (with the aliases ``'squared'``, ``'lsif'`` and
+        ``'power'``).
+    branch_fn:
+        Branch selector applied to the branch-wise generators built by name.
+        It is **not** applied to a generator passed as an instance.
+    allow_branchwise_names:
+        When False, only the squared names resolve. A branch-wise name raises,
+        because its branch depends on the estimand: a density ratio is
+        nonnegative and always takes the positive branch, whereas an ATE Riesz
+        representer is negative on the control units. Building one from a name
+        would silently impose the wrong branch.
+    """
+
+    if isinstance(generator, BregmanGenerator):
+        return generator
+
+    if isinstance(generator, str):
+        key = generator.strip().lower()
+        if key in _SQUARED_NAMES:
+            return SquaredGenerator(C=0.0)
+        if key in _BRANCHWISE_NAMES:
+            if not allow_branchwise_names:
+                raise ValueError(
+                    f"generator={generator!r} names a branch-wise generator, whose branch "
+                    "depends on the estimand and cannot be inferred from the name. Pass an "
+                    "instance with an explicit branch_fn, e.g. "
+                    "BKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)). "
+                    "Only the squared-generator names may be given by name here: "
+                    + ", ".join(repr(name) for name in sorted(_SQUARED_NAMES))
+                    + "."
+                )
+            if key == "ukl":
+                return UKLGenerator(C=0.0, branch_fn=branch_fn)
+            if key == "bkl":
+                return BKLGenerator(C=1.0, branch_fn=branch_fn)
+            if key in {"bp", "power"}:
+                return BPGenerator(C=0.0, omega=0.5, branch_fn=branch_fn)
+            return PUGenerator(C=1.0, branch_fn=branch_fn)
+        raise ValueError(
+            "Unknown generator name. Use a generator instance or one of: "
+            "'sq', 'ukl', 'bkl', 'bp', 'pu'."
+        )
+
+    raise TypeError(
+        "generator must be a BregmanGenerator instance or a supported name, "
+        f"got {type(generator).__name__}"
+    )
