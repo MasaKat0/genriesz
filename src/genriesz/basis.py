@@ -16,6 +16,7 @@ All docstrings and comments are in English as requested.
 from __future__ import annotations
 
 import copy
+import inspect
 import warnings
 from collections.abc import Callable
 from typing import Protocol
@@ -68,6 +69,9 @@ class BaseBasis:
         return self
 
     def copy(self):
+        # Cross-fitting refits a copy per fold, so the copy must not share state
+        # with the original or with the other folds. Sharing anything mutable
+        # here would let one fold's training data reach another fold's features.
         return copy.deepcopy(self)
 
     @property
@@ -107,20 +111,6 @@ class CallableBasis(BaseBasis):
         self.func = func
         self._derivative = derivative
         self._n_features: int | None = None
-
-    def copy(self) -> CallableBasis:
-        """Copy the wrapper, sharing the wrapped feature map.
-
-        ``BaseBasis.copy`` deep-copies, which would recurse into the user's
-        callable. A feature map is a pure function of ``X`` by contract, so
-        sharing it is safe, and it keeps working for callables that refuse to
-        be deep-copied (a bound resource, an open handle, a ``__deepcopy__``
-        that raises). Only ``_n_features``, which ``fit`` infers, is per-copy.
-        """
-
-        new = CallableBasis(self.func, derivative=self._derivative)
-        new._n_features = self._n_features
-        return new
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None) -> CallableBasis:
         Phi = np.asarray(self.__call__(X), dtype=float)
@@ -170,6 +160,26 @@ class CallableBasis(BaseBasis):
         return np.asarray(out, dtype=float)
 
 
+def _lookup_method(obj: object, name: str) -> object | None:
+    """Find a method without running descriptors that we can avoid running.
+
+    Deciding whether ``obj`` is a Basis must not execute the user's code, so
+    the attribute is read statically: a ``@property`` named ``fit`` comes back
+    as the property object, not as whatever the getter would raise or return.
+
+    An object that defines ``__getattr__`` has asked for dynamic attribute
+    resolution, and a Basis may legitimately be a proxy. Only there do we fall
+    back to a normal lookup, and only for names the static lookup did not find.
+    """
+
+    attr = inspect.getattr_static(obj, name, None)
+    if attr is None and hasattr(type(obj), "__getattr__"):
+        attr = getattr(obj, name, None)
+    if isinstance(attr, (staticmethod, classmethod)):
+        return attr.__func__
+    return attr
+
+
 def coerce_basis(basis: Basis | Callable) -> Basis:
     """Coerce a basis specification into a :class:`Basis`.
 
@@ -191,22 +201,22 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
 
     Notes
     -----
-    Do **not** probe ``basis.n_features`` here. Many bases (e.g.
-    :class:`PolynomialBasis` and :class:`TreatmentInteractionBasis`) expose
-    ``n_features`` as a property that is only valid *after* ``fit()``.
-    Accessing it early would raise, and ``hasattr(obj, 'n_features')`` would
-    inadvertently trigger that property. ``getattr(obj, 'fit', None)`` and
-    ``getattr(obj, 'copy', None)`` are safe: neither name is such a property.
+    Deciding what ``basis`` *is* must not run ``basis``'s code. Do not probe
+    ``basis.n_features``: many bases (e.g. :class:`PolynomialBasis` and
+    :class:`TreatmentInteractionBasis`) expose it as a property that only works
+    after ``fit()``, and ``hasattr(obj, 'n_features')`` would trigger it. The
+    same hazard applies to ``fit`` and ``copy``, which a caller's feature map
+    may define as properties, so both go through :func:`_lookup_method`.
     """
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.
     if isinstance(basis, BaseBasis):
-        if not callable(getattr(basis, "copy", None)):
+        shadowed = _lookup_method(basis, "copy")
+        if not callable(shadowed):
             raise TypeError(
                 f"{type(basis).__name__} shadows the Basis method 'copy' with a "
-                f"{type(getattr(basis, 'copy', None)).__name__}. genriesz fits a copy of "
-                "the basis, so 'copy' must be a method returning a new basis. Rename the "
-                "attribute."
+                f"{type(shadowed).__name__}. genriesz fits a copy of the basis, so "
+                "'copy' must be a method returning a new basis. Rename the attribute."
             )
         return basis
 
@@ -215,8 +225,8 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     # ``copy`` attributes is not a Basis, and belongs in the CallableBasis branch
     # below; ``hasattr`` alone would misroute it and then fail on ``basis.copy()``.
     if (
-        callable(getattr(basis, "fit", None))
-        and callable(getattr(basis, "copy", None))
+        callable(_lookup_method(basis, "fit"))
+        and callable(_lookup_method(basis, "copy"))
         and callable(basis)
     ):
         return basis  # type: ignore[return-value]

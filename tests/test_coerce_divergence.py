@@ -75,10 +75,10 @@ class _MetadataCarryingCallable:
 
 
 class _NonDeepcopyableCallable:
-    """A valid plain feature map that refuses to be deep-copied.
+    """A feature map that refuses to be deep-copied.
 
-    Nothing in the public API asks a feature map to be deepcopy-able, so
-    ``CallableBasis.copy`` must share it rather than copy it.
+    genriesz refits a copy of the basis per cross-fitting fold, so a basis it
+    cannot copy cannot be isolated. Both entry points must say so.
     """
 
     def __deepcopy__(self, memo):
@@ -87,6 +87,51 @@ class _NonDeepcopyableCallable:
     def __call__(self, X):
         X = np.asarray(X, dtype=float)
         return np.column_stack([np.ones(len(X)), X])
+
+
+class _PropertyFitCallable:
+    """A plain feature map whose ``fit`` is a property that raises when read.
+
+    Deciding whether this is a Basis must not read the property.
+    """
+
+    @property
+    def fit(self):
+        raise RuntimeError("fit getter touched")
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
+
+
+class _ProxyBasis:
+    """A Basis that exposes ``fit`` and ``copy`` only through ``__getattr__``."""
+
+    def __init__(self):
+        object.__setattr__(self, "_inner", StatefulDuckBasis())
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def __call__(self, X):
+        return self._inner(X)
+
+
+class _StatefulCallable:
+    """A feature map that caches the first sample it sees.
+
+    It breaks the ``basis(X) -> Phi`` purity contract. Copying isolates the
+    folds anyway; sharing it would leak one fold's training mean into another.
+    """
+
+    def __init__(self):
+        self.seen = None
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        if self.seen is None:
+            self.seen = X.mean(axis=0)
+        return np.column_stack([np.ones(len(X)), X - self.seen])
 
 
 class _ShadowedCopyBasis(BaseBasis):
@@ -196,11 +241,13 @@ def test_grr_ate_accepts_a_callable_carrying_non_callable_metadata():
     assert result.estimand == "ATE"
 
 
-def test_every_coerced_basis_can_actually_be_copied_and_fitted():
+def test_coercing_a_copyable_basis_yields_something_copy_and_fit_can_be_called_on():
     """density_ratio calls .copy().fit(...) unconditionally, so exercise both.
 
     Checking ``callable(obj.copy)`` alone would not support removing the old
-    try/except: a callable ``copy`` can still raise when called.
+    try/except: a callable ``copy`` can still raise when called. This covers the
+    copyable inputs only; the bases that deliberately refuse to be copied are
+    pinned separately below.
     """
 
     X = np.linspace(-1.0, 1.0, 12).reshape(6, 2)
@@ -208,21 +255,24 @@ def test_every_coerced_basis_can_actually_be_copied_and_fitted():
         PolynomialBasis(degree=2),
         StatefulDuckBasis(),
         _MetadataCarryingCallable(),
-        _NonDeepcopyableCallable(),
+        _PropertyFitCallable(),
+        _ProxyBasis(),
         lambda Z: np.column_stack([np.ones(len(Z)), Z]),
     ]:
         fitted = coerce_basis(spec).copy().fit(X)
         assert np.asarray(fitted(X)).shape[0] == X.shape[0]
 
 
-def test_callable_basis_copy_shares_the_wrapped_feature_map():
-    """It must not deepcopy the user's callable, which may refuse to be copied."""
+def test_callable_basis_copy_isolates_the_wrapped_feature_map():
+    """Cross-fitting refits a copy per fold, so the copy must not share state."""
 
-    func = _NonDeepcopyableCallable()
+    func = _StatefulCallable()
     wrapper = CallableBasis(func)
     clone = wrapper.copy()
-    assert clone is not wrapper
-    assert clone.func is func
+
+    assert clone.func is not func
+    clone.func(np.zeros((3, 2)))
+    assert func.seen is None  # the original never saw the clone's data
 
 
 def test_coerce_basis_rejects_a_base_basis_that_shadows_copy():
@@ -230,6 +280,52 @@ def test_coerce_basis_rejects_a_base_basis_that_shadows_copy():
 
     with pytest.raises(TypeError, match="shadows the Basis method 'copy'"):
         coerce_basis(_ShadowedCopyBasis())
+
+
+def test_coerce_basis_does_not_run_a_fit_property_while_deciding():
+    """The n_features hazard applies to 'fit' and 'copy' too, if a caller
+
+    defines them as properties. Coercion must inspect statically."""
+
+    out = coerce_basis(_PropertyFitCallable())
+    assert isinstance(out, CallableBasis)
+
+
+def test_both_paths_accept_a_feature_map_whose_fit_is_a_raising_property():
+    """On main, density_ratio wrapped it and worked while grr_ate read the property."""
+
+    Xn, Xd = _two_samples()
+    X, Y = _ate_sample()
+
+    result = genriesz.fit_density_ratio(Xn, Xd, basis=_PropertyFitCallable(), lam=0.1)
+    assert np.shape(result.beta) == (3,)
+
+    estimate = genriesz.grr_ate(
+        X=X, Y=Y, basis=_PropertyFitCallable(), generator=SquaredGenerator(C=0.0)
+    )
+    assert estimate.estimand == "ATE"
+
+
+def test_coerce_basis_still_recognises_a_basis_behind_getattr():
+    """An object that defines __getattr__ opted into dynamic lookup, so use it."""
+
+    proxy = _ProxyBasis()
+    assert coerce_basis(proxy) is proxy
+
+
+def test_both_paths_accept_a_proxy_basis():
+    """On main, grr_ate accepted it while density_ratio wrapped it and raised."""
+
+    Xn, Xd = _two_samples()
+    X, Y = _ate_sample()
+
+    result = genriesz.fit_density_ratio(Xn, Xd, basis=_ProxyBasis(), lam=0.1)
+    assert np.shape(result.beta) == (3,)
+
+    estimate = genriesz.grr_ate(
+        X=X, Y=Y, basis=_ProxyBasis(), generator=SquaredGenerator(C=0.0)
+    )
+    assert estimate.estimand == "ATE"
 
 
 # ------------------------------------------------- basis parity across modules
@@ -261,20 +357,32 @@ def test_fit_density_ratio_does_not_mutate_the_caller_s_basis():
         duck(Xn)
 
 
-def test_fit_density_ratio_accepts_a_non_deepcopyable_callable():
-    """Removing the try/except must not break a feature map that refuses deepcopy."""
+def test_a_non_deepcopyable_callable_fails_the_same_way_on_both_paths():
+    """main let fit_density_ratio through by fitting in place; grr_ate already raised."""
 
     Xn, Xd = _two_samples()
-    result = genriesz.fit_density_ratio(Xn, Xd, basis=_NonDeepcopyableCallable(), lam=0.1)
-    assert np.shape(result.beta) == (3,)
-
-
-def test_grr_ate_accepts_a_non_deepcopyable_callable():
     X, Y = _ate_sample()
-    result = genriesz.grr_ate(
-        X=X, Y=Y, basis=_NonDeepcopyableCallable(), generator=SquaredGenerator(C=0.0)
-    )
-    assert result.estimand == "ATE"
+
+    with pytest.raises(TypeError, match="cannot deepcopy"):
+        genriesz.fit_density_ratio(Xn, Xd, basis=_NonDeepcopyableCallable(), lam=0.1)
+
+    with pytest.raises(TypeError, match="cannot deepcopy"):
+        genriesz.grr_ate(
+            X=X, Y=Y, basis=_NonDeepcopyableCallable(), generator=SquaredGenerator(C=0.0)
+        )
+
+
+def test_a_stateful_callable_basis_does_not_leak_across_cross_fitting_folds():
+    """The reason CallableBasis.copy must deepcopy rather than share.
+
+    Each fold refits ``basis.copy()``. If the wrapped callable were shared, the
+    first fold's training mean would define the features of every later fold.
+    """
+
+    X, Y = _ate_sample()
+    func = _StatefulCallable()
+    genriesz.grr_ate(X=X, Y=Y, basis=func, generator=SquaredGenerator(C=0.0))
+    assert func.seen is None
 
 
 def test_fit_density_ratio_reports_a_shadowed_copy_instead_of_fitting_in_place():
