@@ -171,3 +171,43 @@ def test_unfitted_data_dependent_bases_raise_instead_of_leaking():
     ]:
         with pytest.raises(RuntimeError, match="fit"):
             basis(X_eval)
+
+
+def test_unfitted_polynomial_basis_raises_by_default():
+    """Default PolynomialBasis refuses an unfitted call/derivative.
+
+    PolynomialBasis does not leak (``fit`` reads only the column count), but it
+    still raises by default so that every basis honours the same contract.
+    """
+    import pytest
+
+    rng = np.random.default_rng(6)
+    X_eval = rng.normal(size=(10, 2))
+
+    basis = PolynomialBasis(degree=2, include_bias=True)  # not fit(), auto_fit=False
+    with pytest.raises(RuntimeError, match="fit"):
+        basis(X_eval)
+    with pytest.raises(RuntimeError, match="fit"):
+        basis.derivative(X_eval, 0)
+
+
+def test_polynomial_basis_auto_fit_opt_in_matches_explicit_fit():
+    """auto_fit=True restores the old fit-on-the-fly behaviour, leak-free."""
+    rng = np.random.default_rng(7)
+    X = rng.normal(size=(12, 3))
+
+    explicit = PolynomialBasis(degree=2, include_bias=True).fit(X)
+    on_the_fly = PolynomialBasis(degree=2, include_bias=True, auto_fit=True)
+
+    # No prior fit(): the first call fits from X, and the derivative also works.
+    np.testing.assert_allclose(on_the_fly(X), explicit(X))
+    np.testing.assert_allclose(
+        on_the_fly.derivative(X, 0), explicit.derivative(X, 0)
+    )
+
+    # derivative-first path: a fresh, unfitted auto_fit basis must also fit when
+    # derivative() is the very first call (its own guard triggers the fit).
+    deriv_first = PolynomialBasis(degree=2, include_bias=True, auto_fit=True)
+    np.testing.assert_allclose(
+        deriv_first.derivative(X, 0), explicit.derivative(X, 0)
+    )

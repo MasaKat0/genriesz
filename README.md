@@ -295,9 +295,15 @@ For covariate-shift *density ratio* estimation via generalized Bregman divergenc
 ```python
 from genriesz import PolynomialBasis
 
-psi = PolynomialBasis(degree=3)
+psi = PolynomialBasis(degree=3).fit(X)
 Phi = psi(X)  # (n,p)
 ```
+
+Each built-in basis — except `CallableBasis`, which infers its shape on the
+first call — must be `fit` before it is called; an unfitted call raises
+`RuntimeError`. `PolynomialBasis` learns only the monomial layout (not any
+data-dependent statistic), so it also accepts `auto_fit=True` to fit on the
+first call: `PolynomialBasis(degree=3, auto_fit=True)`.
 
 ### RKHS bases
 
@@ -306,10 +312,10 @@ Approximate an RBF kernel with either **random Fourier features** or a **Nyströ
 ```python
 from genriesz import RBFRandomFourierBasis, RBFNystromBasis
 
-rff = RBFRandomFourierBasis(n_features=500, sigma=1.0, standardize=True, random_state=0)
+rff = RBFRandomFourierBasis(n_features=500, sigma=1.0, standardize=True, random_state=0).fit(X)
 Phi_rff = rff(X)
 
-nys = RBFNystromBasis(n_centers=500, sigma=1.0, standardize=True, random_state=0)
+nys = RBFNystromBasis(n_centers=500, sigma=1.0, standardize=True, random_state=0).fit(X)
 Phi_nys = nys(X)
 ```
 
