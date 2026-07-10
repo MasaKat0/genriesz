@@ -179,17 +179,29 @@ _INERT_DESCRIPTORS = (
 )
 
 
+# Deep enough for any real nesting, and it keeps a self-referential
+# ``partialmethod`` (``pm.func = pm``) from recursing without end.
+_MAX_WRAPPER_DEPTH = 16
+
+
 def _is_inert(attr: object) -> bool:
     """Whether binding ``attr`` would run code the caller wrote.
 
     ``functools.partialmethod`` is inert only as far as what it wraps: its
     ``__get__`` delegates to the wrapped object's, so ``partialmethod(f)`` is
     safe for a function ``f`` and unsafe for a descriptor the caller defined.
+    ``staticmethod`` and ``classmethod`` do not delegate, so they need no unwrap.
+
+    A wrapper nested past ``_MAX_WRAPPER_DEPTH`` is reported as not inert, which
+    leaves it unresolved. Erring that way costs a misclassified Basis; erring the
+    other way runs the caller's code.
     """
 
-    if isinstance(attr, functools.partialmethod):
-        return _is_inert(attr.func)
-    return isinstance(attr, _INERT_DESCRIPTORS)
+    for _ in range(_MAX_WRAPPER_DEPTH):
+        if not isinstance(attr, functools.partialmethod):
+            return isinstance(attr, _INERT_DESCRIPTORS)
+        attr = attr.func
+    return False
 
 
 def _instances_define_getattr(cls: type) -> bool:

@@ -590,6 +590,23 @@ def test_a_partialmethod_is_inert_only_as_far_as_what_it_wraps():
     assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
 
 
+def test_is_inert_terminates_on_a_self_referential_partialmethod():
+    """pm.func = pm would recurse without end. Unresolved is the safe answer."""
+
+    import functools
+
+    from genriesz.basis import _is_inert
+
+    def _f(self, X=None, y=None):
+        return self
+
+    pm = functools.partialmethod(_f)
+    assert _is_inert(pm)
+
+    pm.func = pm
+    assert not _is_inert(pm)
+
+
 def test_instances_define_getattr_sees_the_class_and_its_bases():
     class _Base:
         def __getattr__(self, name):
