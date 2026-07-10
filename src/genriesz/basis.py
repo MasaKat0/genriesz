@@ -167,6 +167,17 @@ class CallableBasis(BaseBasis):
 _INERT_DESCRIPTORS = (staticmethod, classmethod, types.MemberDescriptorType)
 
 
+def _instances_define_getattr(cls: type) -> bool:
+    """Whether ``cls``'s *instances* resolve missing attributes dynamically.
+
+    Scanning the MRO dicts runs no code and asks the right question. Reading
+    ``cls.__getattr__`` would instead find one defined on the metaclass, which
+    governs attribute access on the class object, not on its instances.
+    """
+
+    return any("__getattr__" in klass.__dict__ for klass in cls.__mro__)
+
+
 def _lookup_method(obj: object, name: str) -> object | None:
     """Find a method without running code that deciding a type should not run.
 
@@ -189,7 +200,7 @@ def _lookup_method(obj: object, name: str) -> object | None:
 
     attr = inspect.getattr_static(obj, name, None)
     if attr is None:
-        if hasattr(type(obj), "__getattr__"):
+        if _instances_define_getattr(type(obj)):
             return getattr(obj, name, None)
         return None
     if inspect.isroutine(attr) or isinstance(attr, _INERT_DESCRIPTORS):

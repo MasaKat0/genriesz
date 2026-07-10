@@ -17,7 +17,13 @@ import numpy as np
 import pytest
 
 import genriesz
-from genriesz.basis import BaseBasis, CallableBasis, PolynomialBasis, coerce_basis
+from genriesz.basis import (
+    BaseBasis,
+    CallableBasis,
+    PolynomialBasis,
+    _instances_define_getattr,
+    coerce_basis,
+)
 from genriesz.generators import (
     BKLGenerator,
     BPGenerator,
@@ -444,6 +450,57 @@ def test_coerce_basis_wraps_a_partial_and_a_ufunc():
 
     assert isinstance(coerce_basis(functools.partial(phi)), CallableBasis)
     assert isinstance(coerce_basis(np.exp), CallableBasis)
+
+
+def test_coerce_basis_sees_an_inherited_getattr():
+    class _Base:
+        def __getattr__(self, name):
+            return getattr(object.__getattribute__(self, "_inner"), name)
+
+    class _Derived(_Base):
+        def __init__(self):
+            object.__setattr__(self, "_inner", StatefulDuckBasis())
+
+        def __call__(self, X):
+            return object.__getattribute__(self, "_inner")(X)
+
+    proxy = _Derived()
+    assert coerce_basis(proxy) is proxy
+
+
+def test_a_metaclass_getattr_does_not_make_instances_look_dynamic():
+    """__getattr__ on the metaclass governs the class object, not its instances.
+
+    ``hasattr(type(obj), '__getattr__')`` finds the metaclass's and answers the
+    wrong question. Today both spellings end up wrapping such an object anyway,
+    so this pins the predicate rather than an end-to-end behaviour.
+    """
+
+    class _Meta(type):
+        def __getattr__(cls, name):
+            raise RuntimeError("metaclass __getattr__ was consulted")
+
+    class _Map(metaclass=_Meta):
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert hasattr(type(_Map()), "__getattr__")  # the wrong question says yes
+    assert not _instances_define_getattr(type(_Map()))  # the right one says no
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+
+def test_instances_define_getattr_sees_the_class_and_its_bases():
+    class _Base:
+        def __getattr__(self, name):
+            raise AttributeError(name)
+
+    class _Derived(_Base):
+        pass
+
+    assert _instances_define_getattr(_Base)
+    assert _instances_define_getattr(_Derived)
+    assert not _instances_define_getattr(int)
 
 
 def test_both_paths_accept_a_proxy_basis():
