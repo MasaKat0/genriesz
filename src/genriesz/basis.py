@@ -1386,8 +1386,10 @@ class KNNCatchmentBasis(BaseBasis):
         m = int(self._centers.shape[0])
         Phi = np.zeros((n, m), dtype=float)
 
-        for i in range(n):
-            Phi[i, ind[i]] = 1.0
+        # Set Phi[i, ind[i, :]] = 1 for every row's k neighbours at once. The
+        # indices in each row are distinct (kNN), and a repeat would only set the
+        # same 1 twice, so this matches the per-row loop exactly.
+        np.put_along_axis(Phi, ind, 1.0, axis=1)
 
         if self.include_bias:
             Phi = np.column_stack([np.ones(n, dtype=float), Phi])
