@@ -1047,7 +1047,9 @@ def coerce_generator(
                     "depends on the estimand and cannot be inferred from the name. Pass an "
                     "instance with an explicit branch_fn, e.g. "
                     "BKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1.0)). "
-                    "Only 'sq' may be given by name here."
+                    "Only the squared-generator names may be given by name here: "
+                    + ", ".join(repr(name) for name in sorted(_SQUARED_NAMES))
+                    + "."
                 )
             if key == "ukl":
                 return UKLGenerator(C=0.0, branch_fn=branch_fn)
