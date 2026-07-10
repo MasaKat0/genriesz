@@ -28,13 +28,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .basis import Basis
-
-
-def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-    return X_
+from .utils import as_2d
 
 
 def _toggle_treatment(
@@ -123,7 +117,7 @@ class CallableFunctional(LinearFunctional):
         object.__setattr__(self, "m", m)
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         n = X_.shape[0]
 
         # Determine the basis dimension without touching unfitted properties.
@@ -145,7 +139,7 @@ class CallableFunctional(LinearFunctional):
         return M
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         out = np.empty(X_.shape[0], dtype=float)
 
         def gamma(x_row: NDArray[np.float64]) -> float:
@@ -168,13 +162,13 @@ class ATEFunctional(LinearFunctional):
         object.__setattr__(self, "treatment_index", int(treatment_index))
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
         return np.asarray(basis(X1) - basis(X0), dtype=float)
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
         return np.asarray(predict(X1) - predict(X0), dtype=float).reshape(-1)
@@ -215,14 +209,14 @@ class ATTFunctional(LinearFunctional):
         object.__setattr__(self, "pi_is_estimated", bool(pi_is_estimated))
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         D = X_[:, self.treatment_index].reshape(-1, 1)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
         return (D / self.pi) * (basis(X1) - basis(X0))
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         D = X_[:, self.treatment_index].reshape(-1)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
@@ -256,7 +250,7 @@ class AMEFunctional(LinearFunctional):
     ) -> NDArray[np.float64]:
         if derivative is None:
             raise ValueError("AME requires derivative()")
-        return np.asarray(derivative(_as_2d(X), self.coordinate), dtype=float).reshape(-1)
+        return np.asarray(derivative(as_2d(X), self.coordinate), dtype=float).reshape(-1)
 
 
 @dataclass(frozen=True)

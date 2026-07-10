@@ -15,7 +15,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.stats import norm
 
 
-def as_2d(x: ArrayLike, *, name: str) -> NDArray[np.float64]:
+def as_2d(x: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
     """Convert an array-like object to a 2D float64 NumPy array."""
 
     arr = np.asarray(x, dtype=float)
@@ -31,6 +31,52 @@ def as_1d(x: ArrayLike, *, name: str) -> NDArray[np.float64]:
     if arr.ndim != 1:
         raise ValueError(f"{name} must be a 1D array of shape (n,). Got shape {arr.shape}.")
     return arr
+
+
+def as_1d_of_length(x: ArrayLike, *, n: int, name: str) -> NDArray[np.float64]:
+    """Flatten ``x`` to 1D float64 and require it to have exactly ``n`` entries."""
+
+    arr = np.asarray(x, dtype=float).reshape(-1)
+    if arr.shape[0] != n:
+        raise ValueError(f"{name} must have length {n}. Got shape {arr.shape}.")
+    return arr
+
+
+def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Numerically stable logistic sigmoid, evaluated branch-wise on the sign of ``z``.
+
+    Splitting on ``z >= 0`` keeps ``exp`` away from overflow on either tail:
+    the positive branch exponentiates ``-z`` and the negative branch ``z``.
+    """
+
+    out = np.empty_like(z)
+    pos = z >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    expz = np.exp(z[~pos])
+    out[~pos] = expz / (1.0 + expz)
+    return out
+
+
+def standardize_columns(
+    X: NDArray[np.float64], *, enabled: bool = True
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Center and scale the columns of ``X``; return ``(Xs, mean, std)``.
+
+    Columns with zero (or non-positive) spread are left unscaled -- their ``std``
+    entry is set to 1.0 -- so that a constant column maps to zeros rather than to
+    NaN. When ``enabled`` is False the transform is the identity, but ``mean`` and
+    ``std`` are still returned so callers can store them unconditionally.
+    """
+
+    d = X.shape[1]
+    if enabled:
+        mean = X.mean(axis=0)
+        std = X.std(axis=0, ddof=0)
+        std = np.where(std > 0, std, 1.0)
+    else:
+        mean = np.zeros(d)
+        std = np.ones(d)
+    return (X - mean) / std, mean, std
 
 
 def is_binary_y(y: NDArray[np.float64]) -> bool:

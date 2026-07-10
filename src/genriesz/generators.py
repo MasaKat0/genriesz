@@ -54,6 +54,8 @@ from collections.abc import Callable, Iterator
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
+from .utils import as_1d_of_length, as_2d
+
 BranchFn = Callable[[NDArray[np.float64]], int]
 
 #: Upper bound on the number of arrays memoized inside ``branch_cache()``.
@@ -71,20 +73,6 @@ class DomainError(RuntimeError):
     stop at a broken point with ``success=True``. Callers (e.g. ``GRRGLM.fit``)
     catch this and record an explicit ``status="domain_error"`` failure.
     """
-
-
-def _as_2d(X: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"{name} must be 2D. Got shape {X_.shape}.")
-    return X_
-
-
-def _as_1d(v: ArrayLike, *, n: int, name: str = "v") -> NDArray[np.float64]:
-    v_ = np.asarray(v, dtype=float).reshape(-1)
-    if v_.shape[0] != n:
-        raise ValueError(f"{name} must have length {n}. Got shape {v_.shape}.")
-    return v_
 
 
 class _RowwiseScalarFn:
@@ -179,8 +167,8 @@ class _RowwiseScalarFn:
         return self._call_rowwise(X, a)
 
     def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
-        X = _as_2d(X)
-        a = _as_1d(a, n=len(X), name="a")
+        X = as_2d(X)
+        a = as_1d_of_length(a, n=len(X), name="a")
 
         if self._vectorized is None:
             if len(a) < 2:
@@ -368,16 +356,16 @@ class BregmanGenerator:
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Evaluate g(x, alpha) row-wise."""
 
-        X_ = _as_2d(X)
-        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a_ = as_1d_of_length(alpha, n=len(X_), name="alpha")
         gfn = self._require_g()
         return gfn(X_, a_)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Evaluate the derivative ∂g/∂alpha row-wise."""
 
-        X_ = _as_2d(X)
-        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a_ = as_1d_of_length(alpha, n=len(X_), name="alpha")
 
         if self._grad is not None:
             return self._grad(X_, a_)
@@ -390,8 +378,8 @@ class BregmanGenerator:
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Evaluate the second derivative ∂²g/∂alpha² row-wise."""
 
-        X_ = _as_2d(X)
-        a_ = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a_ = as_1d_of_length(alpha, n=len(X_), name="alpha")
 
         if self._grad2 is not None:
             return self._grad2(X_, a_)
@@ -407,8 +395,8 @@ class BregmanGenerator:
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Inverse derivative map alpha = (∂g)^{-1}(x, v)."""
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
 
         if self._inv_grad is not None:
             return self._inv_grad(X_, v_)
@@ -461,8 +449,8 @@ class BregmanGenerator:
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
         """Return (g*(v), alpha) evaluated row-wise."""
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         alpha = self.inv_grad(X_, v_)
         g_val = self.g(X_, alpha)
         g_star = v_ * alpha - g_val
@@ -476,8 +464,8 @@ class BregmanGenerator:
         diagnostics can surface the clip binding rate instead of hiding it.
         """
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         return np.zeros(v_.shape[0], dtype=bool)
 
 
@@ -495,23 +483,23 @@ class SquaredGenerator(BregmanGenerator):
         super().__init__(name="SQ", C=float(C), branch_fn=None)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         return self.C + 0.5 * v_
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return np.square(a - self.C)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return 2.0 * (a - self.C)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return np.full_like(a, 2.0, dtype=float)
 
 
@@ -546,8 +534,8 @@ class UKLGenerator(BregmanGenerator):
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Branch-wise inverse gradient alpha = (g')^{-1}(v)."""
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
 
         # exp can underflow to 0 for large negative inputs; clip and floor.
@@ -557,28 +545,28 @@ class UKLGenerator(BregmanGenerator):
         return s * (self.C + exp_term)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         z = self._sign(X_, v_) * v_
         return (z <= np.log(1e-12)) | (z >= 700.0)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return t * np.log(t) - np.abs(a)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return np.sign(a) * np.log(t)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return 1.0 / t
@@ -644,8 +632,8 @@ class BPGenerator(BregmanGenerator):
         we **clip** ``t`` to a small positive value.
         """
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
         k = 1.0 + 1.0 / self.omega
 
@@ -654,30 +642,30 @@ class BPGenerator(BregmanGenerator):
         return s * (self.C + np.power(t, 1.0 / self.omega))
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
         k = 1.0 + 1.0 / self.omega
         return (1.0 + s * v_ / k) <= 1e-6
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         return (np.power(t, 1.0 + self.omega) - (1.0 + self.omega) * t) / self.omega
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         k = 1.0 + 1.0 / self.omega
         return np.sign(a) * k * (np.power(t, self.omega) - 1.0)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.abs(a) - self.C
         t = np.maximum(t, 1e-12)
         k = 1.0 + 1.0 / self.omega
@@ -778,8 +766,8 @@ class BKLGenerator(BregmanGenerator):
         return self._sign(X, v)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._branch_sign(X_, v_)
 
         # The theoretical domain is u = s*v < 0. A violation has no finite
@@ -809,24 +797,24 @@ class BKLGenerator(BregmanGenerator):
         failure).
         """
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         u = self._branch_sign(X_, v_) * v_
         return u >= 0.0
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_g(a, self.C)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad(a, self.C)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad2(a, self.C)
 
 
@@ -908,8 +896,8 @@ class BoundedBKLGenerator(BregmanGenerator):
         return self._sign(X, v)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._branch_sign(X_, v_)
         # Clamp the dangerous side (u -> 0) to u_min so |alpha| <= alpha_max, and
         # the exp-underflow tail to -700. Both sides keep u strictly negative.
@@ -923,24 +911,24 @@ class BoundedBKLGenerator(BregmanGenerator):
         exact BKL-Riesz representer, i.e. the modified-estimand region.
         """
 
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         u = self._branch_sign(X_, v_) * v_
         return u > self._u_min
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_g(a, self.C)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad(a, self.C)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad2(a, self.C)
 
 
@@ -979,8 +967,8 @@ class PUGenerator(BregmanGenerator):
         super().__init__(name="PU", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
 
         z = np.clip(s * v_ / self.C, -700.0, 700.0)
@@ -989,25 +977,25 @@ class PUGenerator(BregmanGenerator):
         return s * a
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        X_ = _as_2d(X)
-        v_ = _as_1d(v, n=len(X_), name="v")
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
         z = self._sign(X_, v_) * v_ / self.C
         return np.abs(z) >= np.log(1e10)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
         return self.C * (t * np.log(t) + (1.0 - t) * np.log(1.0 - t))
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
         return np.sign(a) * self.C * (np.log(t) - np.log(1.0 - t))
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
-        X_ = _as_2d(X)
-        a = _as_1d(alpha, n=len(X_), name="alpha")
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
         return self.C / (t * (1.0 - t))

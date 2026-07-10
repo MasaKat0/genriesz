@@ -58,23 +58,7 @@ from .generators import (
     UKLGenerator,
 )
 from .glm import DomainError, _branch_cache_of, _Penalty
-from .utils import kfold_splits
-
-
-def _as_2d(X: ArrayLike, *, name: str) -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"{name} must be 2D. Got shape {X_.shape}.")
-    return X_
-
-
-def _sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
-    out = np.empty_like(z)
-    pos = z >= 0
-    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
-    expz = np.exp(z[~pos])
-    out[~pos] = expz / (1.0 + expz)
-    return out
+from .utils import as_2d, kfold_splits, sigmoid
 
 
 def _coerce_basis(basis: BaseBasis | CallableBasis | Callable) -> BaseBasis | CallableBasis:
@@ -170,7 +154,7 @@ class DensityRatioResult:
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
         """Predict the linear score v(x) = phi(x)^T beta."""
 
-        X_ = _as_2d(X, name='X')
+        X_ = as_2d(X, name='X')
         Phi = np.asarray(self.basis(X_), dtype=float)
         return Phi @ self.beta
 
@@ -186,7 +170,7 @@ class DensityRatioResult:
             density ratio estimators.
         """
 
-        X_ = _as_2d(X, name='X')
+        X_ = as_2d(X, name='X')
         v = self.predict_v(X_)
         if self.class_prior_ratio is not None:
             z = np.clip(v, -700.0, 700.0)
@@ -267,7 +251,7 @@ def _fit_bkl_classification(
 
     def jac(beta: NDArray[np.float64]) -> NDArray[np.float64]:
         eta = Phi @ beta
-        phat = _sigmoid(eta)
+        phat = sigmoid(eta)
         grad = (Phi.T @ (phat - y)) / n
         return grad + penalty.grad(beta)
 
@@ -413,8 +397,8 @@ def fit_density_ratio(
         A fitted model with :meth:`~DensityRatioResult.predict_ratio`.
     """
 
-    Xn = _as_2d(X_num, name='X_num')
-    Xd = _as_2d(X_den, name='X_den')
+    Xn = as_2d(X_num, name='X_num')
+    Xd = as_2d(X_den, name='X_den')
 
     if Xn.shape[1] != Xd.shape[1]:
         raise ValueError('X_num and X_den must have the same number of columns')

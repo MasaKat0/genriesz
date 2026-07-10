@@ -32,6 +32,7 @@ from scipy import optimize
 from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError, SquaredGenerator
+from .utils import as_1d_of_length, as_2d, sigmoid
 
 
 def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
@@ -43,30 +44,6 @@ def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
 # ``DomainError`` is now defined in ``generators`` (the lower layer, which raises
 # it directly from broken links). glm.py both uses it (in ``fit``) and re-exports
 # it, so ``from genriesz.glm import DomainError`` keeps working.
-
-
-def _as_2d(X: ArrayLike) -> NDArray[np.float64]:
-    X_ = np.asarray(X, dtype=float)
-    if X_.ndim != 2:
-        raise ValueError(f"X must be 2D. Got shape {X_.shape}.")
-    return X_
-
-
-def _as_1d(y: ArrayLike, *, n: int, name: str) -> NDArray[np.float64]:
-    y_ = np.asarray(y, dtype=float).reshape(-1)
-    if y_.shape[0] != n:
-        raise ValueError(f"{name} must have length {n}. Got {y_.shape}.")
-    return y_
-
-
-def _sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
-    # Numerically stable sigmoid
-    out = np.empty_like(z)
-    pos = z >= 0
-    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
-    expz = np.exp(z[~pos])
-    out[~pos] = expz / (1.0 + expz)
-    return out
 
 
 def _ensure_basis_fitted(basis: Basis, X: NDArray[np.float64]) -> None:
@@ -211,7 +188,7 @@ class GRRGLM:
         verbose: bool = False,
     ) -> FitResult:
         t0 = time.perf_counter()
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         _ensure_basis_fitted(self.basis, X_)
         Phi = np.asarray(self.basis(X_), dtype=float)
         M = np.asarray(self.functional.m_basis_matrix(X_, self.basis), dtype=float)
@@ -397,12 +374,12 @@ class GRRGLM:
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
-        Phi = np.asarray(self.basis(_as_2d(X)), dtype=float)
+        Phi = np.asarray(self.basis(as_2d(X)), dtype=float)
         return Phi @ self.beta_
 
     def predict_alpha(self, X: ArrayLike) -> NDArray[np.float64]:
         v = self.predict_v(X)
-        return self.generator.inv_grad(_as_2d(X), v)
+        return self.generator.inv_grad(as_2d(X), v)
 
     def derivative_alpha(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
         """Derivative of alpha(x) wrt x_coordinate.
@@ -414,7 +391,7 @@ class GRRGLM:
 
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         dPhi = self.basis.derivative(X_, coordinate)
         dv = dPhi @ self.beta_
         alpha = self.predict_alpha(X_)
@@ -463,11 +440,11 @@ class OutcomeGLM:
         tol: float = 1e-8,
         verbose: bool = False,
     ) -> FitResult:
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         _ensure_basis_fitted(self.basis, X_)
         Phi = np.asarray(self.basis(X_), dtype=float)
         n, p = Phi.shape
-        y_ = _as_1d(y, n=n, name="y")
+        y_ = as_1d_of_length(y, n=n, name="y")
 
         if theta0 is None:
             theta0_ = np.zeros(p, dtype=float)
@@ -512,7 +489,7 @@ class OutcomeGLM:
                 resid = y_ - eta
                 grad = -(Phi.T @ resid) / n
             else:
-                p_hat = _sigmoid(eta)
+                p_hat = sigmoid(eta)
                 grad = (Phi.T @ (p_hat - y_)) / n
             return grad + self.penalty.grad(theta)
 
@@ -534,19 +511,19 @@ class OutcomeGLM:
     def predict_link(self, X: ArrayLike) -> NDArray[np.float64]:
         if self.theta_ is None:
             raise RuntimeError("OutcomeGLM is not fit.")
-        Phi = np.asarray(self.basis(_as_2d(X)), dtype=float)
+        Phi = np.asarray(self.basis(as_2d(X)), dtype=float)
         return Phi @ self.theta_
 
     def predict(self, X: ArrayLike) -> NDArray[np.float64]:
         eta = self.predict_link(X)
         if self.link == "identity":
             return eta
-        return _sigmoid(eta)
+        return sigmoid(eta)
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
         if self.theta_ is None:
             raise RuntimeError("OutcomeGLM is not fit.")
-        X_ = _as_2d(X)
+        X_ = as_2d(X)
         dPhi = self.basis.derivative(X_, coordinate)
         deta = dPhi @ self.theta_
         if self.link == "identity":

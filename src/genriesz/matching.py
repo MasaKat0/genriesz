@@ -37,12 +37,7 @@ from typing import Literal
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-
-def _as_2d(x: ArrayLike, name: str) -> NDArray[np.float64]:
-    arr = np.asarray(x, dtype=float)
-    if arr.ndim != 2:
-        raise ValueError(f"{name} must be a 2D array of shape (n, d). Got shape {arr.shape}.")
-    return arr
+from .utils import as_2d, standardize_columns
 
 
 def _as_1d_binary(x: ArrayLike, name: str) -> NDArray[np.int64]:
@@ -61,10 +56,7 @@ def _standardize(X: NDArray[np.float64]) -> NDArray[np.float64]:
     This matches the `scale(X)` call in Lin et al.'s R replication code.
     """
 
-    mu = X.mean(axis=0)
-    sd = X.std(axis=0, ddof=0)
-    sd = np.where(sd <= 0, 1.0, sd)
-    return (X - mu) / sd
+    return standardize_columns(X)[0]
 
 
 @dataclass(frozen=True)
@@ -129,7 +121,7 @@ def nn_matching_inverse_propensity_weights(
     and similarly for controls.
     """
 
-    X_ = _as_2d(X, "X")
+    X_ = as_2d(X, name="X")
     D_ = _as_1d_binary(D, "D")
 
     if M <= 0:
@@ -246,7 +238,7 @@ def _poly_features(t: NDArray[np.float64], degree: int) -> NDArray[np.float64]:
     (n, q_p) feature matrix.
     """
 
-    t = _as_2d(t, "t")
+    t = as_2d(t, name="t")
     d = t.shape[1]
     indices = _multi_indices(d, degree)
     fac = _multi_index_factorials(indices)
@@ -333,9 +325,9 @@ def local_polynomial_nn_lsif_density_ratio(
     if kernel != "ball":
         raise NotImplementedError("Only the M-NN ball kernel is implemented (kernel='ball').")
 
-    Z = _as_2d(numerator, "numerator")
-    X = _as_2d(denominator, "denominator")
-    x_eval = _as_2d(eval_points, "eval_points")
+    Z = as_2d(numerator, name="numerator")
+    X = as_2d(denominator, name="denominator")
+    x_eval = as_2d(eval_points, name="eval_points")
 
     if M <= 0:
         raise ValueError("M must be a positive integer.")
@@ -487,7 +479,7 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
         w aligns with the original sample order.
     """
 
-    X_ = _as_2d(X, "X")
+    X_ = as_2d(X, name="X")
     D_ = _as_1d_binary(D, "D")
 
     if standardize:
