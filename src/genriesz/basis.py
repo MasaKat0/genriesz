@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import copy
 import functools
-import inspect
 import types
 import warnings
 from collections.abc import Callable
@@ -162,21 +161,45 @@ class CallableBasis(BaseBasis):
         return np.asarray(out, dtype=float)
 
 
-# Attributes we may resolve with a normal lookup because binding them runs no
-# code the caller wrote: plain functions and the C-level routines, the two
-# method wrappers, and the slot accessors that ``__slots__`` installs.
+# A class's ``__mro__`` and its ``__dict__`` read through the *metaclass*, whose
+# ``__getattribute__`` the caller may have written. Invoke type's own accessors
+# instead: they read the C-level slots and run nothing.
+_type_mro = type.__dict__["__mro__"].__get__
+_type_dict = type.__dict__["__dict__"].__get__
+
+
+# A distinct absence marker: ``None`` is a legitimate attribute value.
+_MISSING = object()
+
+
+# Descriptor types whose ``__get__`` is implemented in C and merely fetches:
+# plain functions and the C-level routines, and the slot accessors that
+# ``__slots__`` installs. Membership is tested by *exact* type, never with
+# ``isinstance``: a subclass may override ``__get__`` with anything at all.
 #
 # Spelled out rather than tested with ``inspect.isroutine``, which is duck-typed:
 # it answers True for any non-data descriptor, whose ``__get__`` is arbitrary.
-_INERT_DESCRIPTORS = (
-    types.FunctionType,
-    types.BuiltinFunctionType,
-    types.MethodDescriptorType,
-    types.WrapperDescriptorType,
-    staticmethod,
-    classmethod,
-    types.MemberDescriptorType,
+_INERT_DESCRIPTORS = frozenset(
+    {
+        types.FunctionType,
+        types.BuiltinFunctionType,
+        types.MethodDescriptorType,
+        types.WrapperDescriptorType,
+        types.MemberDescriptorType,
+    }
 )
+
+
+# Wrappers whose ``__get__`` can delegate to the object they wrap, and so are
+# inert only as far as that object is. ``classmethod`` delegates on Python
+# 3.10-3.12 (chained descriptors, removed in 3.13); ``partialmethod`` delegates
+# on every version. ``staticmethod`` does not, and is unwrapped only because
+# doing so costs nothing. Keyed by exact type, for the reason given above.
+_DELEGATING_WRAPPERS = {
+    staticmethod: lambda attr: attr.__func__,
+    classmethod: lambda attr: attr.__func__,
+    functools.partialmethod: lambda attr: attr.func,
+}
 
 
 # Deep enough for any real nesting, and it keeps a self-referential
@@ -184,13 +207,28 @@ _INERT_DESCRIPTORS = (
 _MAX_WRAPPER_DEPTH = 16
 
 
+def _class_lookup(cls: type, name: str) -> object:
+    """Find ``name`` in ``cls``'s MRO without consulting the metaclass."""
+
+    for klass in _type_mro(cls):
+        namespace = _type_dict(klass)
+        if name in namespace:
+            return namespace[name]
+    return _MISSING
+
+
+def _defines(cls: type, name: str) -> bool:
+    return _class_lookup(cls, name) is not _MISSING
+
+
 def _is_inert(attr: object) -> bool:
     """Whether binding ``attr`` would run code the caller wrote.
 
-    ``functools.partialmethod`` is inert only as far as what it wraps: its
-    ``__get__`` delegates to the wrapped object's, so ``partialmethod(f)`` is
-    safe for a function ``f`` and unsafe for a descriptor the caller defined.
-    ``staticmethod`` and ``classmethod`` do not delegate, so they need no unwrap.
+    An object that is not a descriptor at all binds to itself, so it is inert.
+    A descriptor is inert only if its ``__get__`` is one of the C fetchers, or
+    if it is a wrapper (see ``_DELEGATING_WRAPPERS``) around something inert:
+    ``partialmethod(f)`` is safe for a function ``f`` and unsafe for a descriptor
+    the caller defined, because its ``__get__`` delegates to the wrapped one's.
 
     A wrapper nested past ``_MAX_WRAPPER_DEPTH`` is reported as not inert, which
     leaves it unresolved. Erring that way costs a misclassified Basis; erring the
@@ -198,10 +236,26 @@ def _is_inert(attr: object) -> bool:
     """
 
     for _ in range(_MAX_WRAPPER_DEPTH):
-        if not isinstance(attr, functools.partialmethod):
-            return isinstance(attr, _INERT_DESCRIPTORS)
-        attr = attr.func
+        cls = type(attr)
+        unwrap = _DELEGATING_WRAPPERS.get(cls)
+        if unwrap is None:
+            return cls in _INERT_DESCRIPTORS or not _defines(cls, "__get__")
+        attr = unwrap(attr)
     return False
+
+
+def _is_data_descriptor(attr: object) -> bool:
+    cls = type(attr)
+    return _defines(cls, "__set__") or _defines(cls, "__delete__")
+
+
+def _instance_dict(obj: object) -> dict | None:
+    """``obj``'s own attribute dict, or None if it has none we can read safely."""
+
+    descriptor = _class_lookup(type(obj), "__dict__")
+    if type(descriptor) is not types.GetSetDescriptorType:
+        return None  # ``__slots__``, or a ``__dict__`` the caller has shadowed
+    return descriptor.__get__(obj)
 
 
 def _instances_define_getattr(cls: type) -> bool:
@@ -212,23 +266,43 @@ def _instances_define_getattr(cls: type) -> bool:
     governs attribute access on the class object, not on its instances.
     """
 
-    return any("__getattr__" in klass.__dict__ for klass in cls.__mro__)
+    return any("__getattr__" in _type_dict(klass) for klass in _type_mro(cls))
+
+
+def _static_lookup(obj: object, name: str) -> tuple[object, bool]:
+    """Find ``name`` as attribute access would, but run no code at all.
+
+    Returns the raw attribute and whether it came from the class, since only a
+    class attribute goes through the descriptor protocol. Data descriptors take
+    precedence over the instance dict, as the data model prescribes.
+    """
+
+    from_class = _class_lookup(type(obj), name)
+    if from_class is not _MISSING and _is_data_descriptor(from_class):
+        return from_class, True
+    namespace = _instance_dict(obj)
+    if namespace is not None and name in namespace:
+        return namespace[name], False
+    return from_class, True
 
 
 def _lookup_method(obj: object, name: str) -> object | None:
     """Find a method without running code that deciding a type should not run.
 
-    Reading the attribute normally would execute any descriptor behind it. This
-    module already refuses to probe ``n_features`` for that reason, and ``fit``
-    and ``copy`` are no different: a caller's feature map may define either as a
-    ``@property`` whose getter raises. So look the name up statically first.
+    Reading the attribute normally would execute any descriptor behind it, and
+    also the caller's ``__getattribute__``. This module already refuses to probe
+    ``n_features`` for that reason, and ``fit`` and ``copy`` are no different: a
+    caller's feature map may define either as a ``@property`` whose getter raises.
+    So the name is looked up statically, walking the MRO dicts directly.
 
-    A static lookup returns the descriptor rather than the value, which is wrong
+    A static lookup finds the descriptor rather than the value, which is wrong
     for the ones that merely fetch: a method must come back bound, and a value
-    stored in a ``__slots__`` member must come back as the value. Resolve those,
-    and only those -- see :func:`_is_inert`. A ``@property``, or any descriptor
-    the caller wrote, stays unresolved, and an object whose ``fit`` is one is
-    therefore a feature map rather than a Basis.
+    stored in a ``__slots__`` member must come back as the value. Bind those, and
+    only those -- see :func:`_is_inert`. A ``@property``, or any descriptor the
+    caller wrote, stays unresolved and is reported as absent, so an object whose
+    ``fit`` is one is a feature map rather than a Basis. Note that such a
+    descriptor may itself be callable: returning it would be enough to mistake
+    the feature map for a Basis, and its ``__get__`` would then run after all.
 
     An object that defines ``__getattr__`` has asked for dynamic resolution, and
     a Basis may legitimately be a proxy, so a name the static lookup missed is
@@ -236,14 +310,25 @@ def _lookup_method(obj: object, name: str) -> object | None:
     missing name, as the data model requires; anything else propagates.
     """
 
-    attr = inspect.getattr_static(obj, name, None)
-    if attr is None:
+    attr, from_class = _static_lookup(obj, name)
+    if attr is _MISSING:
         if _instances_define_getattr(type(obj)):
             return getattr(obj, name, None)
         return None
-    if _is_inert(attr):
-        return getattr(obj, name, None)
-    return attr
+    if not from_class:
+        return attr  # an instance-dict value is returned unbound, as attribute access does
+    if not _is_inert(attr):
+        return None
+    if not _defines(type(attr), "__get__"):
+        return attr  # not a descriptor: it binds to itself
+    if type(attr) is types.MemberDescriptorType:
+        # Reading an unset slot raises AttributeError, the data model's way of
+        # saying the attribute is absent. That is the one meaning it can carry.
+        try:
+            return attr.__get__(obj, type(obj))
+        except AttributeError:
+            return None
+    return attr.__get__(obj, type(obj))
 
 
 def coerce_basis(basis: Basis | Callable) -> Basis:
@@ -282,11 +367,11 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.
     if isinstance(basis, BaseBasis):
-        shadowed = _lookup_method(basis, "copy")
-        if not callable(shadowed):
+        if not callable(_lookup_method(basis, "copy")):
+            shadow, _ = _static_lookup(basis, "copy")
             raise TypeError(
                 f"{type(basis).__name__} shadows the Basis method 'copy' with a "
-                f"{type(shadowed).__name__}. genriesz fits a copy of the basis, so "
+                f"{type(shadow).__name__}. genriesz fits a copy of the basis, so "
                 "'copy' must be a method returning a new basis. Rename the attribute."
             )
         return basis

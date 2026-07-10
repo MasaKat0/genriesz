@@ -490,20 +490,32 @@ def test_a_metaclass_getattr_does_not_make_instances_look_dynamic():
     assert isinstance(coerce_basis(_Map()), CallableBasis)
 
 
-def test_coerce_basis_does_not_run_a_custom_descriptor_named_fit():
+@pytest.mark.parametrize("callable_descriptor", [False, True])
+def test_coerce_basis_does_not_run_a_custom_descriptor_named_fit(callable_descriptor):
     """inspect.isroutine is duck-typed and answers True for any non-data descriptor.
 
     Resolving one would run the caller's ``__get__``, which is what main's
     grr_ate did. Only the descriptor types that merely fetch are resolved.
+
+    An unresolved descriptor must be reported as *absent*, not returned. A
+    descriptor may define ``__call__`` as well as ``__get__``, and returning it
+    would pass the callable test, mistake the feature map for a Basis, and run
+    the ``__get__`` anyway on the first ``basis.copy()``.
     """
 
     class _RaisingDescriptor:
         def __get__(self, obj, objtype=None):
             raise RuntimeError("custom __get__ ran")
 
+    class _CallableRaisingDescriptor(_RaisingDescriptor):
+        def __call__(self, *args, **kwargs):
+            return None
+
+    descriptor = _CallableRaisingDescriptor if callable_descriptor else _RaisingDescriptor
+
     class _Map:
-        fit = _RaisingDescriptor()
-        copy = _RaisingDescriptor()
+        fit = descriptor()
+        copy = descriptor()
 
         def __call__(self, X):
             X = np.asarray(X, dtype=float)
@@ -516,6 +528,180 @@ def test_coerce_basis_does_not_run_a_custom_descriptor_named_fit():
     assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
     estimate = genriesz.grr_ate(X=X, Y=Y, basis=_Map(), generator=SquaredGenerator(C=0.0))
     assert estimate.estimand == "ATE"
+
+
+def test_coerce_basis_does_not_trust_a_subclass_of_an_inert_wrapper():
+    """The inert types are matched exactly: a subclass may override __get__.
+
+    ``staticmethod`` and ``partialmethod`` are ordinary classes. A subclass can
+    replace ``__get__``, or intercept the read of the wrapped object that
+    ``_is_inert`` performs, and either would run the caller's code.
+    """
+
+    import functools
+
+    def _plain_fit(self, X=None, y=None):
+        return self
+
+    class _EvilStaticMethod(staticmethod):
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("staticmethod.__get__ ran")
+
+    class _EvilPartialMethod(functools.partialmethod):
+        def __getattribute__(self, name):
+            if name == "func":
+                raise RuntimeError("partialmethod.func was read")
+            return super().__getattribute__(name)
+
+    class _StaticMap:
+        fit = _EvilStaticMethod(_plain_fit)
+        copy = _EvilStaticMethod(_plain_fit)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    class _PartialMap:
+        fit = _EvilPartialMethod(_plain_fit)
+        copy = _EvilPartialMethod(_plain_fit)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    Xn, Xd = _two_samples()
+    for factory in (_StaticMap, _PartialMap):
+        assert isinstance(coerce_basis(factory()), CallableBasis)
+        ratio = genriesz.fit_density_ratio(Xn, Xd, basis=factory(), lam=0.1)
+        assert np.shape(ratio.beta) == (3,)
+
+
+def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
+    """classmethod.__get__ delegates to the wrapped descriptor on Python 3.10-3.12.
+
+    The delegation (chained classmethod descriptors) was removed in 3.13, so a
+    check written against 3.13 alone would let the caller's ``__get__`` run on
+    every other supported version. Decide by type, not by what today's
+    interpreter happens to do.
+    """
+
+    from genriesz.basis import _is_inert
+
+    class _RaisingDescriptor:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("custom __get__ ran")
+
+    def _plain_fit(cls, X=None, y=None):
+        return cls
+
+    assert _is_inert(classmethod(_plain_fit))
+    assert not _is_inert(classmethod(_RaisingDescriptor()))
+    assert not _is_inert(staticmethod(_RaisingDescriptor()))
+
+    class _Map:
+        fit = classmethod(_RaisingDescriptor())
+        copy = classmethod(_RaisingDescriptor())
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_data_descriptor_outranks_the_instance_dict():
+    """Walking the MRO by hand must honour the precedence attribute access uses.
+
+    A ``property`` named ``fit`` wins over ``obj.__dict__['fit']``. Reading the
+    instance dict first would report the shadowed value as the method, call the
+    object a Basis, and then run the property's getter on the first ``fit()``.
+    """
+
+    class _Map:
+        def __init__(self):
+            object.__setattr__(self, "_seen", None)
+            self.__dict__["fit"] = lambda X, y=None: None
+            self.__dict__["copy"] = lambda: None
+
+        @property
+        def fit(self):
+            raise RuntimeError("property getter ran")
+
+        @property
+        def copy(self):
+            raise RuntimeError("property getter ran")
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_shadowed_instance_dict_is_not_read():
+    """``__dict__`` itself may be a property the caller wrote."""
+
+    class _Map:
+        @property
+        def __dict__(self):
+            raise RuntimeError("__dict__ getter ran")
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_coerce_basis_does_not_consult_a_hostile_metaclass():
+    """Classifying an object must not read its class through the metaclass.
+
+    ``inspect.getattr_static`` reads ``entry.__dict__`` for each class in the
+    MRO, which goes through the metaclass's ``__getattribute__``. Reading
+    ``cls.__mro__`` does too. Both run caller code for a plain feature map that
+    main wrapped without complaint.
+    """
+
+    class _MetaBlockingDict(type):
+        def __getattribute__(cls, name):
+            if name == "__dict__":
+                raise RuntimeError("metaclass __dict__ was read")
+            return type.__getattribute__(cls, name)
+
+    class _MetaBlockingMro(type):
+        def __getattribute__(cls, name):
+            if name == "__mro__":
+                raise RuntimeError("metaclass __mro__ was read")
+            return type.__getattribute__(cls, name)
+
+    class _DictMap(metaclass=_MetaBlockingDict):
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    class _MroMap(metaclass=_MetaBlockingMro):
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    # Classification is safe for both. Only _MroMap survives the per-fold
+    # deepcopy; _DictMap is a basis that cannot be copied, and both entry points
+    # now refuse it alike (see the strictening recorded in the design note).
+    assert isinstance(coerce_basis(_DictMap()), CallableBasis)
+    assert isinstance(coerce_basis(_MroMap()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    ratio = genriesz.fit_density_ratio(Xn, Xd, basis=_MroMap(), lam=0.1)
+    assert np.shape(ratio.beta) == (3,)
 
 
 def test_coerce_basis_recognises_a_partialmethod_and_a_c_implemented_method():
