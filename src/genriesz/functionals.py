@@ -126,15 +126,33 @@ class CallableFunctional(LinearFunctional):
 
         M = np.empty((n, p), dtype=float)
 
-        # Build M_{i,j} = m(X_i, phi_j) by applying `m` to each basis coordinate.
-        for j in range(p):
-            def phi_j(x_row: NDArray[np.float64], *, _j: int = j) -> float:
-                x1 = _as_1d_row(x_row)
-                Phi = np.asarray(basis(x1.reshape(1, -1)), dtype=float)
-                return float(Phi[_j] if Phi.ndim == 1 else Phi[0, _j])
+        # Build M_{i,j} = m(X_i, phi_j). The n*p calls to a black-box `m` are
+        # unavoidable, but for a fixed row every coordinate function phi_j
+        # evaluates the *same* basis at the same points that `m(X_i, .)` probes.
+        # Caching the basis vector per point (per row) collapses the p redundant
+        # full-basis evaluations into one per distinct point. The result is
+        # identical because a fitted basis is a pure function of its input.
+        for i in range(n):
+            x_i = _as_1d_row(X_[i])
+            cache: dict[bytes, NDArray[np.float64]] = {}
 
-            for i in range(n):
-                M[i, j] = float(self.m(_as_1d_row(X_[i]), phi_j))
+            def phi_vec(
+                x_row: NDArray[np.float64], *, _cache=cache, _basis=basis
+            ) -> NDArray[np.float64]:
+                x1 = _as_1d_row(x_row)
+                key = x1.tobytes()
+                vec = _cache.get(key)
+                if vec is None:
+                    Phi = np.asarray(_basis(x1.reshape(1, -1)), dtype=float)
+                    vec = Phi if Phi.ndim == 1 else Phi[0]
+                    _cache[key] = vec
+                return vec
+
+            for j in range(p):
+                def phi_j(x_row: NDArray[np.float64], *, _j: int = j, _phi_vec=phi_vec) -> float:
+                    return float(_phi_vec(x_row)[_j])
+
+                M[i, j] = float(self.m(x_i, phi_j))
 
         return M
 
