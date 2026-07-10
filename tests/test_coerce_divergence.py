@@ -518,6 +518,55 @@ def test_coerce_basis_does_not_run_a_custom_descriptor_named_fit():
     assert estimate.estimand == "ATE"
 
 
+def test_coerce_basis_recognises_a_partialmethod_and_a_c_implemented_method():
+    """Both are ordinary ways to spell a method, and neither __get__ runs user code."""
+
+    import functools
+
+    class _PartialMethodBasis:
+        def __init__(self):
+            self._seen = None
+
+        def _fit(self, X, y=None, *, scale=1.0):
+            self._seen = scale * np.asarray(X, dtype=float).mean(axis=0)
+            return self
+
+        fit = functools.partialmethod(_fit, scale=1.0)
+
+        def copy(self):
+            return _PartialMethodBasis()
+
+        def __call__(self, X):
+            if self._seen is None:
+                raise RuntimeError("used before fit()")
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X - self._seen])
+
+    basis = _PartialMethodBasis()
+    assert coerce_basis(basis) is basis
+
+    X, Y = _ate_sample()
+    estimate = genriesz.grr_ate(
+        X=X, Y=Y, basis=_PartialMethodBasis(), generator=SquaredGenerator(C=0.0)
+    )
+    assert estimate.estimand == "ATE"
+
+    Xn, Xd = _two_samples()
+    ratio = genriesz.fit_density_ratio(Xn, Xd, basis=_PartialMethodBasis(), lam=0.1)
+    assert np.shape(ratio.beta) == (3,)
+
+    class _CMethodBasis(dict):  # dict.copy is a C method_descriptor
+        def fit(self, X, y=None):
+            return self
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    c_basis = _CMethodBasis()
+    assert coerce_basis(c_basis) is c_basis
+
+
 def test_instances_define_getattr_sees_the_class_and_its_bases():
     class _Base:
         def __getattr__(self, name):

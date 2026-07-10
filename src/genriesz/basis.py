@@ -16,6 +16,7 @@ All docstrings and comments are in English as requested.
 from __future__ import annotations
 
 import copy
+import functools
 import inspect
 import types
 import warnings
@@ -174,6 +175,7 @@ _INERT_DESCRIPTORS = (
     types.WrapperDescriptorType,
     staticmethod,
     classmethod,
+    functools.partialmethod,
     types.MemberDescriptorType,
 )
 
