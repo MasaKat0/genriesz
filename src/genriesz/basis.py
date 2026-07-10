@@ -169,21 +169,32 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     infers ``n_features`` by *calling* the wrapped object rather than by
     delegating to its ``fit``, so the user's ``fit`` would never run.
 
+    Every returned object has a callable ``copy``, either from
+    :class:`BaseBasis` or from the duck-typing check, so callers may rely on it.
+
     Notes
     -----
     Do **not** probe ``basis.n_features`` here. Many bases (e.g.
     :class:`PolynomialBasis` and :class:`TreatmentInteractionBasis`) expose
     ``n_features`` as a property that is only valid *after* ``fit()``.
     Accessing it early would raise, and ``hasattr(obj, 'n_features')`` would
-    inadvertently trigger that property.
+    inadvertently trigger that property. ``getattr(obj, 'fit', None)`` and
+    ``getattr(obj, 'copy', None)`` are safe: neither name is such a property.
     """
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.
     if isinstance(basis, BaseBasis):
         return basis
 
-    # A user-defined Basis: ``copy`` and ``fit`` are part of the protocol.
-    if hasattr(basis, "fit") and hasattr(basis, "copy") and callable(basis):
+    # A user-defined Basis: ``copy`` and ``fit`` are part of the protocol, and
+    # both must be *callable*. A plain feature map carrying unrelated ``fit`` or
+    # ``copy`` attributes is not a Basis, and belongs in the CallableBasis branch
+    # below; ``hasattr`` alone would misroute it and then fail on ``basis.copy()``.
+    if (
+        callable(getattr(basis, "fit", None))
+        and callable(getattr(basis, "copy", None))
+        and callable(basis)
+    ):
         return basis  # type: ignore[return-value]
 
     # Otherwise, interpret it as a raw callable feature map.

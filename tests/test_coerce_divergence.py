@@ -21,7 +21,6 @@ from genriesz.basis import BaseBasis, CallableBasis, PolynomialBasis, coerce_bas
 from genriesz.generators import (
     BKLGenerator,
     BPGenerator,
-    BregmanGenerator,
     PUGenerator,
     SquaredGenerator,
     UKLGenerator,
@@ -57,6 +56,22 @@ class StatefulDuckBasis:
         if self._mean is None:
             raise RuntimeError("StatefulDuckBasis used before fit()")
         return 1 + len(self._mean)
+
+
+class _MetadataCarryingCallable:
+    """A plain feature map whose ``fit`` and ``copy`` are data, not methods.
+
+    It is not a Basis. ``hasattr`` cannot tell it apart from one, so a
+    ``hasattr``-only predicate routes it past :class:`CallableBasis` and then
+    dies on ``basis.copy()``.
+    """
+
+    fit = "fitted at import time"
+    copy = "deep"
+
+    def __call__(self, X):
+        X = np.asarray(X, dtype=float)
+        return np.column_stack([np.ones(len(X)), X])
 
 
 def _two_samples(seed: int = 0):
@@ -115,6 +130,40 @@ def test_wrapping_a_stateful_basis_would_skip_its_fit():
     assert duck.fit_calls == 0
 
 
+def test_coerce_basis_wraps_a_callable_carrying_non_callable_fit_and_copy():
+    """``hasattr`` is too weak: only a *callable* fit and copy make a Basis."""
+
+    out = coerce_basis(_MetadataCarryingCallable())
+    assert isinstance(out, CallableBasis)
+    assert callable(out.copy)
+
+
+def test_fit_density_ratio_accepts_a_callable_carrying_non_callable_metadata():
+    Xn, Xd = _two_samples()
+    result = genriesz.fit_density_ratio(Xn, Xd, basis=_MetadataCarryingCallable(), lam=0.1)
+    assert np.shape(result.beta) == (3,)
+
+
+def test_grr_ate_accepts_a_callable_carrying_non_callable_metadata():
+    X, Y = _ate_sample()
+    result = genriesz.grr_ate(
+        X=X, Y=Y, basis=_MetadataCarryingCallable(), generator=SquaredGenerator(C=0.0)
+    )
+    assert result.estimand == "ATE"
+
+
+def test_every_coerced_basis_exposes_a_callable_copy():
+    """density_ratio calls .copy() unconditionally; coerce_basis must guarantee it."""
+
+    for spec in [
+        PolynomialBasis(degree=2),
+        StatefulDuckBasis(),
+        _MetadataCarryingCallable(),
+        lambda X: np.asarray(X, dtype=float),
+    ]:
+        assert callable(coerce_basis(spec).copy)
+
+
 # ------------------------------------------------- basis parity across modules
 
 
@@ -165,19 +214,35 @@ def test_coerce_generator_returns_an_instance_unchanged():
     assert coerce_generator(gen) is gen
 
 
-def test_coerce_generator_applies_branch_fn_to_named_branchwise_generators():
+def test_coerce_generator_reproduces_the_name_to_generator_map():
+    """Pin the class, C, omega and branch for every name, including the aliases."""
+
     def pos(_x):
         return 1
 
-    for name, cls in [
-        ("ukl", UKLGenerator),
-        ("bkl", BKLGenerator),
-        ("bp", BPGenerator),
-        ("pu", PUGenerator),
-    ]:
+    expected = {
+        "ukl": (UKLGenerator, 0.0, None),
+        "bkl": (BKLGenerator, 1.0, None),
+        "bp": (BPGenerator, 0.0, 0.5),
+        "power": (BPGenerator, 0.0, 0.5),
+        "pu": (PUGenerator, 1.0, None),
+    }
+    for name, (cls, c_value, omega) in expected.items():
         gen = coerce_generator(name, branch_fn=pos)
         assert isinstance(gen, cls)
+        assert float(gen.C) == pytest.approx(c_value)
         assert gen.branch_fn is pos
+        if omega is not None:
+            assert float(gen.omega) == pytest.approx(omega)
+
+    for name in ["sq", "squared", "lsif"]:
+        gen = coerce_generator(name)
+        assert isinstance(gen, SquaredGenerator)
+        assert float(gen.C) == pytest.approx(0.0)
+
+
+def test_coerce_generator_ignores_surrounding_whitespace_and_case():
+    assert isinstance(coerce_generator("  SQ  "), SquaredGenerator)
 
 
 def test_coerce_generator_rejects_branchwise_names_when_disallowed():
@@ -236,9 +301,51 @@ def test_fit_density_ratio_still_accepts_branchwise_names():
     """A density ratio is nonnegative, so the positive branch is always right."""
 
     Xn, Xd = _two_samples()
-    for name in ["sq", "ukl", "bkl", "bp", "pu"]:
+    expected = {
+        "sq": SquaredGenerator,
+        "ukl": UKLGenerator,
+        "bkl": BKLGenerator,
+        "bp": BPGenerator,
+        "power": BPGenerator,
+        "pu": PUGenerator,
+    }
+    for name, cls in expected.items():
         result = genriesz.fit_density_ratio(Xn, Xd, generator=name, lam=0.1)
-        assert isinstance(result.generator, BregmanGenerator)
+        assert isinstance(result.generator, cls)
+
+
+def test_grr_functional_still_accepts_a_raw_g_without_a_generator():
+    """The new validation must not fire on the generator=None, g=... path."""
+
+    X, Y = _ate_sample()
+    result = genriesz.grr_ate(
+        X=X,
+        Y=Y,
+        basis=PolynomialBasis(degree=2),
+        g=lambda a: 0.5 * a**2,
+        grad_g=lambda a: a,
+        inv_grad_g=lambda v: v,
+        grad2_g=lambda a: np.ones_like(a),
+    )
+    assert isinstance(result.estimates["rw"].estimate, float)
+
+
+def test_grr_functional_still_rejects_both_generator_and_g():
+    X, Y = _ate_sample()
+    with pytest.raises(ValueError, match="not both"):
+        genriesz.grr_ate(
+            X=X,
+            Y=Y,
+            basis=PolynomialBasis(degree=1),
+            generator=SquaredGenerator(C=0.0),
+            g=lambda a: a,
+        )
+
+
+def test_grr_functional_still_requires_a_generator_or_g():
+    X, Y = _ate_sample()
+    with pytest.raises(ValueError, match="must provide generator or g"):
+        genriesz.grr_ate(X=X, Y=Y, basis=PolynomialBasis(degree=1))
 
 
 def test_fit_density_ratio_named_generator_uses_the_positive_branch():
