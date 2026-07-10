@@ -596,6 +596,20 @@ def test_a_classmethod_is_inert_exactly_when_the_interpreter_stops_chaining():
         _is_inert,
     )
 
+    # Measure the interpreter independently of the module's flag, so that a wrong
+    # flag cannot make this test agree with itself.
+    observed = []
+
+    class _Witness:
+        def __get__(self, obj, objtype=None):
+            observed.append(True)
+
+    class _Holder:
+        attr = classmethod(_Witness())
+
+    bound = _Holder().attr  # noqa: F841 - the point is the binding, not the value
+    assert bool(observed) is _CLASSMETHOD_DELEGATES
+
     # The invariant, stated where it can fail on either kind of interpreter. On
     # one of them each half is vacuous, so only the pair pins the placement.
     assert (classmethod in _DELEGATING_WRAPPERS) is _CLASSMETHOD_DELEGATES
@@ -1023,6 +1037,154 @@ def test_is_inert_terminates_on_a_self_referential_partialmethod():
 
     pm.func = pm
     assert not _is_inert(pm)
+
+
+def test_the_descriptor_protocol_is_invoked_through_the_type():
+    """``attr.__get__`` is an attribute lookup on ``attr``, and can be shadowed.
+
+    Every inert type's own ``__get__`` is a non-data descriptor, so an entry in
+    the instance dict wins. Binding through the shadow would run the caller's
+    code and hand back a callable for an attribute that is not one.
+    """
+
+    ran = []
+
+    def _fake_get(obj, objtype=None):
+        ran.append(True)
+        return lambda *args, **kwargs: None
+
+    fit = staticmethod(object())
+    copy = staticmethod(object())
+    fit.__get__ = _fake_get
+    copy.__get__ = _fake_get
+
+    class _Map:
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    _Map.fit = fit
+    _Map.copy = copy
+
+    obj = _Map()
+    assert not callable(obj.fit)  # what attribute access actually returns
+    assert isinstance(coerce_basis(obj), CallableBasis)
+    assert ran == []
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_partialmethod_wrapping_a_hostile_object_is_not_inert():
+    """``partialmethod.__get__`` delegates by reading ``func.__get__``.
+
+    That read goes through the wrapped object's own attribute access, so a
+    wrapped object with a ``__getattribute__`` runs before any type reasoning.
+    """
+
+    import functools
+
+    class _Wrapped:
+        def __getattribute__(self, name):
+            if name == "__get__":
+                raise RuntimeError("wrapped __get__ was read")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, *args, **kwargs):
+            return None
+
+    class _Map:
+        fit = functools.partialmethod(_Wrapped())
+        copy = functools.partialmethod(_Wrapped())
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_namespace_key_never_gets_to_compare_itself():
+    """A dict lookup compares the key against colliding entries.
+
+    An instance dict may be written through ``obj.__dict__`` with a key whose
+    ``__hash__`` collides with ``'fit'`` and whose ``__eq__`` is caller code.
+    """
+
+    class _CollidingKey:
+        def __hash__(self):
+            return hash("fit")
+
+        def __eq__(self, other):
+            raise RuntimeError("key comparison ran")
+
+    class _Map:
+        def __init__(self):
+            object.__getattribute__(self, "__dict__")[_CollidingKey()] = 1
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_a_c_level_classmethod_descriptor_is_a_method():
+    """``datetime.date.today`` is a classmethod_descriptor, and binding it runs C."""
+
+    import datetime
+
+    class _DateBasis(datetime.date, BaseBasis):
+        copy = datetime.date.__dict__["today"]
+
+        def fit(self, X, y=None):
+            return self
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _DateBasis.today()
+    assert isinstance(basis.copy(), _DateBasis)
+    assert coerce_basis(basis) is basis
+
+
+def test_a_custom_descriptor_that_defers_to_getattr_is_still_refused():
+    """A documented deviation: matching CPython here would mean running it.
+
+    CPython consults ``__getattr__`` after *any* descriptor raises
+    ``AttributeError``. Learning that a descriptor raises means running it, and
+    this module refuses to run the caller's descriptors while deciding a type.
+    Falling back for every unresolved descriptor would instead run a ``property``
+    whose getter raises, on any object that also defines ``__getattr__``.
+    """
+
+    class _Deferring:
+        def __get__(self, obj, objtype=None):
+            raise AttributeError("defer")
+
+    class _Basis(BaseBasis):
+        copy = _Deferring()
+
+        def __getattr__(self, name):
+            if name == "copy":
+                return lambda: _Basis()
+            raise AttributeError(name)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _Basis()
+    assert callable(basis.copy)  # plain attribute access resolves it
+    with pytest.raises(TypeError, match="shadows the Basis method 'copy'"):
+        coerce_basis(basis)  # and genriesz refuses it, loudly
 
 
 def test_classification_never_reads_dunder_class():

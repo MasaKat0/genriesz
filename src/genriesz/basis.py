@@ -214,6 +214,7 @@ _INERT_DESCRIPTORS = frozenset(
         types.MethodDescriptorType,
         types.WrapperDescriptorType,
         types.MemberDescriptorType,
+        types.ClassMethodDescriptorType,
         staticmethod,
     }
     | (set() if _CLASSMETHOD_DELEGATES else {classmethod})
@@ -244,13 +245,28 @@ _BINDING_CONSTRAINED = frozenset(
 )
 
 
+def _dict_lookup(namespace, name: str) -> object:
+    """Find a string key without letting the caller's keys answer the question.
+
+    ``name in namespace`` hashes ``name`` and compares it against every colliding
+    entry, and a namespace -- a class body, or an instance dict written through
+    ``obj.__dict__`` -- may hold a key whose ``__hash__`` collides and whose
+    ``__eq__`` is the caller's code. Iterating compares nothing.
+    """
+
+    for key, value in namespace.items():
+        if type(key) is str and key == name:
+            return value
+    return _MISSING
+
+
 def _class_lookup(cls: type, name: str) -> object:
     """Find ``name`` in ``cls``'s MRO without consulting the metaclass."""
 
     for klass in _type_mro(cls):
-        namespace = _type_dict(klass)
-        if name in namespace:
-            return namespace[name]
+        found = _dict_lookup(_type_dict(klass), name)
+        if found is not _MISSING:
+            return found
     return _MISSING
 
 
@@ -293,6 +309,11 @@ def _is_inert(attr: object) -> bool:
             return False
         seen.append(attr)
         attr = unwrap(attr)
+        if _overrides_attribute_access(type(attr)):
+            # ``partialmethod.__get__`` delegates by *reading* ``func.__get__``,
+            # so the wrapped object's own attribute access runs before any of the
+            # reasoning below applies.
+            return False
 
 
 def _is_data_descriptor(attr: object) -> bool:
@@ -339,10 +360,9 @@ def _overrides_attribute_access(cls: type) -> bool:
     """
 
     for klass in _type_mro(cls):
-        namespace = _type_dict(klass)
-        if "__getattribute__" not in namespace:
+        getattribute = _dict_lookup(_type_dict(klass), "__getattribute__")
+        if getattribute is _MISSING:
             continue
-        getattribute = namespace["__getattribute__"]
         if type(getattribute) is not types.WrapperDescriptorType:
             return True
         return not _descriptor_binds_to(getattribute, cls)
@@ -368,7 +388,10 @@ def _instances_define_getattr(cls: type) -> bool:
     governs attribute access on the class object, not on its instances.
     """
 
-    return any("__getattr__" in _type_dict(klass) for klass in _type_mro(cls))
+    return any(
+        _dict_lookup(_type_dict(klass), "__getattr__") is not _MISSING
+        for klass in _type_mro(cls)
+    )
 
 
 def _static_lookup(obj: object, name: str) -> tuple[object, bool]:
@@ -383,8 +406,10 @@ def _static_lookup(obj: object, name: str) -> tuple[object, bool]:
     if from_class is not _MISSING and _is_data_descriptor(from_class):
         return from_class, True
     namespace = _instance_dict(obj)
-    if namespace is not None and name in namespace:
-        return namespace[name], False
+    if namespace is not None:
+        from_instance = _dict_lookup(namespace, name)
+        if from_instance is not _MISSING:
+            return from_instance, False
     return from_class, True
 
 
@@ -433,10 +458,22 @@ def _lookup_method(obj: object, name: str) -> object | None:
         # saying the attribute is absent. That is the one meaning it can carry,
         # and attribute access answers it by consulting ``__getattr__`` next.
         try:
-            return attr.__get__(obj, type(obj))
+            return _bind(attr, obj)
         except AttributeError:
             return _dynamic_lookup(obj, name)
-    return attr.__get__(obj, type(obj))
+    return _bind(attr, obj)
+
+
+def _bind(descriptor: object, obj: object) -> object:
+    """Invoke the descriptor protocol the way the interpreter invokes it.
+
+    ``descriptor.__get__`` is an attribute lookup *on the descriptor*, and an
+    instance dict entry named ``__get__`` shadows the slot for every type whose
+    own ``__get__`` is a non-data descriptor -- which is all of the inert ones.
+    The protocol uses the type's slot, and so must this.
+    """
+
+    return type(descriptor).__get__(descriptor, obj, type(obj))  # type: ignore[attr-defined]
 
 
 def _dynamic_lookup(obj: object, name: str) -> object | None:
