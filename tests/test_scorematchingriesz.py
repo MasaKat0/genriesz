@@ -103,3 +103,64 @@ def test_fit_functions_do_not_mutate_global_numpy_rng() -> None:
     after = np.random.get_state()[1].copy()
 
     assert np.array_equal(before, after)
+
+
+def test_fit_functions_do_not_mutate_global_torch_rng() -> None:
+    import torch
+
+    from genriesz.scorematchingriesz import fit_sq_riesz_ame, fit_sq_riesz_ratio
+
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=(48, 3))
+    x_q = rng.normal(size=(48, 3))
+    x_p = rng.normal(loc=0.4, size=(48, 3))
+
+    # Put the global torch RNG in a non-trivial state, unrelated to any fit seed.
+    torch.manual_seed(777)
+    _ = torch.rand(5)
+    before = torch.get_rng_state().clone()
+
+    # torch.manual_seed would also seed MPS/XPU; the fits must not, since only
+    # CPU+CUDA are saved and restored. Capture the MPS state too where present so
+    # a regression back to torch.manual_seed in _seed_torch is caught here.
+    mps_available = torch.backends.mps.is_available()
+    if mps_available:
+        import torch.mps
+
+        torch.mps.manual_seed(222)
+        mps_before = torch.mps.get_rng_state().clone()
+
+    # A directly decorated fit and one that delegates to _fit_ratio_template must
+    # both leave the global torch RNG exactly as they found it.
+    fit_sq_riesz_ame(x, n_steps=2, batch_size=16, device="cpu")
+    fit_sq_riesz_ratio(x_q, x_p, n_steps=2, batch_size=16, device="cpu")
+    after = torch.get_rng_state()
+
+    assert torch.equal(before, after)
+    if mps_available:
+        assert torch.equal(mps_before, torch.mps.get_rng_state())
+
+
+def test_fit_is_reproducible_regardless_of_global_torch_rng() -> None:
+    import torch
+
+    from genriesz.scorematchingriesz import fit_sq_riesz_ratio
+
+    rng = np.random.default_rng(2)
+    x_q = rng.normal(size=(48, 2)).astype("float32")
+    x_p = rng.normal(loc=0.3, size=(48, 2)).astype("float32")
+
+    def params(seed: int) -> torch.Tensor:
+        m = fit_sq_riesz_ratio(
+            x_q, x_p, n_steps=5, batch_size=16, seed=seed, device="cpu"
+        )
+        return torch.cat([p.detach().reshape(-1) for p in m.parameters()])
+
+    torch.manual_seed(1)
+    a = params(0)
+    torch.manual_seed(999999)
+    _ = torch.rand(23)  # a very different global state before the second fit
+    b = params(0)
+
+    # Same seed -> identical fit, independent of the global RNG state going in.
+    assert torch.allclose(a, b)
