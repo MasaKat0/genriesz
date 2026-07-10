@@ -175,9 +175,21 @@ _INERT_DESCRIPTORS = (
     types.WrapperDescriptorType,
     staticmethod,
     classmethod,
-    functools.partialmethod,
     types.MemberDescriptorType,
 )
+
+
+def _is_inert(attr: object) -> bool:
+    """Whether binding ``attr`` would run code the caller wrote.
+
+    ``functools.partialmethod`` is inert only as far as what it wraps: its
+    ``__get__`` delegates to the wrapped object's, so ``partialmethod(f)`` is
+    safe for a function ``f`` and unsafe for a descriptor the caller defined.
+    """
+
+    if isinstance(attr, functools.partialmethod):
+        return _is_inert(attr.func)
+    return isinstance(attr, _INERT_DESCRIPTORS)
 
 
 def _instances_define_getattr(cls: type) -> bool:
@@ -202,9 +214,9 @@ def _lookup_method(obj: object, name: str) -> object | None:
     A static lookup returns the descriptor rather than the value, which is wrong
     for the ones that merely fetch: a method must come back bound, and a value
     stored in a ``__slots__`` member must come back as the value. Resolve those,
-    and only those. A ``@property``, or any descriptor the caller wrote, stays
-    unresolved, and an object whose ``fit`` is one is therefore a feature map
-    rather than a Basis.
+    and only those -- see :func:`_is_inert`. A ``@property``, or any descriptor
+    the caller wrote, stays unresolved, and an object whose ``fit`` is one is
+    therefore a feature map rather than a Basis.
 
     An object that defines ``__getattr__`` has asked for dynamic resolution, and
     a Basis may legitimately be a proxy, so a name the static lookup missed is
@@ -217,7 +229,7 @@ def _lookup_method(obj: object, name: str) -> object | None:
         if _instances_define_getattr(type(obj)):
             return getattr(obj, name, None)
         return None
-    if isinstance(attr, _INERT_DESCRIPTORS):
+    if _is_inert(attr):
         return getattr(obj, name, None)
     return attr
 

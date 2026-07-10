@@ -567,6 +567,29 @@ def test_coerce_basis_recognises_a_partialmethod_and_a_c_implemented_method():
     assert coerce_basis(c_basis) is c_basis
 
 
+def test_a_partialmethod_is_inert_only_as_far_as_what_it_wraps():
+    """partialmethod.__get__ delegates, so it cannot be trusted unconditionally."""
+
+    import functools
+
+    class _RaisingDescriptor:
+        def __get__(self, obj, objtype=None):
+            raise RuntimeError("custom __get__ ran")
+
+    class _Map:
+        fit = functools.partialmethod(_RaisingDescriptor())
+        copy = functools.partialmethod(_RaisingDescriptor())
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
 def test_instances_define_getattr_sees_the_class_and_its_bases():
     class _Base:
         def __getattr__(self, name):
