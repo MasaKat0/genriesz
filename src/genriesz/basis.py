@@ -552,6 +552,13 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     raise TypeError("basis must be a Basis instance or a callable basis(X)->Phi")
 
 
+_UNFITTED_POLYNOMIAL_MESSAGE = (
+    "PolynomialBasis must be fit() before use. Pass auto_fit=True to fit on the "
+    "fly; that is leak-free here because PolynomialBasis learns only the monomial "
+    "layout from the column count, not any data-dependent statistic."
+)
+
+
 class PolynomialBasis(BaseBasis):
     """Full polynomial features up to a given total degree.
 
@@ -561,13 +568,26 @@ class PolynomialBasis(BaseBasis):
     then lexicographic within each total degree.
 
     Derivatives are implemented analytically via the monomial exponent table.
+
+    Calling the basis before :meth:`fit` raises ``RuntimeError``, as every basis
+    but :class:`CallableBasis` does. Pass ``auto_fit=True`` to instead fit on the
+    first call; this is leak-free for polynomials, whose ``fit`` reads only the
+    number of input columns, not any data-dependent statistic.
     """
 
-    def __init__(self, degree: int = 2, *, include_bias: bool = True):
+    def __init__(
+        self, degree: int = 2, *, include_bias: bool = True, auto_fit: bool = False
+    ):
         if int(degree) < 0:
             raise ValueError("degree must be >= 0")
         self.degree = int(degree)
         self.include_bias = bool(include_bias)
+        # When False (default), calling before ``fit`` raises, matching every
+        # other basis. When True, an unfitted call fits on the fly. That is safe
+        # here -- unlike the kernel bases, ``fit`` learns only the monomial
+        # layout from the column count, not any data-dependent statistic -- so
+        # it leaks nothing, but it stays opt-in for a uniform contract.
+        self.auto_fit = bool(auto_fit)
 
         self._powers: NDArray[np.int64] | None = None
         self._n_input_features: int | None = None
@@ -611,7 +631,8 @@ class PolynomialBasis(BaseBasis):
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
         X2, single = _as_2d_allow_1d(X)
         if self._powers is None or self._n_input_features is None:
-            # Allow stateless usage by fitting on the fly.
+            if not self.auto_fit:
+                raise RuntimeError(_UNFITTED_POLYNOMIAL_MESSAGE)
             self.fit(X2)
         if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
             raise ValueError(
@@ -636,6 +657,8 @@ class PolynomialBasis(BaseBasis):
 
         X2, single = _as_2d_allow_1d(X)
         if self._powers is None or self._n_input_features is None:
+            if not self.auto_fit:
+                raise RuntimeError(_UNFITTED_POLYNOMIAL_MESSAGE)
             self.fit(X2)
         if self._n_input_features is None or int(X2.shape[1]) != int(self._n_input_features):
             raise ValueError(
