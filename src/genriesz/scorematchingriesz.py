@@ -15,6 +15,7 @@ experiment scripts.
 
 from __future__ import annotations
 
+import functools
 import math
 import random
 from collections.abc import Callable, Sequence
@@ -82,9 +83,10 @@ def set_seed(seed: int = 0) -> None:
     """Set Python, NumPy, and PyTorch random seeds.
 
     This is a user-facing convenience for scripting. Library fit functions do
-    NOT call it; they seed only the PyTorch RNG (see :func:`_seed_torch`) so
-    that fitting a model never mutates the caller's global NumPy/Python
-    random state.
+    NOT call it; each seeds the PyTorch RNG internally for reproducibility
+    (:func:`_seed_torch`) but restores the global RNG state before returning
+    (:func:`_keeps_global_torch_rng`), so fitting a model never mutates the
+    caller's global PyTorch, NumPy, or Python random state.
     """
 
     random.seed(int(seed))
@@ -96,12 +98,58 @@ def set_seed(seed: int = 0) -> None:
 
 
 def _seed_torch(seed: int) -> None:
-    """Seed only the PyTorch RNGs (used internally by the fit functions)."""
+    """Seed the CPU (and CUDA, if present) PyTorch RNGs used by the fit functions.
+
+    ``torch.manual_seed`` is avoided on purpose: it *also* seeds MPS, XPU and any
+    registered accelerator, none of which :func:`_keeps_global_torch_rng` saves
+    and restores, and none of which the fits draw from (the device comes from
+    :func:`get_device`, i.e. CUDA or CPU). Seeding the CPU default generator
+    directly leaves those other device RNGs untouched while producing the
+    identical CPU stream, so the pair (seed here, restore there) covers exactly
+    the RNGs the fits actually use.
+    """
 
     if torch is not None:
-        torch.manual_seed(int(seed))
+        torch.default_generator.manual_seed(int(seed))
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(int(seed))
+
+
+def _keeps_global_torch_rng(fit_fn):
+    """Run a fit with the CPU and CUDA PyTorch RNGs saved on entry, restored on exit.
+
+    The fit functions seed the torch RNG (via :func:`_seed_torch`) so their
+    output is reproducible from ``seed`` alone. Without this wrapper that seeding
+    would also leave the caller's *global* torch RNG mutated on return: every fit
+    would reset it to ``seed`` and then advance it by however many draws training
+    consumed. Saving the state before the fit and restoring it afterwards keeps
+    the seeding local -- the fit's weight init and every batch draw are
+    byte-for-byte identical, but the caller's global torch RNG is untouched, just
+    as the fit functions already leave the global NumPy and Python RNGs untouched.
+
+    Only the CPU and CUDA RNGs are saved and restored; that is sufficient because
+    :func:`_seed_torch` seeds only those (never MPS/XPU) and the fits only ever
+    run on CPU or CUDA (:func:`get_device`). If ``_seed_torch`` is ever changed to
+    seed another accelerator, that device's state must be saved and restored here
+    too, or the fit would leak it.
+    """
+
+    @functools.wraps(fit_fn)
+    def wrapper(*args, **kwargs):
+        if torch is None:
+            return fit_fn(*args, **kwargs)
+        cpu_state = torch.get_rng_state()
+        cuda_states = (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        )
+        try:
+            return fit_fn(*args, **kwargs)
+        finally:
+            torch.set_rng_state(cpu_state)
+            if cuda_states is not None:
+                torch.cuda.set_rng_state_all(cuda_states)
+
+    return wrapper
 
 
 if torch is not None:
@@ -520,6 +568,7 @@ def _rand_batch(x: Tensor, batch_size: int) -> Tensor:
     return x[idx]
 
 
+@_keeps_global_torch_rng
 def fit_time_smr_dre_infinity(
     x_q: np.ndarray,
     x_p: np.ndarray,
@@ -572,6 +621,7 @@ def fit_time_smr_dre_infinity(
     return model
 
 
+@_keeps_global_torch_rng
 def fit_joint_smr_dre_infinity(
     x_q: np.ndarray,
     x_p: np.ndarray,
@@ -626,6 +676,7 @@ def fit_joint_smr_dre_infinity(
     return model
 
 
+@_keeps_global_torch_rng
 def fit_data_smr_score_dsm(
     x: np.ndarray,
     *,
@@ -781,6 +832,7 @@ def log_ratio_from_data_score_shift(
     return log_r.detach().cpu().numpy().reshape(-1, 1)
 
 
+@_keeps_global_torch_rng
 def fit_sq_riesz_ame(
     x: np.ndarray,
     *,
@@ -836,6 +888,7 @@ def eval_scalar_net(model: nn.Module, x: np.ndarray, *, device=None) -> np.ndarr
     return model(xt).detach().cpu().numpy()
 
 
+@_keeps_global_torch_rng
 def _fit_ratio_template(
     x_q: np.ndarray,
     x_p: np.ndarray,
@@ -982,6 +1035,7 @@ def eval_ratio_bkl(
     return r.detach().cpu().numpy()
 
 
+@_keeps_global_torch_rng
 def fit_outcome_net(
     x: np.ndarray,
     y: np.ndarray,
