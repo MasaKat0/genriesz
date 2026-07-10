@@ -576,29 +576,35 @@ def test_coerce_basis_does_not_trust_a_subclass_of_an_inert_wrapper():
         assert np.shape(ratio.beta) == (3,)
 
 
-def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
+def test_a_classmethod_is_inert_exactly_when_the_interpreter_stops_chaining():
     """classmethod.__get__ delegates to the wrapped descriptor on Python 3.10-3.12.
 
-    The delegation (chained classmethod descriptors) was removed in 3.13, so a
-    check written against 3.13 alone would let the caller's ``__get__`` run on
-    every other supported version. Decide by type, not by what today's
-    interpreter happens to do.
+    Chained classmethod descriptors were removed in 3.13. Where they exist,
+    wrapping a caller's descriptor in ``classmethod`` runs its ``__get__``, and
+    the wrapper is only as inert as what it holds. Where they do not, the
+    wrapper binds without touching it and refusing it would reject a basis that
+    works. Ask the interpreter; neither answer is right on both.
 
     ``staticmethod`` is the contrast: it hands back what it wraps without
     binding it, on every version, so it is inert whatever it holds.
     """
 
-    from genriesz.basis import _is_inert
+    from genriesz.basis import _CLASSMETHOD_DELEGATES, _is_inert
 
     class _RaisingDescriptor:
+        """Raises if bound, and answers with a working basis if merely called."""
+
         def __get__(self, obj, objtype=None):
             raise RuntimeError("custom __get__ ran")
+
+        def __call__(self, cls, *args, **kwargs):
+            return _Map()
 
     def _plain_fit(cls, X=None, y=None):
         return cls
 
     assert _is_inert(classmethod(_plain_fit))
-    assert not _is_inert(classmethod(_RaisingDescriptor()))
+    assert _is_inert(classmethod(_RaisingDescriptor())) is not _CLASSMETHOD_DELEGATES
     assert _is_inert(staticmethod(_RaisingDescriptor()))
     assert staticmethod(_RaisingDescriptor()).__get__(object(), object) is not None
 
@@ -610,7 +616,15 @@ def test_a_classmethod_is_inert_only_as_far_as_what_it_wraps():
             X = np.asarray(X, dtype=float)
             return np.column_stack([np.ones(len(X)), X])
 
-    assert isinstance(coerce_basis(_Map()), CallableBasis)
+    # Where the interpreter chains, resolving ``fit`` would run the descriptor,
+    # so the object stays a feature map. Where it does not, ``_Map().fit`` is a
+    # bound method and the object is a Basis, exactly as attribute access says.
+    obj = _Map()
+    if _CLASSMETHOD_DELEGATES:
+        assert isinstance(coerce_basis(obj), CallableBasis)
+    else:
+        assert callable(obj.fit) and callable(obj.copy)
+        assert coerce_basis(obj) is obj
 
     Xn, Xd = _two_samples()
     assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
@@ -999,6 +1013,141 @@ def test_is_inert_terminates_on_a_self_referential_partialmethod():
 
     pm.func = pm
     assert not _is_inert(pm)
+
+
+def test_classification_never_reads_dunder_class():
+    """``isinstance`` consults ``obj.__class__`` when the type check misses."""
+
+    class _Map:
+        def __getattribute__(self, name):
+            if name == "__class__":
+                raise RuntimeError("__class__ was read")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    assert isinstance(coerce_basis(_Map()), CallableBasis)
+
+    Xn, Xd = _two_samples()
+    assert np.shape(genriesz.fit_density_ratio(Xn, Xd, basis=_Map(), lam=0.1).beta) == (3,)
+
+
+def test_objclass_is_only_asked_of_the_descriptors_that_honour_it():
+    """Reading ``__objclass__`` off an arbitrary object runs its code.
+
+    Only the C descriptors carry it as a binding constraint. On a plain function
+    it is metadata the caller may set, and it constrains nothing.
+    """
+
+    class _Trap:
+        def __getattribute__(self, name):
+            if name == "__objclass__":
+                raise RuntimeError("__objclass__ was read")
+            return object.__getattribute__(self, name)
+
+        def __call__(self, *args, **kwargs):
+            return _TrapMap()
+
+    class _TrapMap:
+        fit = _Trap()
+        copy = _Trap()
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _TrapMap()
+    assert coerce_basis(basis) is basis  # callable fit and copy: a duck-typed Basis
+
+    def _make_copy(self):
+        return _MetadataBasis()
+
+    _make_copy.__objclass__ = dict  # metadata, not a binding constraint
+
+    class _MetadataBasis(BaseBasis):
+        copy = _make_copy
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    metadata_basis = _MetadataBasis()
+    assert isinstance(metadata_basis.copy(), _MetadataBasis)
+    assert coerce_basis(metadata_basis) is metadata_basis
+
+
+def test_a_bound_method_is_a_method():
+    """A bound method returns itself when bound, and became a descriptor in 3.13."""
+
+    class _Factory:
+        def make(self):
+            return _BoundMethodBasis()
+
+    factory = _Factory()
+
+    class _BoundMethodBasis(BaseBasis):
+        copy = factory.make
+
+        def __call__(self, X):
+            X = np.asarray(X, dtype=float)
+            return np.column_stack([np.ones(len(X)), X])
+
+    basis = _BoundMethodBasis()
+    assert isinstance(basis.copy(), _BoundMethodBasis)
+    assert coerce_basis(basis) is basis
+
+    Xn, Xd = _two_samples()
+    ratio = genriesz.fit_density_ratio(Xn, Xd, basis=_BoundMethodBasis(), lam=0.1)
+    assert np.shape(ratio.beta) == (3,)
+
+
+def test_is_inert_walks_a_deep_nest_and_stops_on_any_cycle():
+    """A finite nest is what the interpreter would bind. Only a cycle is refused."""
+
+    import functools
+
+    from genriesz.basis import _is_inert
+
+    def _f(self, X=None, y=None):
+        return self
+
+    deep = functools.partialmethod(_f)
+    for _ in range(25):  # deeper than any fixed bound this module used to carry
+        deep = functools.partialmethod(deep)
+    assert _is_inert(deep)
+
+    cyclic = functools.partialmethod(_f)
+    cyclic.func = cyclic
+    assert not _is_inert(cyclic)
+
+    left, right = functools.partialmethod(_f), functools.partialmethod(_f)
+    left.func, right.func = right, left  # a cycle no depth counter distinguishes
+    assert not _is_inert(left)
+
+
+def test_only_the_standard_getattribute_is_trusted():
+    """``None`` and a slot wrapper borrowed from another class are not it."""
+
+    from genriesz.basis import _overrides_attribute_access
+
+    class _NoneAccess:
+        __getattribute__ = None
+
+    class _ForeignAccess:
+        __getattribute__ = dict.__getattribute__
+
+    class _Plain:
+        pass
+
+    class _DictSubclass(dict):
+        pass
+
+    assert _overrides_attribute_access(_NoneAccess)
+    assert _overrides_attribute_access(_ForeignAccess)
+    assert not _overrides_attribute_access(_Plain)
+    assert not _overrides_attribute_access(_DictSubclass)
 
 
 def test_instances_define_getattr_sees_the_class_and_its_bases():

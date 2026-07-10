@@ -173,11 +173,36 @@ _type_name = type.__dict__["__name__"].__get__
 _MISSING = object()
 
 
+def _classmethod_delegates() -> bool:
+    """Whether ``classmethod.__get__`` calls the ``__get__`` of what it wraps.
+
+    Chained classmethod descriptors were deprecated in 3.11 and removed in 3.13.
+    Ask the interpreter rather than the version: the answer is what decides
+    whether wrapping a descriptor in ``classmethod`` can run the caller's code.
+    """
+
+    class _Probe:
+        ran = False
+
+        def __get__(self, obj, objtype=None):
+            _Probe.ran = True
+
+    class _Holder:
+        attr = classmethod(_Probe())
+
+    bound = _Holder().attr  # noqa: F841 - the point is the binding, not the value
+    return _Probe.ran
+
+
+_CLASSMETHOD_DELEGATES = _classmethod_delegates()
+
+
 # Descriptor types whose ``__get__`` is implemented in C and merely fetches:
 # plain functions and the C-level routines, the slot accessors that ``__slots__``
-# installs, and ``staticmethod``, which hands back what it wraps without binding
-# it. Membership is tested by *exact* type, never with ``isinstance``: a subclass
-# may override ``__get__`` with anything at all.
+# installs, a bound method (which returns itself, and became a descriptor in
+# 3.13), and ``staticmethod``, which hands back what it wraps without binding it.
+# Membership is tested by *exact* type, never with ``isinstance``: a subclass may
+# override ``__get__`` with anything at all.
 #
 # Spelled out rather than tested with ``inspect.isroutine``, which is duck-typed:
 # it answers True for any non-data descriptor, whose ``__get__`` is arbitrary.
@@ -185,29 +210,38 @@ _INERT_DESCRIPTORS = frozenset(
     {
         types.FunctionType,
         types.BuiltinFunctionType,
+        types.MethodType,
         types.MethodDescriptorType,
         types.WrapperDescriptorType,
         types.MemberDescriptorType,
         staticmethod,
     }
+    | (set() if _CLASSMETHOD_DELEGATES else {classmethod})
 )
 
 
-# Wrappers whose ``__get__`` can delegate to the object they wrap, and so are
-# inert only as far as that object is. ``classmethod`` delegates on Python
-# 3.10-3.12 (chained descriptors, removed in 3.13); ``partialmethod`` delegates
-# on every version. ``staticmethod`` does not -- it returns what it wraps
-# untouched -- so it is inert outright and belongs above. Keyed by exact type,
-# for the reason given above.
-_DELEGATING_WRAPPERS = {
-    classmethod: lambda attr: attr.__func__,
-    functools.partialmethod: lambda attr: attr.func,
-}
+# Wrappers whose ``__get__`` delegates to the object they wrap, and so are inert
+# only as far as that object is. ``partialmethod`` delegates on every version;
+# ``classmethod`` only where the interpreter still chains descriptors, and it is
+# inert outright everywhere else. ``staticmethod`` never delegates -- it returns
+# what it wraps untouched. Keyed by exact type, for the reason given above.
+_DELEGATING_WRAPPERS = {functools.partialmethod: lambda attr: attr.func}
+if _CLASSMETHOD_DELEGATES:
+    _DELEGATING_WRAPPERS[classmethod] = lambda attr: attr.__func__
 
 
-# Deep enough for any real nesting, and it keeps a self-referential
-# ``partialmethod`` (``pm.func = pm``) from recursing without end.
-_MAX_WRAPPER_DEPTH = 16
+# Descriptors that carry the class they were defined on and refuse to bind to
+# anything else. A plain function's ``__objclass__``, if the caller sets one, is
+# metadata and constrains nothing, so only these types are asked.
+_BINDING_CONSTRAINED = frozenset(
+    {
+        types.MemberDescriptorType,
+        types.GetSetDescriptorType,
+        types.MethodDescriptorType,
+        types.WrapperDescriptorType,
+        types.ClassMethodDescriptorType,
+    }
+)
 
 
 def _class_lookup(cls: type, name: str) -> object:
@@ -224,6 +258,17 @@ def _defines(cls: type, name: str) -> bool:
     return _class_lookup(cls, name) is not _MISSING
 
 
+def _is_subclass(cls: type, parent: type) -> bool:
+    """``issubclass`` without the ``__class__`` and ``__subclasscheck__`` hooks.
+
+    ``isinstance(obj, C)`` reads ``obj.__class__`` when the type check misses,
+    and that is the caller's ``__getattribute__``. Deciding what an object *is*
+    must not ask the object.
+    """
+
+    return any(klass is parent for klass in _type_mro(cls))
+
+
 def _is_inert(attr: object) -> bool:
     """Whether binding ``attr`` would run code the caller wrote.
 
@@ -233,18 +278,21 @@ def _is_inert(attr: object) -> bool:
     ``partialmethod(f)`` is safe for a function ``f`` and unsafe for a descriptor
     the caller defined, because its ``__get__`` delegates to the wrapped one's.
 
-    A wrapper nested past ``_MAX_WRAPPER_DEPTH`` is reported as not inert, which
-    leaves it unresolved. Erring that way costs a misclassified Basis; erring the
-    other way runs the caller's code.
+    A wrapper reached twice is a cycle -- ``pm.func = pm`` -- and is reported as
+    not inert, which leaves it unresolved. A deep but finite nest is walked to
+    the end, because binding it is what the interpreter would do.
     """
 
-    for _ in range(_MAX_WRAPPER_DEPTH):
+    seen: list[object] = []
+    while True:
         cls = type(attr)
         unwrap = _DELEGATING_WRAPPERS.get(cls)
         if unwrap is None:
             return cls in _INERT_DESCRIPTORS or not _defines(cls, "__get__")
+        if any(attr is wrapper for wrapper in seen):
+            return False
+        seen.append(attr)
         attr = unwrap(attr)
-    return False
 
 
 def _is_data_descriptor(attr: object) -> bool:
@@ -264,15 +312,16 @@ def _is_data_descriptor(attr: object) -> bool:
 def _descriptor_binds_to(descriptor: object, cls: type) -> bool:
     """Whether ``descriptor.__get__`` would accept an instance of ``cls``.
 
-    A slot accessor or a C method carries the class it was defined on. Lifted
+    A slot accessor or a C routine carries the class it was defined on. Lifted
     onto an unrelated class it still looks like the right type, but binding it
-    raises. Only descriptors this module already trusts reach here, so reading
-    ``__objclass__`` runs no caller code.
+    raises. Only those types are asked: a caller may set ``__objclass__`` on a
+    plain function as metadata, where it constrains nothing, and reading it off
+    an arbitrary object would run that object's ``__getattribute__``.
     """
 
-    owner = getattr(descriptor, "__objclass__", None)
-    if owner is None:
-        return True  # a plain function binds to anything
+    if type(descriptor) not in _BINDING_CONSTRAINED:
+        return True
+    owner = descriptor.__objclass__  # type: ignore[attr-defined]
     return any(klass is owner for klass in _type_mro(cls))
 
 
@@ -284,13 +333,19 @@ def _overrides_attribute_access(cls: type) -> bool:
 
     Only the first ``__getattribute__`` in the MRO is consulted, since that is
     the one attribute access uses. ``object``, ``dict`` and the other built-ins
-    each install their own as a C slot wrapper; a caller writes a function.
+    each install their own as a C slot wrapper bound to themselves; anything else
+    -- a function, ``None``, or a slot wrapper lifted off an unrelated class --
+    is not the standard machinery and is not trusted.
     """
 
     for klass in _type_mro(cls):
-        getattribute = _type_dict(klass).get("__getattribute__")
-        if getattribute is not None:
-            return type(getattribute) is not types.WrapperDescriptorType
+        namespace = _type_dict(klass)
+        if "__getattribute__" not in namespace:
+            continue
+        getattribute = namespace["__getattribute__"]
+        if type(getattribute) is not types.WrapperDescriptorType:
+            return True
+        return not _descriptor_binds_to(getattribute, cls)
     return False
 
 
@@ -362,7 +417,7 @@ def _lookup_method(obj: object, name: str) -> object | None:
     obeys.
     """
 
-    if isinstance(obj, type):
+    if _is_subclass(type(obj), type):
         return None
     attr, from_class = _static_lookup(obj, name)
     if attr is _MISSING:
@@ -427,7 +482,7 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     """
 
     # CallableBasis is a BaseBasis, so this covers every built-in basis.
-    if isinstance(basis, BaseBasis):
+    if _is_subclass(type(basis), BaseBasis):
         if not callable(_lookup_method(basis, "copy")):
             shadow, _ = _static_lookup(basis, "copy")
             raise TypeError(
