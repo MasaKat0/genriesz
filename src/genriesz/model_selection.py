@@ -31,7 +31,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .basis import Basis, _median_pairwise_distance
-from .functionals import LinearFunctional
+from .functionals import AMEFunctional, LinearFunctional
 from .generators import BregmanGenerator
 from .glm import GRRGLM, OutcomeGLM
 from .utils import Fold, kfold_splits
@@ -41,7 +41,12 @@ DEFAULT_SIGMA_MULTIPLIERS: tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0)
 DEFAULT_LAM_GRID: tuple[float, ...] = (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0)
 DEFAULT_N_CENTERS_BASE: tuple[int, ...] = (80, 120, 240, 400)
 
-SELECTION_SCORES = ("bias_variance", "bregman_validation", "imbalance_validation")
+SELECTION_SCORES = (
+    "bias_variance",
+    "bregman_validation",
+    "squared_loss_validation",
+    "imbalance_validation",
+)
 
 
 def default_admissibility_thresholds() -> dict[str, float | None]:
@@ -85,7 +90,24 @@ class GRRCVConfig:
         Number of inner folds.
     selection_score:
         One of ``"bias_variance"`` (default), ``"bregman_validation"``,
-        ``"imbalance_validation"``.
+        ``"squared_loss_validation"``, ``"imbalance_validation"``.
+        ``"squared_loss_validation"`` scores every candidate by the held-out
+        squared-loss (LSIF) risk of its fitted representer,
+        ``1/2 E[alpha_hat^2] - E[m(alpha_hat)]``, regardless of the generator
+        used to fit it. This is a generator-agnostic yardstick (minimized at the
+        true Riesz representer, uLSIF-style): unlike ``"bregman_validation"``,
+        which scores each candidate by its *own* Bregman risk, its value is on the
+        same scale for every generator, so paths obtained from separate calls
+        with different generators -- e.g. ``SquaredGenerator`` vs. a
+        ``BPGenerator`` with varying ``omega``/``C`` -- are directly comparable
+        (each call still fits one generator). Caveat: a small LSIF risk does not
+        undo an estimand modification. The risk always measures distance to the
+        *original* estimand's Riesz representer, so for a ``modifies_estimand``
+        generator, or a ``BPGenerator`` whose clip binds, a finite risk is scored
+        against a clipped/bounded representer -- check the bound-binding rate and
+        admissibility separately. Functionals whose ``m(alpha)`` needs a
+        representer derivative (e.g. ``AMEFunctional``) do not support this score
+        and raise a clear ``ValueError`` before any candidate is scored.
     admissibility_thresholds:
         Overrides for :func:`default_admissibility_thresholds`.
     tau_R, tau_K:
@@ -260,11 +282,20 @@ def score_grr_candidate(
     max_iter: int,
     tol: float,
     want_kernel: bool,
+    want_squared_loss: bool = False,
 ) -> dict:
-    """Evaluate one candidate over the inner folds and aggregate diagnostics."""
+    """Evaluate one candidate over the inner folds and aggregate diagnostics.
+
+    ``want_squared_loss`` turns on the generator-agnostic squared-loss (LSIF)
+    validation risk (only meaningful when it is the selected score). A candidate
+    is usable for that score only if the risk is finite on *every* fold; a single
+    non-finite fold drops it out of selection (so candidates are never compared on
+    a partial-fold average).
+    """
 
     risks: list[float] = []
     imbalances: list[float] = []
+    sq_risks: list[float] = []
     variances: list[float] = []
     coef_norms: list[float] = []
     ess_ratios: list[float] = []
@@ -308,6 +339,42 @@ def score_grr_candidate(
         except Exception:
             all_success = False
             continue
+
+        # Generator-agnostic squared-loss (LSIF) validation risk of the fitted
+        # representer alpha_hat = generator.inv_grad(phi @ beta):
+        #   1/2 E[alpha_hat^2] - E[m(alpha_hat)],
+        # minimized at the true Riesz representer. Unlike the Bregman risk above
+        # (which uses each candidate's *own* g*), this is a common yardstick that
+        # lets candidates fit with different generators be compared directly. Only
+        # computed when it is the selected score. Exceptions are NOT swallowed: a
+        # functional that cannot express m(alpha) without a representer derivative
+        # raises a clear error rather than masquerading as a failed fit.
+        if want_squared_loss:
+            def _representer(
+                XX: NDArray[np.float64],
+                _cb: Basis = cb,
+                _beta: NDArray[np.float64] = beta,
+                _gen: BregmanGenerator = generator,
+            ) -> NDArray[np.float64]:
+                phi = np.asarray(_cb(XX), dtype=float)
+                return np.asarray(_gen.inv_grad(XX, phi @ _beta), dtype=float)
+
+            try:
+                m_rep = np.asarray(
+                    m.m_from_function(X_iva, predict=_representer, derivative=None),
+                    dtype=float,
+                )
+            except NotImplementedError as exc:
+                raise ValueError(
+                    "selection_score='squared_loss_validation' requires the "
+                    "functional to evaluate m(alpha) from the representer alone "
+                    f"(no derivative); {type(m).__name__} does not. Use "
+                    "'bregman_validation' or 'bias_variance' instead."
+                ) from exc
+            sq = 0.5 * float(np.mean(np.square(alpha_iva))) - float(np.mean(m_rep))
+            # A non-finite fold makes this candidate incomparable on the LSIF
+            # scale; record NaN so strict aggregation drops it from selection.
+            sq_risks.append(sq if np.isfinite(sq) else float("nan"))
 
         # Held-out imbalance on the inner-validation fold.
         delta = np.mean(alpha_iva[:, None] * Phi_iva - M_iva, axis=0)
@@ -365,6 +432,15 @@ def score_grr_candidate(
     std_imb = (
         float(b_imb / np.sqrt(v_hat)) if np.isfinite(v_hat) and v_hat > 0 else float("nan")
     )
+    # Strict aggregation for the LSIF score: valid only if it was scored and
+    # finite on *every* fold. A candidate that failed the primary fit on any
+    # fold (so its LSIF was never appended) or produced a non-finite value keeps
+    # NaN, so it is never recorded -- or selected -- on a partial-fold average.
+    sq_val = (
+        float(np.mean(sq_risks))
+        if len(sq_risks) == len(inner_folds) and bool(np.all(np.isfinite(sq_risks)))
+        else float("nan")
+    )
 
     return {
         "sigma": None if sigma is None else float(sigma),
@@ -373,6 +449,7 @@ def score_grr_candidate(
         "success": bool(all_success and imbalances),
         "modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "bregman_validation": _nanmean(risks),
+        "squared_loss_validation": sq_val,
         "held_out_imbalance": b_imb,
         "std_imbalance": std_imb,
         "b_hat": b_hat,
@@ -433,6 +510,8 @@ def _is_admissible(row: dict, thr: dict[str, float | None]) -> bool:
 def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> float:
     if score == "bregman_validation":
         return float(row["bregman_validation"])
+    if score == "squared_loss_validation":
+        return float(row["squared_loss_validation"])
     if score == "imbalance_validation":
         val = row["std_imbalance"]
         return float(val) if np.isfinite(val) else float(row["held_out_imbalance"])
@@ -466,6 +545,14 @@ def select_grr_hyperparams(
     The outer evaluation fold must not be passed here. Centers, standardization
     and the inner split are all derived from ``X_train`` alone.
     """
+
+    if config.selection_score == "squared_loss_validation" and isinstance(m, AMEFunctional):
+        raise ValueError(
+            "selection_score='squared_loss_validation' is not defined for "
+            "AMEFunctional: its m(alpha) needs a derivative of the representer, "
+            "which the LSIF risk does not provide. Use 'bregman_validation' or "
+            "'bias_variance' for average-derivative functionals."
+        )
 
     X_tr = np.asarray(X_train, dtype=float)
     y_tr = np.asarray(y_train, dtype=float).reshape(-1)
@@ -528,6 +615,7 @@ def select_grr_hyperparams(
                     max_iter=max_iter,
                     tol=tol,
                     want_kernel=want_kernel,
+                    want_squared_loss=config.selection_score == "squared_loss_validation",
                 )
                 row["admissible"] = _is_admissible(row, thr)
                 row["criterion"] = _criterion(
