@@ -96,9 +96,16 @@ Three classes approximate the Gaussian (RBF-kernel) RKHS:
 
    from genriesz import RBFRandomFourierBasis, RBFNystromBasis, GaussianRKHSBasis
 
-   rff = RBFRandomFourierBasis(n_features=500, sigma=1.0, standardize=True, random_state=0)
-   nys = RBFNystromBasis(n_centers=300, sigma=1.0, standardize=True, random_state=0)
-   krn = GaussianRKHSBasis(n_centers=300, sigma=1.0, standardize=True, random_state=0)
+   rff = RBFRandomFourierBasis(n_features=500, sigma="auto", standardize=True, random_state=0)
+   nys = RBFNystromBasis(n_centers=300, sigma="auto", standardize=True, random_state=0)
+   krn = GaussianRKHSBasis(n_centers=300, sigma="auto", standardize=True, random_state=0)
+
+All three accept ``sigma="auto"``, which resolves the bandwidth by the
+**median heuristic** — the median pairwise distance of the training sample
+(after standardization when ``standardize=True``) — at fit time, inside each
+cross-fitting fold when used with the ``grr_*`` functions.  A fixed bandwidth such as ``sigma=1.0`` is rarely
+well scaled across data sets; prefer ``sigma="auto"`` unless you tune
+``sigma`` explicitly (e.g. via ``riesz_sigma_grid`` below).
 
 .. note::
 
@@ -373,6 +380,14 @@ at once via ``estimators=(...)``:
 - ``"arw"``:  augmented Riesz weighting (doubly robust)
 - ``"tmle"``: targeted maximum likelihood estimation (one-step fluctuation)
 
+.. note::
+
+   :func:`genriesz.grr_att` and :func:`genriesz.grr_did` estimate the treatment
+   share :math:`\pi = P(D=1)` from the sample and mark the functional with
+   ``pi_is_estimated=True``.  The influence function then includes the
+   correction term for the estimated :math:`\pi`, so the reported standard
+   errors account for this extra estimation step automatically.
+
 Cross fitting
 ^^^^^^^^^^^^^
 
@@ -437,11 +452,33 @@ Selection is two-stage.  A candidate must first pass an **admissibility screen**
 (optimizer success, an effective-sample-size floor, a scale-free *kernel-health
 band* that rejects both collapsed and saturated bandwidths, and any thresholds
 you set via ``riesz_admissibility_thresholds``).  Among admissible candidates the
-``bias_variance`` criterion :math:`\hat B^2 + \hat V/n + \tau_R \hat R + \tau_K
-\hat K` is minimized.  Neither coverage nor any true nuisance is used for
-selection.  ``riesz_sigma_grid``/``riesz_n_centers_grid`` require a kernel basis
+criterion chosen by ``riesz_selection_score`` is minimized.  Neither coverage
+nor any true nuisance is used for selection.
+``riesz_sigma_grid``/``riesz_n_centers_grid`` require a kernel basis
 with ``copy_with_params`` (e.g. :class:`~genriesz.GaussianRKHSBasis`); with any
 other basis you can still cross-validate ``riesz_lam_grid`` alone.
+
+Selection scores
+""""""""""""""""
+
+``riesz_selection_score`` accepts:
+
+- ``"bias_variance"`` (default) — the criterion
+  :math:`\hat B^2 + \hat V/n + \tau_R \hat R + \tau_K \hat K` combining the
+  held-out imbalance, variance, KKT residual, and kernel-degeneracy penalties.
+- ``"bregman_validation"`` — the held-out Bregman risk of each candidate under
+  its *own* generator.  Values from different generators are on different
+  scales, so this cannot compare candidates across generators.
+- ``"squared_loss_validation"`` — the held-out squared-loss (LSIF) risk
+  :math:`\tfrac12 \mathbb{E}[\hat\alpha^2] - \mathbb{E}[m(\hat\alpha)]`,
+  regardless of the generator used to fit the candidate.  This is a
+  generator-agnostic yardstick (minimized at the true Riesz representer,
+  uLSIF-style): paths obtained from separate calls with different generators
+  (e.g. :class:`~genriesz.SquaredGenerator` vs. a
+  :class:`~genriesz.BPGenerator` with varying ``omega`` and ``C``) are directly
+  comparable.  Functionals whose :math:`m(\alpha)` needs a representer
+  derivative (e.g. AME) do not support this score and raise a ``ValueError``.
+- ``"imbalance_validation"`` — the held-out working-span imbalance alone.
 
 Regularization: :math:`\ell_p`
 -------------------------------

@@ -189,7 +189,7 @@ def bias_proxy(held_out_imbalance: float, outcome_coef_norm: float) -> float:
     The augmented (ARW/one-step) estimator has a second-order remainder that is
     controlled by the product of the Riesz-representer imbalance on the working
     span and the size of the outcome regression on that span. Concretely, for a
-    linear outcome model ``gamma(x) = phi(x)^T theta`` the remainder is bounded by
+    linear outcome model ``gamma(x) = phi(x)^T theta`` the remainder is bounded by::
 
         |E[(alpha_hat - alpha0)(gamma0 - gamma_hat)]|
             <= max_j |Delta_j| * ||theta||_1  (Hoelder),

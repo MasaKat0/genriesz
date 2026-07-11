@@ -300,6 +300,8 @@ is supplied, the per-outer-fold selection is recorded:
        ``n_admissible``, ``best_score``) and, when
        ``return_riesz_cv_path=True``, the full candidate ``path`` per fold.
    * - ``"riesz_cv_selection_score"``
-     - The selection criterion used (default ``"bias_variance"``).
+     - The selection criterion used (default ``"bias_variance"``; also
+       ``"bregman_validation"``, ``"squared_loss_validation"``, and
+       ``"imbalance_validation"`` — see :doc:`user_guide`).
    * - ``"riesz_cv_lam_median"`` / ``"riesz_cv_sigma_median"``
      - Median of the selected values across outer folds.

@@ -367,6 +367,7 @@ def grr_functional(
         - "grr"            : solve the GRR optimization problem
         - "nn_matching"    : NN-matching inverse propensity weights (**ATE-only** convenience)
         - "local_poly_nn_lsif" : local polynomial NN-LSIF weights (**ATE-only** convenience)
+
         Matching-based Riesz methods currently require ``cross_fit=False`` and
         do not support ``TMLE`` (because they do not provide a function-valued
         representer that can be evaluated counterfactually).

@@ -65,7 +65,9 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "source"]
 # HTML output
 # ---------------------------------------------------------------------------
 html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
+# No custom static assets yet; an empty list avoids a warning for the missing
+# ``_static`` directory.
+html_static_path = []
 
 
 # ---------------------------------------------------------------------------
