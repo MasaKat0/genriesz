@@ -12,6 +12,7 @@ import pytest
 
 from genriesz import (
     ATEFunctional,
+    BPGenerator,
     GaussianRKHSBasis,
     GRRCVConfig,
     PolynomialBasis,
@@ -19,11 +20,15 @@ from genriesz import (
     grr_ate,
     select_grr_hyperparams,
 )
+from genriesz.functionals import AMEFunctional, ATTFunctional
+from genriesz.glm import GRRGLM
 from genriesz.model_selection import (
     make_candidate_basis,
     normalize_grid,
+    score_grr_candidate,
     select_kernel_centers,
 )
+from genriesz.utils import Fold
 
 
 def _make_ate(n: int = 400, d: int = 3, seed: int = 0):
@@ -215,3 +220,305 @@ def test_grr_functional_cv_lambda_only_with_any_basis():
     for s in sel:
         assert s["sigma"] is None  # no bandwidth CV for a callable basis
         assert s["lam"] in (1e-3, 1e-2, 1e-1)
+
+
+# ---------------------------------------------------------------------------
+# squared_loss_validation: a generator-agnostic (uLSIF-style) selection score
+# ---------------------------------------------------------------------------
+
+def test_squared_loss_validation_selects_and_is_consistent():
+    X, Y, _ = _make_ate(n=350, seed=6)
+    cfg = GRRCVConfig(
+        sigma_grid="auto",
+        lam_grid=[1e-2, 1e-1],
+        selection_score="squared_loss_validation",
+        return_path=True,
+        random_state=0,
+    )
+    common = dict(
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        config=cfg,
+        outcome_link="identity",
+    )
+    res = select_grr_hyperparams(X_train=X, y_train=Y, **common)
+
+    assert res.selection_score == "squared_loss_validation"
+    assert np.isfinite(res.best_score)
+    assert res.sigma is not None and res.sigma > 0.0
+
+    # Deterministic function of the training sample.
+    res2 = select_grr_hyperparams(X_train=X, y_train=Y, **common)
+    assert (res.sigma, res.lam, res.n_centers) == (res2.sigma, res2.lam, res2.n_centers)
+
+    # Every fitted candidate carries a finite LSIF score, and the criterion used
+    # for selection is exactly that score.
+    fitted = [r for r in res.path if r["success"]]
+    assert fitted
+    for r in fitted:
+        assert np.isfinite(r["squared_loss_validation"])
+        assert r["criterion"] == pytest.approx(r["squared_loss_validation"])
+
+    # The winner minimizes the score over the pool that was actually used
+    # (admissible first, else all fitted candidates).
+    adm = [r["criterion"] for r in res.path if r["admissible"] and np.isfinite(r["criterion"])]
+    if adm:
+        assert res.best_score == pytest.approx(min(adm))
+    else:
+        fit_c = [r["criterion"] for r in res.path if r["success"] and np.isfinite(r["criterion"])]
+        assert res.best_score == pytest.approx(min(fit_c))
+
+
+def test_squared_loss_validation_scores_non_squared_generator():
+    # The LSIF risk is built from the fitted representer, not the generator's own
+    # Bregman conjugate, so a candidate fit with a *non-squared* generator (here
+    # BP) is still scored on the common yardstick.
+    X, Y, _ = _make_ate(n=400, seed=7)
+
+    def branch(x):  # treated branch where D == 1 (first column of X)
+        return 1 if float(x[0]) > 0.5 else 0
+
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2, 1e-1],
+        selection_score="squared_loss_validation",
+        return_path=True,
+        random_state=0,
+    )
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=BPGenerator(C=1.0, omega=0.5, branch_fn=branch),
+        config=cfg,
+        outcome_link="identity",
+    )
+
+    assert res.selection_score == "squared_loss_validation"
+    assert np.isfinite(res.best_score)
+    fitted = [r for r in res.path if r["success"]]
+    assert fitted  # at least one BP candidate fit and received a finite LSIF score
+    assert all(np.isfinite(r["squared_loss_validation"]) for r in fitted)
+
+    # Deterministic function of the training sample for a non-squared generator.
+    res2 = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=BPGenerator(C=1.0, omega=0.5, branch_fn=branch),
+        config=cfg,
+        outcome_link="identity",
+    )
+    assert (res.sigma, res.lam) == (res2.sigma, res2.lam)
+    assert res.best_score == pytest.approx(res2.best_score)
+
+
+def test_squared_loss_validation_matches_hand_computed_lsif_risk():
+    # Directly validate the LSIF formula (and alpha_iva == inv_grad) against an
+    # independent reconstruction of the fit on a single fold.
+    X, Y, _ = _make_ate(n=240, seed=11)
+    n = X.shape[0]
+    idx = np.arange(n)
+    fold = Fold(train=idx[: n // 2], test=idx[n // 2 :])
+
+    m = ATEFunctional(0)
+    gen = SquaredGenerator()
+    template = GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0)
+    kw = dict(riesz_penalty="l2", lam=1e-2)
+
+    row = score_grr_candidate(
+        X_train=X,
+        y_train=Y,
+        m=m,
+        template_basis=template,
+        generator=gen,
+        sigma=None,
+        centers=None,
+        inner_folds=[fold],
+        riesz_p_norm=None,
+        outcome_link="identity",
+        outcome_penalty="l2",
+        outcome_lam=1e-3,
+        max_iter=500,
+        tol=1e-8,
+        want_kernel=False,
+        want_squared_loss=True,
+        **kw,
+    )
+    assert row["success"]
+
+    # Independent reconstruction of the same single-fold fit.
+    cb = make_candidate_basis(template, sigma=None, centers=None)
+    cb.fit(X[fold.train], Y[fold.train])
+    grr = GRRGLM(basis=cb, generator=gen, functional=m, penalty="l2", lam=1e-2)
+    fr = grr.fit(X[fold.train], max_iter=500, tol=1e-8)
+    assert fr.success and grr.beta_ is not None
+    beta = grr.beta_
+
+    X_te = X[fold.test]
+    v = np.asarray(cb(X_te), dtype=float) @ beta
+    _, alpha = gen.conjugate(X_te, v)
+    # The representer identity: conjugate's maximizer equals inv_grad(v).
+    assert np.allclose(alpha, gen.inv_grad(X_te, v))
+
+    def rep(A):
+        return gen.inv_grad(A, np.asarray(cb(A), dtype=float) @ beta)
+
+    m_rep = np.asarray(m.m_from_function(X_te, predict=rep, derivative=None), dtype=float)
+    expected = 0.5 * float(np.mean(alpha**2)) - float(np.mean(m_rep))
+    assert row["squared_loss_validation"] == pytest.approx(expected, rel=1e-9, abs=1e-12)
+
+
+def test_squared_loss_validation_surfaces_functional_incompatibility():
+    # A functional whose m(alpha) needs a derivative but is *not* AME slips past
+    # the isinstance guard, so the scorer must raise a clear ValueError rather
+    # than swallow it into a misleading "all candidates failed to fit".
+    class _DerivOnlyFunctional(ATEFunctional):
+        def m_from_function(self, X, *, predict, derivative=None):
+            if derivative is None:
+                raise NotImplementedError("needs a derivative")
+            return super().m_from_function(X, predict=predict, derivative=derivative)
+
+    X, Y, _ = _make_ate(n=200, seed=12)
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2],
+        selection_score="squared_loss_validation",
+        random_state=0,
+    )
+    with pytest.raises(ValueError, match="representer alone"):
+        select_grr_hyperparams(
+            X_train=X,
+            y_train=Y,
+            m=_DerivOnlyFunctional(0),
+            basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+            outcome_link="identity",
+        )
+
+
+def test_squared_loss_validation_does_not_swallow_valueerror():
+    # A genuine ValueError from the functional (not a NotImplementedError about a
+    # missing derivative) must propagate unchanged, never be turned into NaN.
+    class _RaisesValueError(ATEFunctional):
+        def m_from_function(self, X, *, predict, derivative=None):
+            raise ValueError("boom-from-functional")
+
+    X, Y, _ = _make_ate(n=200, seed=14)
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2],
+        selection_score="squared_loss_validation",
+        random_state=0,
+    )
+    with pytest.raises(ValueError, match="boom-from-functional"):
+        select_grr_hyperparams(
+            X_train=X,
+            y_train=Y,
+            m=_RaisesValueError(0),
+            basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+            outcome_link="identity",
+        )
+
+
+def test_squared_loss_score_is_nan_when_a_fold_fails_to_fit():
+    # When the primary Riesz fit fails on a fold, that fold is never scored, so
+    # the LSIF aggregate must be NaN (strict: len(sq_risks) == len(folds)), not a
+    # partial-fold average. Here max_iter=0 on the L-BFGS (l1) path fails both
+    # folds, and the candidate is both success=False and NaN-scored.
+    X, Y, _ = _make_ate(n=240, seed=13)
+    n = X.shape[0]
+    idx = np.arange(n)
+    folds = [
+        Fold(train=idx[: n // 2], test=idx[n // 2 :]),
+        Fold(train=idx[n // 2 :], test=idx[: n // 2]),
+    ]
+    row = score_grr_candidate(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        template_basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        sigma=None,
+        lam=1e-3,
+        centers=None,
+        inner_folds=folds,
+        riesz_penalty="l1",  # numeric path; SQ + l2 is closed form and cannot fail
+        riesz_p_norm=None,
+        outcome_link="identity",
+        outcome_penalty="l2",
+        outcome_lam=1e-3,
+        max_iter=0,  # zero iterations -> the fit fails on every fold
+        tol=1e-8,
+        want_kernel=False,
+        want_squared_loss=True,
+    )
+    assert row["success"] is False
+    assert np.isnan(row["squared_loss_validation"])
+
+
+def test_incompatible_functional_selects_fine_under_other_scores():
+    # want_squared_loss=False must skip the LSIF path entirely, so an AME
+    # functional (whose m(alpha) needs a derivative) still selects under a
+    # different score without raising the squared-loss incompatibility error.
+    # A derivative-capable basis (Polynomial) is required for AME at all.
+    X, Y, _ = _make_ate(n=300, seed=15)
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2, 1e-1],
+        selection_score="bregman_validation",
+        random_state=0,
+    )
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=AMEFunctional(coordinate=1),
+        basis=PolynomialBasis(degree=2),
+        generator=SquaredGenerator(),
+        config=cfg,
+        outcome_link="identity",
+    )
+    assert res.selection_score == "bregman_validation"
+    assert np.isfinite(res.best_score)
+
+
+def test_squared_loss_validation_works_for_att():
+    X, Y, _ = _make_ate(n=350, seed=9)
+    pi = float(np.mean(X[:, 0]))
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2, 1e-1],
+        selection_score="squared_loss_validation",
+        random_state=0,
+    )
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=ATTFunctional(treatment_index=0, pi=pi, pi_is_estimated=True),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        config=cfg,
+        outcome_link="identity",
+    )
+    assert np.isfinite(res.best_score)
+    assert res.lam in (1e-2, 1e-1)
+
+
+def test_squared_loss_validation_rejects_ame():
+    X, Y, _ = _make_ate(n=200, seed=8)
+    cfg = GRRCVConfig(
+        lam_grid=[1e-2],
+        selection_score="squared_loss_validation",
+        random_state=0,
+    )
+    with pytest.raises(ValueError, match="not defined for"):
+        select_grr_hyperparams(
+            X_train=X,
+            y_train=Y,
+            m=AMEFunctional(coordinate=1),
+            basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+            outcome_link="identity",
+        )
