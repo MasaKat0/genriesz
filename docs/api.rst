@@ -39,15 +39,17 @@ Basis functions
 Optional basis integrations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Bases backed by optional dependencies live in separate modules
-(``pip install "genriesz[sklearn]"`` / ``"genriesz[torch]"``):
+Bases backed by optional dependencies live in separate modules; install the
+matching extra (``pip install "genriesz[sklearn]"`` and
+``pip install "genriesz[torch]"``):
 
 .. autoclass:: genriesz.sklearn_basis.RandomForestLeafBasis
+.. autoclass:: genriesz.torch_basis.TorchEmbeddingBasis
 
-``genriesz.torch_basis`` provides ``MLPEmbeddingNet`` and
-``TorchEmbeddingBasis`` (a frozen neural-network embedding used as a feature
-map). These classes are only defined when PyTorch is installed; see
-:doc:`user_guide` for usage.
+``genriesz.torch_basis`` also provides ``MLPEmbeddingNet``, a simple MLP
+embedding network for use with :class:`~genriesz.torch_basis.TorchEmbeddingBasis`.
+Instantiating either class requires PyTorch (an :class:`ImportError` is raised
+otherwise); see :doc:`user_guide` for usage.
 
 Generators
 ----------

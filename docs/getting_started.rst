@@ -30,7 +30,7 @@ Optional extras:
    # ScoreMatchingRiesz module (PyTorch-based)
    pip install "genriesz[scorematchingriesz]"
 
-   # pandas/pyarrow helpers for tabular results
+   # tabular-data dependencies (pandas, pyarrow)
    pip install "genriesz[data]"
 
 Notes

@@ -101,9 +101,9 @@ Three classes approximate the Gaussian (RBF-kernel) RKHS:
    krn = GaussianRKHSBasis(n_centers=300, sigma="auto", standardize=True, random_state=0)
 
 All three accept ``sigma="auto"``, which resolves the bandwidth by the
-**median heuristic** (the median pairwise distance of the standardized
-training sample) at fit time — inside each cross-fitting fold when used with
-the ``grr_*`` functions.  A fixed bandwidth such as ``sigma=1.0`` is rarely
+**median heuristic** — the median pairwise distance of the training sample
+(after standardization when ``standardize=True``) — at fit time, inside each
+cross-fitting fold when used with the ``grr_*`` functions.  A fixed bandwidth such as ``sigma=1.0`` is rarely
 well scaled across data sets; prefer ``sigma="auto"`` unless you tune
 ``sigma`` explicitly (e.g. via ``riesz_sigma_grid`` below).
 
@@ -475,7 +475,7 @@ Selection scores
   generator-agnostic yardstick (minimized at the true Riesz representer,
   uLSIF-style): paths obtained from separate calls with different generators
   (e.g. :class:`~genriesz.SquaredGenerator` vs. a
-  :class:`~genriesz.BPGenerator` with varying ``omega``/``C``) are directly
+  :class:`~genriesz.BPGenerator` with varying ``omega`` and ``C``) are directly
   comparable.  Functionals whose :math:`m(\alpha)` needs a representer
   derivative (e.g. AME) do not support this score and raise a ``ValueError``.
 - ``"imbalance_validation"`` — the held-out working-span imbalance alone.
