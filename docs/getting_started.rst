@@ -27,11 +27,18 @@ Optional extras:
    # PyTorch integration (neural network feature maps)
    pip install "genriesz[torch]"
 
+   # ScoreMatchingRiesz module (PyTorch-based)
+   pip install "genriesz[scorematchingriesz]"
+
+   # pandas/pyarrow helpers for tabular results
+   pip install "genriesz[data]"
+
 Notes
 -----
 
 - scikit-learn is optional and only required for ``genriesz.sklearn_basis``.
-- PyTorch is optional and only required for ``genriesz.torch_basis``.
+- PyTorch is optional and only required for ``genriesz.torch_basis`` and
+  ``genriesz.scorematchingriesz``.
 
 
 Quickstart: ATE

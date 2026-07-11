@@ -22,6 +22,9 @@ Notebook map
    * - Notebook
      - Placement
      - Purpose
+   * - ``00_experiment_index.ipynb``
+     - Index
+     - Notebook map and shared conventions for the experiment suite.
    * - ``01_main_simulation_study.ipynb``
      - Main text
      - Three-DGP simulation with compatible loss-link pairs, incompatible loss-link pairs, and regularization paths. ATE and ATT are both reported.
@@ -47,8 +50,24 @@ Notebook map
      - Appendix
      - Zhao/Kang-Schafer balance path and kernel-basis mismatch experiments.
 
+Conventions
+-----------
+
+The experiment notebooks follow a few shared conventions (see
+``notebooks/experiments/README.md`` for the full rationale):
+
+- RKHS and random-Fourier bases use ``sigma="auto"`` (median-heuristic
+  bandwidth) rather than a fixed bandwidth.
+- Each notebook's setup cell installs message-targeted warning filters: the
+  spurious Accelerate-BLAS ``... encountered in matmul`` warnings and the
+  domain-clip warnings are suppressed, and in exchange the summary tables
+  report the clip **binding rate** so estimand modifications stay visible.
+- After re-running a notebook, run ``make notebooks-strip`` before committing;
+  ``make verify`` refuses executed notebooks that still carry ``stderr``
+  output.
+
 ScoreMatchingRiesz notebooks
----------------------------
+----------------------------
 
 The repository includes ``notebooks/scorematchingriesz`` for the ICML
 ScoreMatchingRiesz replication. The package source contains only reusable

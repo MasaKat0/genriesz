@@ -506,7 +506,9 @@ class SquaredGenerator(BregmanGenerator):
 class UKLGenerator(BregmanGenerator):
     """Unnormalized KL generator (UKL-Riesz).
 
-    g(alpha) = (|alpha| - C) log(|alpha| - C) - |alpha|,  with |alpha| > C.
+    The generator is::
+
+        g(alpha) = (|alpha| - C) log(|alpha| - C) - |alpha|,  with |alpha| > C.
 
     The inverse gradient is branch-wise:
 
@@ -709,13 +711,13 @@ def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float6
 class BKLGenerator(BregmanGenerator):
     """Binary KL generator (BKL-Riesz).
 
-    The generator is
+    The generator is::
 
         g(alpha) = (|alpha| - C) log(|alpha| - C) - (|alpha| + C) log(|alpha| + C),
 
     with domain ``|alpha| > C`` and ``C > 0``.
 
-    Its derivative is
+    Its derivative is::
 
         g'(alpha) = sign(alpha) * log( (|alpha|-C) / (|alpha|+C) ).
 
@@ -822,7 +824,7 @@ class BoundedBKLGenerator(BregmanGenerator):
     """Bounded-representer BKL variant (方針B; target-sensitivity candidate).
 
     The BKL generator function ``g`` is the same as :class:`BKLGenerator`, but
-    the inverse link is **bounded and smooth** instead of exact-and-raising:
+    the inverse link is **bounded and smooth** instead of exact-and-raising::
 
         |alpha| = C (1 + e^u) / (1 - e^u),  with u = s * v clamped to u <= u_min,
 
@@ -935,13 +937,13 @@ class BoundedBKLGenerator(BregmanGenerator):
 class PUGenerator(BregmanGenerator):
     """PU generator (PU-Riesz).
 
-    This generator is based on the binary-entropy potential
+    This generator is based on the binary-entropy potential::
 
         g(alpha) = C * [ |alpha| log|alpha| + (1-|alpha|) log(1-|alpha|) ],
 
     with domain ``|alpha| in (0, 1)`` and ``C > 0``.
 
-    The derivative is
+    The derivative is::
 
         g'(alpha) = sign(alpha) * C * log( |alpha| / (1-|alpha|) ).
 
