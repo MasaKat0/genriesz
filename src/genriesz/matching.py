@@ -409,10 +409,16 @@ def local_polynomial_nn_lsif_density_ratio(
 
         dists_i = dist[i]
 
-        # Heuristic: if the nearest neighbor is an exact match (distance ~ 0), treat it as 'self'
-        # and use the next M neighbors to define the radius.
-        if exclude_self and len(dists_i) == M + 1 and dists_i[0] <= 1e-12:
-            rho = float(dists_i[M])
+        # The radius is always the M-th neighbor distance among the *usable*
+        # neighbors. With exclude_self we queried M+1 of them, so which entry
+        # that is depends on whether a self match is actually present:
+        # heuristically, a nearest neighbor at distance ~0 is the eval point
+        # itself and is dropped. An eval point that is not a denominator sample
+        # (out-of-sample) has no self match, so the M-th neighbor is the M-th
+        # entry -- taking the last one would widen the ball to M+1 neighbors.
+        if exclude_self:
+            has_self = dists_i[0] <= 1e-12
+            rho = float(dists_i[M] if has_self else dists_i[M - 1])
         else:
             rho = float(dists_i[-1])
 
