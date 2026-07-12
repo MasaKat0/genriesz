@@ -113,7 +113,38 @@ def solve_stationarity(
 
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
-    b_norm = float(np.linalg.norm(b))
+
+    for name, value in (("rcond", rcond), ("rtol", rtol)):
+        if not np.isfinite(value) or not 0.0 <= float(value) < 1.0:
+            # rtol >= 1 would accept a pure null-space b, and NaN compares false
+            # against everything, so either would quietly disable the check below.
+            raise ValueError(f"{name} must be finite and in [0, 1). Got {value!r}.")
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError(f"A must be a square 2D array. Got shape {A.shape}.")
+    n = A.shape[0]
+    if b.ndim != 1 or b.shape[0] != n:
+        raise ValueError(f"b must be 1D of length {n}. Got shape {b.shape}.")
+    if not (np.isfinite(A).all() and np.isfinite(b).all()):
+        raise ValueError("A and b must be finite.")
+    if n == 0:
+        return np.zeros(0, dtype=float)
+
+    # LAPACK reads one triangle of A and eigh reads the other by default, so a
+    # non-symmetric argument would have them silently solve two different
+    # systems. The callers pass Gram matrices; anything else is a bug upstream.
+    a_max = float(np.max(np.abs(A)))
+    if float(np.max(np.abs(A - A.T))) > 1e-10 * a_max:
+        raise ValueError("A must be symmetric.")
+
+    # Work with b rescaled to unit sup-norm. ||b|| itself is not usable as the
+    # yardstick: it underflows to 0 for a b of ~1e-300 (making every relative
+    # test vacuously pass) and overflows to inf for a b of ~1e308 (same). The
+    # system is linear in b, so solving for b/scale and scaling back is exact.
+    b_scale = float(np.max(np.abs(b)))
+    if b_scale == 0.0:
+        return np.zeros(n, dtype=float)  # A @ 0 = 0 = b
+    b_unit = b / b_scale
+    b_norm = float(np.linalg.norm(b_unit))  # in [1, sqrt(n)]
 
     # Fast path for a comfortably positive-definite A -- the penalized case, and
     # the overwhelmingly common one. A numerically successful Cholesky gives
@@ -135,24 +166,25 @@ def solve_stationarity(
     if info == 0:
         rcond_1, info_c = lapack.dpocon(chol, float(np.linalg.norm(A, 1)))
         if info_c == 0 and float(rcond_1) > gate:
-            beta, info_s = lapack.dpotrs(chol, b, lower=0)
+            beta, info_s = lapack.dpotrs(chol, b_unit, lower=0)
             if info_s == 0:
-                return np.asarray(beta, dtype=float).reshape(-1)
+                return b_scale * np.asarray(beta, dtype=float).reshape(-1)
 
     evals, evecs = np.linalg.eigh(A)
     tol = rcond * max(float(evals[-1]), 0.0)
     keep = evals > tol
 
-    coeffs = evecs.T @ b
+    coeffs = evecs.T @ b_unit
     null_norm = float(np.linalg.norm(coeffs[~keep]))
     if null_norm > rtol * b_norm:
         raise np.linalg.LinAlgError(
             "singular system with b outside the range of A: the objective has no "
             "stationary point and is unbounded below along the null space of A "
-            f"(null-space component {null_norm:.3g} of ||b|| = {b_norm:.3g}). "
-            "Add or increase the l2 penalty."
+            f"(null-space component {null_norm:.3g} of ||b|| = {b_norm:.3g}, "
+            "after rescaling b to unit sup-norm). Add or increase the l2 penalty."
         )
-    return np.asarray(evecs[:, keep] @ (coeffs[keep] / evals[keep]), dtype=float)
+    beta_unit = evecs[:, keep] @ (coeffs[keep] / evals[keep])
+    return b_scale * np.asarray(beta_unit, dtype=float)
 
 
 def standardize_columns(

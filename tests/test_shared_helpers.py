@@ -275,12 +275,63 @@ def test_solve_stationarity_catches_the_case_where_numpy_solve_does_not_raise():
 def test_solve_stationarity_criteria_are_scale_invariant():
     # A null-space component of b is a geometric fact, so shrinking b must not
     # let it slip under an absolute tolerance, and rescaling A must not matter.
+    # The extreme scales matter: ||b|| itself underflows to 0 below ~1e-154 and
+    # overflows to inf above ~1e154, and a criterion keyed on it then compares
+    # 0 > 0 or inf > inf -- both false -- and accepts a system with no solution.
     A = np.array([[0.5, 0.0], [0.0, 0.0]])
     b = np.array([1.0, 1.0])
     for a_scale in (1e-6, 1.0, 1e6):
-        for b_scale in (1e-9, 1.0, 1e9):
+        for b_scale in (1e-300, 1e-9, 1.0, 1e9, 1e300):
             with pytest.raises(np.linalg.LinAlgError):
                 solve_stationarity(a_scale * A, b_scale * b)
+
+
+def test_solve_stationarity_is_exactly_linear_in_b_at_extreme_scales():
+    # Rescaling b to unit sup-norm must be a pure reparametrization: the solution
+    # of a solvable system scales with b, all the way to the float64 extremes.
+    rng = np.random.default_rng(4)
+    Phi = rng.normal(size=(200, 10))
+    A = 0.5 * (Phi.T @ Phi) / 200 + 1e-3 * np.eye(10)
+    reference = solve_stationarity(A, np.ones(10))
+
+    for scale in (1e-300, 1e-9, 1e9, 1e300):
+        beta = solve_stationarity(A, np.ones(10) * scale)
+        assert np.all(np.isfinite(beta))
+        np.testing.assert_allclose(beta / scale, reference, rtol=1e-12)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rcond": -1.0},
+        {"rcond": np.nan},
+        {"rcond": 1.0},
+        {"rtol": 1.0},  # rtol >= 1 would accept a b that is purely null-space
+        {"rtol": 1e300},
+        {"rtol": np.nan},  # NaN compares false against everything
+    ],
+)
+def test_solve_stationarity_rejects_tolerances_that_would_disable_the_check(kwargs):
+    with pytest.raises(ValueError, match=r"must be finite and in \[0, 1\)"):
+        solve_stationarity(np.diag([1.0, 0.0]), np.array([0.0, 1.0]), **kwargs)
+
+
+def test_solve_stationarity_rejects_a_non_symmetric_or_non_finite_system():
+    # LAPACK reads one triangle and eigh the other, so a non-symmetric A would
+    # have them solve two different systems. This one is singular with b outside
+    # its range, and used to come back "solved" from the upper triangle alone.
+    with pytest.raises(ValueError, match="symmetric"):
+        solve_stationarity(np.array([[1.0, 0.5], [2.0, 1.0]]), np.array([0.0, 1.0]))
+
+    with pytest.raises(ValueError, match="finite"):
+        solve_stationarity(np.array([[1.0, np.nan], [np.nan, 1.0]]), np.array([1.0, 2.0]))
+    with pytest.raises(ValueError, match="finite"):
+        solve_stationarity(np.eye(2), np.array([np.nan, 1.0]))
+
+    with pytest.raises(ValueError, match="square"):
+        solve_stationarity(np.ones((2, 3)), np.array([1.0, 2.0]))
+    with pytest.raises(ValueError, match="1D of length"):
+        solve_stationarity(np.eye(2), np.array([1.0, 2.0, 3.0]))
 
 
 def test_solve_stationarity_rejects_a_tiny_but_real_null_component():
