@@ -680,9 +680,22 @@ class BPGenerator(BregmanGenerator):
 # only the inverse-link (inv_grad) differs: exact-and-raising vs bounded.
 # ---------------------------------------------------------------------------
 def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    """g(alpha) = t1 log t1 - t2 log t2, evaluated without cancellation.
+
+    Written literally, the two terms are each O(|alpha| log|alpha|) while their
+    difference is only O(C log|alpha|), so the leading digits cancel: in float64
+    the naive form loses all precision once |alpha| ~ 1e17 and returns exactly
+    0. Substituting ``t2 = t1 + 2C`` gives the algebraically identical
+
+        g = -t1 log1p(2C / t1) - 2C log(t2),
+
+    where ``t1 log1p(2C/t1) -> 2C`` smoothly as ``t1 -> inf``. Both terms are
+    then O(C log|alpha|) and no cancellation occurs.
+    """
+
     t1 = np.maximum(np.abs(a) - C, 1e-12)
     t2 = np.maximum(np.abs(a) + C, 1e-12)
-    return t1 * np.log(t1) - t2 * np.log(t2)
+    return -t1 * np.log1p(2.0 * C / t1) - 2.0 * C * np.log(t2)
 
 
 def _bkl_grad(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
@@ -701,10 +714,15 @@ def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float6
 
     Callers must guarantee ``u < 0`` (``u`` bounded away from 0); this routine
     does not itself guard the ``u -> 0`` blow-up.
+
+    The denominator is computed as ``-expm1(u)`` rather than ``1 - exp(u)``:
+    the latter cancels as ``u -> 0-`` and collapses to 0 for ``|u| < 5.6e-17``,
+    where the 1e-300 floor would then report ``|alpha| ~ 2e300`` instead of the
+    correct ``~2C/|u|``.
     """
 
     t = np.exp(u)  # in (0, 1) for u < 0
-    denom = np.maximum(1.0 - t, 1e-300)
+    denom = np.maximum(-np.expm1(u), 1e-300)  # = 1 - e^u, exact as u -> 0-
     return C * (1.0 + t) / denom
 
 

@@ -32,6 +32,7 @@ from genriesz import (
     SquaredGenerator,
     TreatmentInteractionBasis,
 )
+from genriesz.generators import _bkl_g
 from genriesz.glm import DomainError as GLMDomainError
 
 
@@ -87,6 +88,46 @@ def test_bkl_grrglm_fit_fails_honestly_from_cold_start():
     res = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3).fit(X)
     assert not res.success
     assert res.status == "domain_error"
+
+
+# ---------------------------------------------------------------------------
+# Float64 accuracy of the BKL math as u -> 0- (|alpha| -> inf). Both formulas
+# used to lose all precision there: `1 - exp(u)` cancels to 0 for |u| < 5.6e-17,
+# and `t1 log t1 - t2 log t2` cancels to 0 for |alpha| >~ 1e17.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("u", [-1e-17, -1e-13, -1e-9, -1e-5, -1e-1])
+def test_bkl_link_is_accurate_as_u_approaches_zero(u):
+    C = 1.0
+    gen = BKLGenerator(C=C, branch_fn=_pos_branch)
+    X = np.ones((1, 2))  # positive branch -> u = v
+    alpha = gen.inv_grad(X, np.array([u]))[0]
+    # |alpha| = C (1 + e^u) / (1 - e^u); as u -> 0- this tends to 2C / |u|.
+    expected = C * (1.0 + np.exp(u)) / -np.expm1(u)
+    assert alpha == pytest.approx(expected, rel=1e-12)
+    # The cancelling form floored the denominator at 1e-300, i.e. |alpha| ~ 2e300.
+    assert alpha < 1e299
+
+
+def test_bkl_g_does_not_cancel_at_large_alpha():
+    C = 1.0
+    a = np.array([2e17, 1e30])
+    g = _bkl_g(a, C)
+    # g(alpha) = -2C (1 + log|alpha|) + O(C^2/|alpha|) for large |alpha|.
+    assert g == pytest.approx(-2.0 * C * (1.0 + np.log(a)), rel=1e-12)
+    # The naive difference of the two O(|alpha| log|alpha|) terms returned 0.0.
+    assert np.all(g < -1.0)
+
+
+@pytest.mark.parametrize("u", [-1e-17, -1e-13, -1e-9, -1e-5, -1e-1, -1.0, -5.0])
+def test_bkl_conjugate_matches_its_closed_form(u):
+    # For alpha = (g')^{-1}(v) the conjugate collapses to a cancellation-free
+    # closed form: g*(v) = v alpha - g(alpha) = C log((|alpha|-C)(|alpha|+C)).
+    C = 1.0
+    gen = BKLGenerator(C=C, branch_fn=_pos_branch)
+    X = np.ones((1, 2))  # positive branch -> u = v
+    g_star, alpha = gen.conjugate(X, np.array([u]))
+    closed = C * (np.log(np.abs(alpha) - C) + np.log(np.abs(alpha) + C))
+    assert g_star[0] == pytest.approx(closed[0], rel=1e-9)
 
 
 # ---------------------------------------------------------------------------
