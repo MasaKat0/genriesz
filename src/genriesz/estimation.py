@@ -371,6 +371,13 @@ def grr_functional(
         Matching-based Riesz methods currently require ``cross_fit=False`` and
         do not support ``TMLE`` (because they do not provide a function-valued
         representer that can be evaluated counterfactually).
+    riesz_lam_grid, riesz_sigma_grid, riesz_n_centers_grid:
+        Inner cross-validation grids for the Riesz hyper-parameters; each may be
+        ``"auto"``, a scalar, or a list. ``None`` (the default) means *do not
+        vary that dimension*: lambda stays at ``riesz_lam``, and the bandwidth
+        and the number of centers stay at the basis' own values. The inner CV
+        runs only when at least one grid is supplied, and only on the outer
+        training fold.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link.

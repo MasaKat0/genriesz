@@ -85,7 +85,11 @@ class GRRCVConfig:
         Candidate specs. Each may be ``None`` (do not vary this dimension;
         keep the estimator's fixed value), ``"auto"``, a scalar, or a list.
         ``sigma_grid="auto"`` expands to ``median_pairwise_distance * (0.25, 0.5,
-        1, 2, 4)``.
+        1, 2, 4)``; ``lam_grid="auto"`` to :data:`DEFAULT_LAM_GRID`;
+        ``n_centers_grid="auto"`` to :data:`DEFAULT_N_CENTERS_BASE` (capped at
+        ``n``). With ``lam_grid=None`` the single candidate is the caller's
+        ``riesz_lam``, so cross-validating ``sigma_grid`` alone leaves the
+        penalty at the value the estimator was given.
     cv_folds:
         Number of inner folds.
     selection_score:
@@ -203,7 +207,15 @@ def normalize_grid(
         return [float(s) for s in spec]  # type: ignore[union-attr]
 
     if kind == "lam":
-        if spec is None or (isinstance(spec, str) and spec.lower() == "auto"):
+        if spec is None:
+            raise ValueError(
+                "lam_grid=None means 'do not vary lambda' (keep the estimator's "
+                "riesz_lam); the caller must resolve it. Pass 'auto' for the "
+                "default grid."
+            )
+        if isinstance(spec, str):
+            if spec.lower() != "auto":
+                raise ValueError("lam_grid string must be 'auto'")
             return list(DEFAULT_LAM_GRID)
         if np.isscalar(spec):
             return [float(spec)]  # type: ignore[arg-type]
@@ -544,6 +556,10 @@ def select_grr_hyperparams(
 
     The outer evaluation fold must not be passed here. Centers, standardization
     and the inner split are all derived from ``X_train`` alone.
+
+    ``riesz_lam`` is the penalty used to fit each scored candidate and, when
+    ``config.lam_grid is None``, the sole lambda candidate -- so the returned
+    ``lam`` is then ``riesz_lam`` itself.
     """
 
     if config.selection_score == "squared_loss_validation" and isinstance(m, AMEFunctional):
@@ -567,7 +583,11 @@ def select_grr_hyperparams(
     else:
         sigma_list = list(normalize_grid(config.sigma_grid, kind="sigma", median=median))
 
-    lam_list = normalize_grid(config.lam_grid, kind="lam")
+    lam_list: list[float]
+    if config.lam_grid is None:
+        lam_list = [float(riesz_lam)]  # keep the estimator's fixed penalty
+    else:
+        lam_list = [float(x) for x in normalize_grid(config.lam_grid, kind="lam")]
 
     if config.n_centers_grid is None:
         n_centers_list: list[int | None] = [None]  # keep the basis' own centers
