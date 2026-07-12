@@ -328,16 +328,40 @@ def test_solve_stationarity_rejects_a_matrix_whose_cholesky_pivots_look_healthy(
         solve_stationarity(A, evecs[:, 0])
 
 
-def test_solve_stationarity_keeps_the_fast_path_for_a_penalized_gram_matrix():
+def test_solve_stationarity_keeps_the_fast_path_for_a_penalized_gram_matrix(monkeypatch):
     # The Cholesky/pocon gate must not send an ordinary ridge-penalized system to
     # the eigendecomposition: that path is ~10x slower and runs on every fit.
+    # Breaking eigh is what makes this an assertion about the path taken, not
+    # just about the answer.
     rng = np.random.default_rng(3)
     Phi = rng.normal(size=(500, 60))
     A = 0.5 * (Phi.T @ Phi) / 500 + 1e-3 * np.eye(60)
     b = rng.normal(size=60)
 
+    def no_eigh(*args, **kwargs):
+        raise AssertionError("the fast path should not have fallen back to eigh")
+
+    monkeypatch.setattr(np.linalg, "eigh", no_eigh)
+
     beta = solve_stationarity(A, b)
     np.testing.assert_allclose(A @ beta, b, atol=1e-10)
+
+
+def test_solve_stationarity_fast_path_follows_the_rcond_it_was_given():
+    """The gate moves with ``rcond``; it is not a fixed constant.
+
+    ``A = diag(1, 1e-6)`` is well within the default numerical rank, so the fast
+    path solves it. Widening the numerical null space to ``rcond=1e-5`` puts the
+    1e-6 direction inside it, and ``b`` lies entirely along that direction -- a
+    fixed gate would have let the fast path return ``[0, 1e6]`` anyway.
+    """
+    A = np.diag([1.0, 1e-6])
+    b = np.array([0.0, 1.0])
+
+    np.testing.assert_allclose(solve_stationarity(A, b), [0.0, 1e6], rtol=1e-9)
+
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(A, b, rcond=1e-5)
 
 
 @pytest.mark.parametrize(

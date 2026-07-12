@@ -15,13 +15,15 @@ from numpy.typing import ArrayLike, NDArray
 from scipy.linalg import lapack
 from scipy.stats import norm
 
-# Reciprocal-condition floor for taking the Cholesky fast path in
-# ``solve_stationarity``. Two orders of magnitude above the default numerical
-# rank threshold (``rcond=1e-10``), which leaves room for LAPACK's condition
-# *estimator* to be optimistic while still guaranteeing the matrix is nowhere
-# near rank-deficient. Realistic penalized Gram matrices sit well above it
-# (a 400-center RKHS basis with lam=1e-3 estimates ~1e-6 to ~3e-5).
+# Gate for taking the Cholesky fast path in ``solve_stationarity``: the LAPACK
+# reciprocal-condition estimate must clear both an absolute floor and a margin
+# over the caller's numerical rank threshold. LAPACK's estimator is biased
+# optimistic (it lower-bounds ||A^-1||), so the margin is an empirical cushion,
+# not a proof -- the estimate would have to be off by more than 100x to matter.
+# Realistic penalized Gram matrices sit far above the floor: a 400-center RKHS
+# basis with lam=1e-3 estimates ~1e-6 to ~3e-5.
 _FAST_PATH_RCOND = 1e-8
+_FAST_PATH_SAFETY = 100.0
 
 
 def as_2d(x: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
@@ -114,18 +116,25 @@ def solve_stationarity(
     b_norm = float(np.linalg.norm(b))
 
     # Fast path for a comfortably positive-definite A -- the penalized case, and
-    # the overwhelmingly common one. LAPACK's Cholesky proves definiteness and
-    # pocon estimates the reciprocal 1-norm condition number from that same
-    # factor in O(p^2), which is what makes skipping the ~6x more expensive
-    # eigendecomposition below safe: for a symmetric matrix cond_2 <= cond_1, so
-    # 1/cond_1 > _FAST_PATH_RCOND >> rcond implies the smallest eigenvalue is far
-    # above the numerical rank threshold. (The Cholesky *pivots* do not bound the
+    # the overwhelmingly common one. A numerically successful Cholesky gives
+    # pocon the factor it needs to estimate the reciprocal 1-norm condition
+    # number in O(p^2), and that is what lets us skip the ~6x more expensive
+    # eigendecomposition below: for a symmetric matrix cond_2 <= cond_1, so
+    # 1/cond_1 above the gate puts the smallest eigenvalue well above the
+    # numerical rank threshold. (The Cholesky *pivots* do not bound the
     # eigenvalue ratio -- a matrix with pivot ratio 1 can still be singular to
     # working precision -- so they cannot be used for this.)
+    #
+    # The gate has to move with ``rcond``, or a caller who widens the numerical
+    # null space would still get directions the exact path would have rejected.
+    # pocon returns an *estimate*, biased optimistic, so the factor above
+    # ``rcond`` is an empirical margin rather than a proof: an estimate has to be
+    # off by more than _FAST_PATH_SAFETY to let a rank-deficient matrix through.
+    gate = max(_FAST_PATH_RCOND, _FAST_PATH_SAFETY * rcond)
     chol, info = lapack.dpotrf(A, lower=0, clean=1)
     if info == 0:
-        rcond_1, _ = lapack.dpocon(chol, float(np.linalg.norm(A, 1)))
-        if float(rcond_1) > _FAST_PATH_RCOND:
+        rcond_1, info_c = lapack.dpocon(chol, float(np.linalg.norm(A, 1)))
+        if info_c == 0 and float(rcond_1) > gate:
             beta, info_s = lapack.dpotrs(chol, b, lower=0)
             if info_s == 0:
                 return np.asarray(beta, dtype=float).reshape(-1)
