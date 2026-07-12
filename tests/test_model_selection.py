@@ -23,6 +23,8 @@ from genriesz import (
 from genriesz.functionals import AMEFunctional, ATTFunctional
 from genriesz.glm import GRRGLM
 from genriesz.model_selection import (
+    DEFAULT_LAM_GRID,
+    DEFAULT_SIGMA_MULTIPLIERS,
     make_candidate_basis,
     normalize_grid,
     score_grr_candidate,
@@ -51,10 +53,11 @@ def test_normalize_grid_variants():
     auto = normalize_grid("auto", kind="sigma", median=2.0)
     assert auto == [2.0 * m for m in (0.25, 0.5, 1.0, 2.0, 4.0)]
 
-    assert normalize_grid(None, kind="lam") == list(
+    assert normalize_grid("auto", kind="lam") == list(
         (1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0)
     )
     assert normalize_grid(1e-2, kind="lam") == [1e-2]
+    assert normalize_grid([1e-3, 1e-1], kind="lam") == [1e-3, 1e-1]
 
     # n_centers is capped at n and de-duplicated.
     assert normalize_grid("auto", kind="n_centers", n=100) == [80, 100]
@@ -64,6 +67,15 @@ def test_normalize_grid_variants():
 def test_normalize_grid_auto_sigma_requires_median():
     with pytest.raises(ValueError, match="positive median"):
         normalize_grid("auto", kind="sigma", median=0.0)
+
+
+def test_normalize_grid_lam_rejects_none_and_unknown_string():
+    # None means "do not vary lambda" and must be resolved by the caller against
+    # riesz_lam, never silently expanded into the default sweep.
+    with pytest.raises(ValueError, match="do not vary lambda"):
+        normalize_grid(None, kind="lam")
+    with pytest.raises(ValueError, match="must be 'auto'"):
+        normalize_grid("default", kind="lam")
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +104,45 @@ def test_selection_is_deterministic_function_of_training():
     r1 = select_grr_hyperparams(X_train=X, y_train=Y, **common)
     r2 = select_grr_hyperparams(X_train=X, y_train=Y, **common)
     assert (r1.sigma, r1.lam, r1.n_centers) == (r2.sigma, r2.lam, r2.n_centers)
+
+
+# ---------------------------------------------------------------------------
+# lam_grid=None means "keep riesz_lam", exactly as for sigma_grid/n_centers_grid
+# ---------------------------------------------------------------------------
+
+def test_lam_grid_none_keeps_riesz_lam_and_does_not_sweep():
+    X, Y, _ = _make_ate(n=300, seed=6)
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        config=GRRCVConfig(sigma_grid="auto", lam_grid=None, return_path=True, random_state=0),
+        riesz_lam=0.037,  # a value in no default grid, so a sweep would show up
+        outcome_link="identity",
+    )
+    # One row per sigma candidate -- lambda is not a swept dimension. Under the
+    # old behavior this was len(DEFAULT_LAM_GRID) times larger.
+    assert len(res.path) == len(DEFAULT_SIGMA_MULTIPLIERS)
+    assert {r["lam"] for r in res.path} == {0.037}
+    assert res.lam == pytest.approx(0.037)
+
+
+def test_lam_grid_auto_sweeps_the_default_grid():
+    X, Y, _ = _make_ate(n=300, seed=6)
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        config=GRRCVConfig(lam_grid="auto", return_path=True, random_state=0),
+        riesz_lam=0.037,
+        outcome_link="identity",
+    )
+    assert sorted(r["lam"] for r in res.path) == sorted(DEFAULT_LAM_GRID)
+    assert res.lam in DEFAULT_LAM_GRID
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +271,27 @@ def test_grr_functional_cv_lambda_only_with_any_basis():
     for s in sel:
         assert s["sigma"] is None  # no bandwidth CV for a callable basis
         assert s["lam"] in (1e-3, 1e-2, 1e-1)
+
+
+def test_grr_functional_sigma_only_cv_holds_riesz_lam_fixed():
+    X, Y, _ = _make_ate(n=300, seed=7)
+    res = grr_ate(
+        X=X,
+        Y=Y,
+        basis=GaussianRKHSBasis(n_centers=50, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        folds=3,
+        random_state=0,
+        riesz_sigma_grid="auto",
+        riesz_lam=0.037,  # must be honored: riesz_lam_grid is None
+        return_riesz_cv_path=True,
+    )
+    cv = res.diagnostics["riesz_cv"]
+    for s in cv["selected"]:
+        assert s["lam"] == pytest.approx(0.037)
+    for fold_path in cv["path"]:
+        assert len(fold_path) == len(DEFAULT_SIGMA_MULTIPLIERS)  # no lambda sweep
+        assert {r["lam"] for r in fold_path} == {0.037}
 
 
 # ---------------------------------------------------------------------------
