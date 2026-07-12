@@ -130,3 +130,69 @@ def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():
         random_state=0,
     )
     assert res.sigma in {0.5, 1.0}
+
+
+def test_squared_closed_form_falls_back_to_lstsq_when_singular():
+    """An unpenalized closed form on rank-deficient features must not raise.
+
+    ``0.5 H + lam I`` is singular when ``lam = 0`` and the design is
+    rank-deficient (duplicated rows collapse the kernel columns). GRRGLM already
+    falls back to the minimum-norm ``lstsq`` solution for this exact system; the
+    density-ratio solver now matches it instead of propagating ``LinAlgError``.
+    """
+    from genriesz.density_ratio import _Penalty, _solve_squared_closed_form
+
+    # Every row identical -> Phi has rank 1, and with the bias column H is singular.
+    Phi_den = np.ones((8, 3), dtype=float)
+    Phi_num = np.ones((6, 3), dtype=float)
+
+    beta = _solve_squared_closed_form(
+        Phi_num=Phi_num,
+        Phi_den=Phi_den,
+        C=0.0,
+        penalty=_Penalty(None, lam=0.0, p_norm=2.0),
+    )
+    assert beta.shape == (3,)
+    assert np.all(np.isfinite(beta))
+
+
+def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, recwarn):
+    """LinAlgError derives from ValueError, so ``except RuntimeError`` missed it.
+
+    A singular solve on one candidate used to escape the per-candidate handler
+    and abort the entire sweep, violating the "failing candidates are excluded
+    and counted" contract.
+    """
+    import genriesz.density_ratio as dr
+
+    real = dr._solve_squared_closed_form
+
+    def flaky(*, Phi_num, Phi_den, C, penalty):
+        # Fail every fit at the first sigma candidate, succeed at the second.
+        if penalty.lam == 1e-3:
+            raise np.linalg.LinAlgError("Singular matrix")
+        return real(Phi_num=Phi_num, Phi_den=Phi_den, C=C, penalty=penalty)
+
+    monkeypatch.setattr(dr, "_solve_squared_closed_form", flaky)
+
+    rng = np.random.default_rng(11)
+    X_num = rng.normal(0.0, 1.0, size=(60, 1))
+    X_den = rng.normal(0.5, 1.0, size=(60, 1))
+
+    res = fit_density_ratio(
+        X_num,
+        X_den,
+        generator="sq",
+        n_centers=20,
+        sigma_grid=[1.0],
+        lam_grid=[1e-3, 1e-1],  # the 1e-3 candidate raises LinAlgError
+        cv=True,
+        folds=3,
+        random_state=0,
+    )
+
+    # The surviving candidate is selected and the failures are reported, not raised.
+    assert res.lam == 1e-1
+    assert np.all(np.isfinite(res.beta))
+    messages = [str(w.message) for w in recwarn.list]
+    assert any("candidate fit(s) failed" in msg for msg in messages)

@@ -192,7 +192,13 @@ def _solve_squared_closed_form(
     A = 0.5 * H + lam * np.eye(H.shape[0])
     b = h - float(C) * m
 
-    return np.linalg.solve(A, b)
+    # A is singular when the penalty is off (lam = 0) and the features are
+    # rank-deficient (e.g. duplicated rows). Fall back to the minimum-norm
+    # solution, as GRRGLM does for the same closed form (glm.py).
+    try:
+        return np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return np.asarray(np.linalg.lstsq(A, b, rcond=None)[0], dtype=float)
 
 
 def _fit_bkl_classification(
@@ -552,10 +558,13 @@ def fit_density_ratio(
                 ).fit(np.vstack([Xn[tr_n], Xd[tr_d]]))
 
                 # A single failing candidate must not abort the whole CV; it is
-                # excluded (score = inf) and counted.
+                # excluded (score = inf) and counted. LinAlgError is listed
+                # explicitly because it derives from ValueError, not from
+                # RuntimeError, so a singular solve would otherwise escape and
+                # kill the whole sweep.
                 try:
                     beta = solve_beta(b, Xn[tr_n], Xd[tr_d], lam_, verbose_=False)
-                except RuntimeError as exc:
+                except (RuntimeError, np.linalg.LinAlgError) as exc:
                     n_failed_fits += 1
                     last_failure = str(exc)
                     scores.append(float('inf'))
