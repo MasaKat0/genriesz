@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import math
 import random
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -372,6 +373,21 @@ def lambda_prime_fn(t: Tensor, kind: str = "const") -> Tensor:
     raise ValueError(f"Unknown lambda kind: {kind}")
 
 
+def _warn_if_unstable_lambda_kind(kind: str) -> None:
+    """Warn when a caller opts into the known-unstable ``"inv"`` time weight."""
+
+    if kind == "inv":
+        warnings.warn(
+            "lambda_kind='inv' becomes very large near t=0 and t=1, so its mini-batch "
+            "estimate of the DRE-infinity objective has catastrophic variance and training "
+            "diverges under gradient clipping; use 'bump' or 'const'.",
+            RuntimeWarning,
+            # From this helper the caller's line is 4 frames up: helper -> fit
+            # function body -> @_keeps_global_torch_rng wrapper -> caller.
+            stacklevel=4,
+        )
+
+
 def interpolate_linear(x_q: Tensor, x_p: Tensor, t: Tensor) -> Tensor:
     """Linear bridge sample ``x_t = (1-t) x_q + t x_p``."""
 
@@ -405,14 +421,21 @@ def time_smr_loss(
     lam_p = lambda_prime_fn(t, kind=lambda_kind)
     interior = 2.0 * lam * ds_dt + 2.0 * lam_p * s_t + lam * s_t.square()
 
+    # Integration-by-parts boundary at the interior truncation endpoints [eps, 1 - eps]:
+    # evaluate lambda AND the bridge sample x_s = (1 - s) x_q + s x_p at those times.
+    # Using lambda(1), or the raw q/p endpoints for x_s, leaves a linear-in-s residual
+    # that makes the objective unbounded below -- the failure this function guards against.
     t0 = torch.zeros(batch, 1, device=x_q.device, dtype=x_q.dtype) + eps
-    t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype)
-    s0 = model(x_q.detach(), t0)
-    s1 = model(x_p.detach(), t1)
+    t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype) - eps
+    s0 = model(interpolate_linear(x_q, x_p, t0).detach(), t0)
+    s1 = model(interpolate_linear(x_q, x_p, t1).detach(), t1)
     boundary = (
         2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
     )
-    return interior.mean() + boundary.mean()
+    # t ~ U[eps, 1 - eps], so interior.mean() estimates the average over the interval;
+    # scale by its width to recover the integral the boundary term (evaluated at the
+    # fixed endpoints, not averaged over t) is stated against.
+    return (1.0 - 2.0 * eps) * interior.mean() + boundary.mean()
 
 
 def joint_smr_loss(
@@ -440,14 +463,20 @@ def joint_smr_loss(
     lam_p = lambda_prime_fn(t, kind=lambda_kind)
     interior_time = 2.0 * lam * ds_dt + 2.0 * lam_p * s_t + lam * s_t.square()
 
+    # Integration-by-parts boundary at the interior truncation endpoints [eps, 1 - eps]:
+    # evaluate lambda AND the bridge sample x_s = (1 - s) x_q + s x_p at those times.
+    # Using lambda(1), or the raw q/p endpoints for x_s, leaves a linear-in-s residual
+    # that makes the objective unbounded below -- the failure this function guards against.
     t0 = torch.zeros(batch, 1, device=x_q.device, dtype=x_q.dtype) + eps
-    t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype)
-    _, s0 = model(x_q.detach(), t0)
-    _, s1 = model(x_p.detach(), t1)
+    t1 = torch.ones(batch, 1, device=x_q.device, dtype=x_q.dtype) - eps
+    _, s0 = model(interpolate_linear(x_q, x_p, t0).detach(), t0)
+    _, s1 = model(interpolate_linear(x_q, x_p, t1).detach(), t1)
     boundary_time = (
         2.0 * lambda_fn(t0, kind=lambda_kind) * s0 - 2.0 * lambda_fn(t1, kind=lambda_kind) * s1
     )
-    loss_time = interior_time.mean() + boundary_time.mean()
+    # t ~ U[eps, 1 - eps]; scale the averaged interior by the interval width to recover
+    # the integral the (un-averaged) boundary term is stated against.
+    loss_time = (1.0 - 2.0 * eps) * interior_time.mean() + boundary_time.mean()
 
     v = torch.randn_like(x_t)
     dot = (s_x * v).sum(dim=1, keepdim=True)
@@ -580,14 +609,23 @@ def fit_time_smr_dre_infinity(
     batch_size: int = 256,
     n_steps: int = 4000,
     grad_clip: float | None = 1.0,
-    lambda_kind: str = "inv",
+    lambda_kind: str = "bump",
     layer_norm: bool = False,
     seed: int = 0,
     device=None,
 ) -> TimeScoreNet:
-    """Fit Time-ScoreMatchingRiesz for a density ratio ``q/p``."""
+    """Fit Time-ScoreMatchingRiesz for a density ratio ``q/p``.
+
+    ``lambda_kind`` sets the time weight ``lambda(t)``. ``"bump"`` (default,
+    ``4 t (1 - t)``) and ``"const"`` stay small, so their mini-batch estimates are well
+    behaved. ``"inv"`` (``1 / (t (1 - t) + 1e-3)``) reaches ~1e3 near ``t = 0`` and
+    ``t = 1``: the objective itself is still bounded below, but its mini-batch estimate
+    has catastrophic variance and training diverges under gradient clipping. It is kept
+    only for experimentation and emits a warning.
+    """
 
     _require_torch()
+    _warn_if_unstable_lambda_kind(lambda_kind)
     if device is None:
         device = get_device()
     _seed_torch(seed)
@@ -633,15 +671,20 @@ def fit_joint_smr_dre_infinity(
     batch_size: int = 256,
     n_steps: int = 4000,
     grad_clip: float | None = 1.0,
-    lambda_kind: str = "inv",
+    lambda_kind: str = "bump",
     data_weight: float = 1.0,
     layer_norm: bool = False,
     seed: int = 0,
     device=None,
 ) -> JointScoreNet:
-    """Fit Joint-ScoreMatchingRiesz for a density ratio ``q/p``."""
+    """Fit Joint-ScoreMatchingRiesz for a density ratio ``q/p``.
+
+    See :func:`fit_time_smr_dre_infinity` for ``lambda_kind`` (default ``"bump"``;
+    ``"inv"`` is unstable and emits a warning).
+    """
 
     _require_torch()
+    _warn_if_unstable_lambda_kind(lambda_kind)
     if device is None:
         device = get_device()
     _seed_torch(seed)

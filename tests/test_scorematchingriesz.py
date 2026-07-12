@@ -91,6 +91,206 @@ def test_small_data_smr_shift_ratio_runs() -> None:
     assert np.isfinite(out).all()
 
 
+SMR_EPS = 1e-4  # interior truncation used by time_smr_loss / joint_smr_loss
+
+
+class _ScoreRecorder:
+    """Stand-in score model that records every ``(x, t)`` it is evaluated at."""
+
+    def __init__(self, joint: bool = False) -> None:
+        self.calls: list = []
+        self._joint = joint
+
+    def __call__(self, x, t):
+        self.calls.append((x.detach().clone(), t.detach().clone()))
+        # Returning t keeps the output differentiable w.r.t. t, which the losses
+        # need for ds/dt. For the joint loss the first output must track x.
+        return (x, t) if self._joint else t
+
+    def boundary_calls(self) -> list:
+        """The two calls made at a fixed time (the interior samples t at random)."""
+
+        fixed = [(x, t) for x, t in self.calls if float(t.min()) == float(t.max())]
+        return sorted(fixed, key=lambda c: float(c[1].flatten()[0]))
+
+
+def _assert_boundary_at_bridge_endpoints(rec: _ScoreRecorder, xq, xp) -> None:
+    import torch
+
+    lo, hi = SMR_EPS, 1.0 - SMR_EPS
+    boundary = rec.boundary_calls()
+    assert len(boundary) == 2
+    (x_lo, t_lo), (x_hi, t_hi) = boundary
+
+    # The integration-by-parts boundary must be taken at the interior truncation
+    # endpoints [eps, 1 - eps] -- never at t = 1 -- and evaluated on the *bridge*
+    # samples at those times, not on the raw q/p endpoints. Getting either wrong
+    # leaves a linear-in-s residual that makes the objective unbounded below.
+    assert torch.allclose(t_lo, torch.full_like(t_lo, lo))
+    assert torch.allclose(t_hi, torch.full_like(t_hi, hi))
+    assert torch.allclose(x_lo, (1.0 - lo) * xq + lo * xp)
+    assert torch.allclose(x_hi, (1.0 - hi) * xq + hi * xp)
+
+
+def test_fit_defaults_use_bounded_lambda_kind() -> None:
+    import inspect
+
+    from genriesz.scorematchingriesz import (
+        fit_joint_smr_dre_infinity,
+        fit_time_smr_dre_infinity,
+    )
+
+    # "inv" blows up at the endpoints, so its mini-batch estimate has catastrophic
+    # variance and training diverges; "bump" is the safe default.
+    for fn in (fit_time_smr_dre_infinity, fit_joint_smr_dre_infinity):
+        assert inspect.signature(fn).parameters["lambda_kind"].default == "bump"
+
+
+def test_time_smr_loss_boundary_uses_bridge_endpoints() -> None:
+    import torch
+
+    from genriesz.scorematchingriesz import time_smr_loss
+
+    torch.manual_seed(0)
+    xq = torch.randn(16, 2)
+    xp = torch.randn(16, 2)
+    rec = _ScoreRecorder()
+    _ = time_smr_loss(rec, xq, xp, lambda_kind="inv")
+    _assert_boundary_at_bridge_endpoints(rec, xq, xp)
+
+
+def test_joint_smr_loss_boundary_uses_bridge_endpoints() -> None:
+    import torch
+
+    from genriesz.scorematchingriesz import joint_smr_loss
+
+    torch.manual_seed(0)
+    xq = torch.randn(16, 2)
+    xp = torch.randn(16, 2)
+    rec = _ScoreRecorder(joint=True)
+    _ = joint_smr_loss(rec, xq, xp, lambda_kind="inv")
+    _assert_boundary_at_bridge_endpoints(rec, xq, xp)
+
+
+@pytest.mark.parametrize("loss_name", ["time_smr_loss", "joint_smr_loss"])
+def test_smr_loss_weights_the_boundary_at_the_truncated_endpoints(
+    loss_name: str, monkeypatch
+) -> None:
+    """``lambda`` itself must be evaluated at ``[eps, 1 - eps]``.
+
+    The recorder tests pin the times the *model* is handed; this pins the times the
+    *weight* is handed, which is exactly where the original bug sat -- ``lambda(1)``
+    rather than ``lambda(1 - eps)``. A "const" weight cannot see this (it is flat), so
+    it has to be asserted on the calls themselves rather than on a loss value.
+    """
+
+    import torch
+
+    import genriesz.scorematchingriesz as smr
+
+    seen: list = []
+    real_lambda_fn = smr.lambda_fn
+
+    def spy(t, kind="const"):
+        seen.append(t.detach().clone())
+        return real_lambda_fn(t, kind=kind)
+
+    monkeypatch.setattr(smr, "lambda_fn", spy)
+
+    torch.manual_seed(0)
+    xq = torch.randn(16, 2)
+    xp = torch.randn(16, 2)
+    rec = _ScoreRecorder(joint=loss_name == "joint_smr_loss")
+    _ = getattr(smr, loss_name)(rec, xq, xp, lambda_kind="inv")
+
+    # The interior weight is drawn at random times; the two boundary weights are the
+    # ones evaluated at a single time held fixed across the batch.
+    fixed = sorted(float(t.flatten()[0]) for t in seen if float(t.min()) == float(t.max()))
+    assert fixed == pytest.approx([SMR_EPS, 1.0 - SMR_EPS])
+
+
+_A, _B = SMR_EPS, 1.0 - SMR_EPS  # interior truncation endpoints
+
+
+@pytest.mark.parametrize("loss_name", ["time_smr_loss", "joint_smr_loss"])
+@pytest.mark.parametrize(
+    ("score_kind", "expected", "tol"),
+    [
+        # s == 1: interior == 2*lam*0 + 2*lam'*1 + lam*1 == 1 pointwise, and the
+        # boundary 2*lam(a)*1 - 2*lam(b)*1 cancels, so loss == int_a^b 1 dt == b - a.
+        # Exact (no MC noise). Pins the interior's (b - a) scaling: drop it and the
+        # loss becomes 1.0. It cannot see the boundary's sign -- both ends are equal.
+        ("one", _B - _A, 1e-9),
+        # s == t: interior == 2 + t^2 and the boundary is 2a - 2b != 0, so
+        # loss == int_a^b (2 + t^2) dt + 2(a - b) == (b^3 - a^3) / 3. This one *does*
+        # pin the boundary's sign and times: flipping the sign would give ~4.33.
+        ("t", (_B**3 - _A**3) / 3.0, 5e-3),
+    ],
+)
+def test_smr_loss_matches_integration_by_parts_identity(
+    loss_name: str, score_kind: str, expected: float, tol: float
+) -> None:
+    """Both losses must reproduce the closed form the IBP identity implies.
+
+    With ``lambda == "const"`` an analytic score makes the whole loss computable, so
+    this checks the value itself -- the interior's ``(b - a)`` integral scaling and the
+    boundary's times and sign -- which the recorder tests above cannot see.
+    """
+
+    import torch
+
+    import genriesz.scorematchingriesz as smr
+
+    joint = loss_name == "joint_smr_loss"
+
+    def model(x, t):
+        # s == 1 must stay differentiable w.r.t. t (ds/dt == 0), hence ``t * 0.0 + 1``.
+        s_t = t * 0.0 + 1.0 if score_kind == "one" else t
+        # For the joint loss the data score must track x; zero it out and pair with
+        # data_weight=0 so only the time-score part contributes.
+        return (x * 0.0, s_t) if joint else s_t
+
+    torch.manual_seed(0)
+    n = 65536
+    xq = torch.randn(n, 2, dtype=torch.float64)
+    xp = torch.randn(n, 2, dtype=torch.float64)
+
+    kwargs = {"lambda_kind": "const"}
+    if joint:
+        kwargs["data_weight"] = 0.0
+    loss = getattr(smr, loss_name)(model, xq, xp, **kwargs).item()
+
+    assert loss == pytest.approx(expected, abs=tol)
+
+
+@pytest.mark.parametrize("fit_name", ["fit_time_smr_dre_infinity", "fit_joint_smr_dre_infinity"])
+def test_fit_warns_on_unstable_inv_lambda_kind(fit_name: str) -> None:
+    import torch
+
+    import genriesz.scorematchingriesz as smr
+
+    fit = getattr(smr, fit_name)
+    rng = np.random.default_rng(0)
+    x_p = rng.normal(size=(24, 2)).astype("float32")
+    x_q = rng.normal(loc=0.2, size=(24, 2)).astype("float32")
+
+    with pytest.warns(RuntimeWarning, match="inv") as caught:
+        fit(
+            x_q,
+            x_p,
+            hidden_dims=(8,),
+            t_emb_dim=8,
+            n_steps=1,
+            batch_size=8,
+            lambda_kind="inv",
+            seed=0,
+            device=torch.device("cpu"),
+        )
+
+    # stacklevel must blame the caller, not a frame inside the library.
+    assert caught[0].filename == __file__
+
+
 def test_fit_functions_do_not_mutate_global_numpy_rng() -> None:
     from genriesz.scorematchingriesz import fit_sq_riesz_ame
 
