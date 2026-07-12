@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from genriesz import fit_density_ratio
 
@@ -132,19 +133,18 @@ def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():
     assert res.sigma in {0.5, 1.0}
 
 
-def test_squared_closed_form_falls_back_to_lstsq_when_singular():
-    """An unpenalized closed form on rank-deficient features must not raise.
-
-    ``0.5 H + lam I`` is singular when ``lam = 0`` and the design is
-    rank-deficient (duplicated rows collapse the kernel columns). GRRGLM already
-    falls back to the minimum-norm ``lstsq`` solution for this exact system; the
-    density-ratio solver now matches it instead of propagating ``LinAlgError``.
-    """
+def test_singular_but_solvable_closed_form_returns_the_minimum_norm_minimizer():
+    """``0.5 H + lam I`` singular but ``b`` in its range: minimizers exist."""
     from genriesz.density_ratio import _Penalty, _solve_squared_closed_form
 
-    # Every row identical -> Phi has rank 1, and with the bias column H is singular.
+    # Every row identical -> rank 1. b = mean(Phi_num) = [1,1,1] lies in the
+    # range of A = 0.5 * ones(3,3) / 1, so the minimum-norm solution is a real
+    # minimizer and must be returned rather than rejected.
     Phi_den = np.ones((8, 3), dtype=float)
     Phi_num = np.ones((6, 3), dtype=float)
+
+    A = 0.5 * (Phi_den.T @ Phi_den) / len(Phi_den)
+    b = Phi_num.mean(axis=0)
 
     beta = _solve_squared_closed_form(
         Phi_num=Phi_num,
@@ -152,8 +152,32 @@ def test_squared_closed_form_falls_back_to_lstsq_when_singular():
         C=0.0,
         penalty=_Penalty(None, lam=0.0, p_norm=2.0),
     )
-    assert beta.shape == (3,)
     assert np.all(np.isfinite(beta))
+    # It really solves the stationarity condition, which is what makes it a minimizer.
+    np.testing.assert_allclose(A @ beta, b, atol=1e-10)
+
+
+def test_singular_and_unsolvable_closed_form_raises_instead_of_returning_a_non_solution():
+    """``b`` outside the range of ``A``: no stationary point, unbounded below.
+
+    ``lstsq`` still returns a finite vector here -- the least-squares fit of an
+    unsolvable system -- but it does not solve ``A beta = b``, and the objective
+    runs to -inf along the null space of ``A``. Returning it would dress a
+    divergent candidate up as a successful fit.
+    """
+    from genriesz.density_ratio import _Penalty, _solve_squared_closed_form
+
+    # A = [[0.5, 0], [0, 0]], b = [1, 1]: the second equation reads 0 = 1.
+    Phi_den = np.array([[1.0, 0.0], [1.0, 0.0]])
+    Phi_num = np.array([[1.0, 1.0]])
+
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        _solve_squared_closed_form(
+            Phi_num=Phi_num,
+            Phi_den=Phi_den,
+            C=0.0,
+            penalty=_Penalty(None, lam=0.0, p_norm=2.0),
+        )
 
 
 def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, recwarn):
@@ -168,7 +192,7 @@ def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, re
     real = dr._solve_squared_closed_form
 
     def flaky(*, Phi_num, Phi_den, C, penalty):
-        # Fail every fit at the first sigma candidate, succeed at the second.
+        # Fail every fit at the first lam candidate, succeed at the second.
         if penalty.lam == 1e-3:
             raise np.linalg.LinAlgError("Singular matrix")
         return real(Phi_num=Phi_num, Phi_den=Phi_den, C=C, penalty=penalty)

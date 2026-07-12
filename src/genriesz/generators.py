@@ -685,12 +685,19 @@ def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
     Written literally, the two terms are each O(|alpha| log|alpha|) while their
     difference is only O(C log|alpha|), so the leading digits cancel: in float64
     the naive form loses all precision once |alpha| ~ 1e17 and returns exactly
-    0. Substituting ``t2 = t1 + 2C`` gives the algebraically identical
+    0. Substituting ``t2 = t1 + 2C`` gives
 
         g = -t1 log1p(2C / t1) - 2C log(t2),
 
     where ``t1 log1p(2C/t1) -> 2C`` smoothly as ``t1 -> inf``. Both terms are
     then O(C log|alpha|) and no cancellation occurs.
+
+    The substitution is an identity wherever the ``1e-12`` floor on ``t1`` is
+    inactive, i.e. on the domain interior ``|alpha| > C + 1e-12`` -- everywhere
+    the link is actually evaluated. In the floored sliver ``t2 != t1 + 2C``, so
+    the two forms differ by ~1e-11; both are floored surrogates of a value that
+    the floor has already made arbitrary there, and this one is the closer of
+    the two to the un-floored limit for small ``C``.
     """
 
     t1 = np.maximum(np.abs(a) - C, 1e-12)

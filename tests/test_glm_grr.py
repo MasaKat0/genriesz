@@ -9,6 +9,7 @@ from genriesz import (
     TreatmentInteractionBasis,
     UKLGenerator,
 )
+from genriesz.functionals import LinearFunctional
 
 
 def _make_synthetic_ate(n: int = 200, d_z: int = 3, seed: int = 0):
@@ -119,6 +120,73 @@ def test_fit_result_reports_solution_diagnostics():
     assert np.isfinite(res.kkt_residual) and res.kkt_residual < 1e-8
     assert res.clip_binding_rate == 0.0
     assert np.isfinite(res.fit_time)
+
+
+class _DuplicateColumnBasis:
+    """Rank-1 feature map: the two columns are identical."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def copy(self):
+        return _DuplicateColumnBasis()
+
+    def __call__(self, X):
+        return np.ones((len(np.asarray(X, dtype=float)), 2), dtype=float)
+
+    def derivative(self, X, coordinate):
+        return np.zeros((len(np.asarray(X, dtype=float)), 2), dtype=float)
+
+    @property
+    def n_features(self):
+        return 2
+
+
+class _UnrepresentableFunctional(LinearFunctional):
+    """M rows point outside the span of the (rank-1) basis rows."""
+
+    def __init__(self):
+        super().__init__(name="unrepresentable")
+
+    def m_basis_matrix(self, X, basis):
+        M = np.zeros((len(np.asarray(X, dtype=float)), 2), dtype=float)
+        M[:, 0] = 1.0
+        return M
+
+
+def test_singular_closed_form_without_a_stationary_point_fails_instead_of_succeeding():
+    """No representer in the span + no penalty -> honest failure, not a fake fit.
+
+    The closed form solves ``(0.5 Phi'Phi/n + lam I) beta = mean(M) - C mean(Phi)``.
+    Unlike a least-squares normal equation, the right-hand side need not lie in
+    the range of the left, and here it does not: the basis is rank 1 with row
+    space span{[1, 1]} while mean(M) = [1, 0]. The objective then has no
+    stationary point and runs to -inf along [1, -1]. ``lstsq`` would still hand
+    back a finite vector, which used to be reported as ``success=True``.
+    """
+    X = _make_synthetic_ate(n=40, d_z=2, seed=9)
+    model = GRRGLM(
+        functional=_UnrepresentableFunctional(),
+        basis=_DuplicateColumnBasis(),
+        generator=SquaredGenerator(C=0.0),
+        penalty=None,  # lam = 0 -> A stays singular
+    )
+    res = model.fit(X)
+
+    assert not res.success
+    assert res.status == "singular"
+    assert "unbounded below" in res.message
+
+    # An l2 penalty makes A positive definite again, and the fit succeeds.
+    ok = GRRGLM(
+        functional=_UnrepresentableFunctional(),
+        basis=_DuplicateColumnBasis(),
+        generator=SquaredGenerator(C=0.0),
+        penalty="l2",
+        lam=1e-3,
+    ).fit(X)
+    assert ok.success
+    assert np.all(np.isfinite(ok.beta))
 
 
 def test_domain_violation_yields_explicit_failure_not_silent_success():

@@ -57,6 +57,46 @@ def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
     return out
 
 
+def solve_stationarity(
+    A: NDArray[np.float64], b: NDArray[np.float64], *, atol: float = 1e-8
+) -> NDArray[np.float64]:
+    """Solve the stationarity condition ``A beta = b`` of a convex quadratic.
+
+    ``A`` is positive *semi*-definite here (a Gram matrix plus a possibly zero
+    ridge), so it can be singular. Two singular cases must be told apart:
+
+    - ``b`` lies in the range of ``A``: minimizers exist and form an affine set.
+      ``lstsq`` returns the minimum-norm one, which is a genuine minimizer.
+    - ``b`` has a component in the null space of ``A``: the quadratic has *no*
+      stationary point and is unbounded below along that direction. ``lstsq``
+      still returns a finite vector -- the least-squares fit of an unsolvable
+      system -- and passing it off as a solution would silently turn a divergent
+      problem into a successful fit.
+
+    So we take the minimum-norm solution only after checking that it actually
+    solves the system, and raise :class:`numpy.linalg.LinAlgError` otherwise so
+    the caller can fail or drop the candidate.
+    """
+
+    A = np.asarray(A, dtype=float)
+    b = np.asarray(b, dtype=float)
+    try:
+        return np.asarray(np.linalg.solve(A, b), dtype=float)
+    except np.linalg.LinAlgError:
+        pass
+
+    beta = np.asarray(np.linalg.lstsq(A, b, rcond=None)[0], dtype=float)
+    resid = float(np.linalg.norm(A @ beta - b))
+    scale = max(float(np.linalg.norm(b)), 1.0)
+    if resid > atol * scale:
+        raise np.linalg.LinAlgError(
+            "singular system with b outside the range of A: the objective has no "
+            "stationary point and is unbounded below along the null space of A "
+            f"(residual {resid:.3g}). Add or increase the l2 penalty."
+        )
+    return beta
+
+
 def standardize_columns(
     X: NDArray[np.float64], *, enabled: bool = True
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:

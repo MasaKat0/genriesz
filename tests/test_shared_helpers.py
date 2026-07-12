@@ -18,6 +18,7 @@ from genriesz.utils import (
     as_2d,
     kfold_splits,
     sigmoid,
+    solve_stationarity,
     standardize_columns,
 )
 
@@ -209,3 +210,32 @@ def test_crossfit_splits_errors_name_the_argument_the_caller_passed(n, folds, me
     smr = genriesz.load_scorematchingriesz()
     with pytest.raises(ValueError, match=message.replace(".", r"\.")):
         smr.crossfit_splits(n, n_folds=folds)
+
+
+# ---------------------------------------------------------------------------
+# solve_stationarity: a singular quadratic either has minimizers or none at all.
+# ---------------------------------------------------------------------------
+
+def test_solve_stationarity_uses_the_direct_solve_when_nonsingular():
+    A = np.array([[2.0, 0.0], [0.0, 4.0]])
+    b = np.array([2.0, 4.0])
+    np.testing.assert_allclose(solve_stationarity(A, b), [1.0, 1.0])
+
+
+def test_solve_stationarity_returns_the_minimum_norm_solution_when_solvable():
+    # A is singular but b is in its range: the minimizers form a line, and the
+    # minimum-norm one is a genuine solution of A beta = b.
+    A = np.array([[1.0, 1.0], [1.0, 1.0]])
+    b = np.array([2.0, 2.0])
+    beta = solve_stationarity(A, b)
+    np.testing.assert_allclose(A @ beta, b, atol=1e-12)
+    np.testing.assert_allclose(beta, [1.0, 1.0])  # min-norm among beta0+beta1=2
+
+
+def test_solve_stationarity_raises_when_b_leaves_the_range_of_A():
+    # No stationary point: the quadratic runs to -inf along the null space of A.
+    # lstsq would return the finite, non-solving vector [2, 0] instead.
+    A = np.array([[0.5, 0.0], [0.0, 0.0]])
+    b = np.array([1.0, 1.0])
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(A, b)

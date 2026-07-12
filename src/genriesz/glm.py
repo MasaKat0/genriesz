@@ -32,7 +32,7 @@ from scipy import optimize
 from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError, SquaredGenerator
-from .utils import as_1d_of_length, as_2d, sigmoid
+from .utils import as_1d_of_length, as_2d, sigmoid, solve_stationarity
 
 
 def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
@@ -216,10 +216,26 @@ class GRRGLM:
             lam = self.penalty.lam if self.penalty.penalty is not None else 0.0
             A = 0.5 * (Phi.T @ Phi) / n + lam * np.eye(p)
             b = M.mean(axis=0) - self.generator.C * Phi.mean(axis=0)
+            # Unlike a least-squares normal equation, b = mean(M) - C mean(Phi)
+            # need not lie in the range of A, so an unpenalized rank-deficient
+            # fit can have no stationary point at all. Report that as a failure
+            # instead of passing off lstsq's finite non-solution as a fit.
             try:
-                beta_hat = np.linalg.solve(A, b)
-            except np.linalg.LinAlgError:
-                beta_hat = np.linalg.lstsq(A, b, rcond=None)[0]
+                beta_hat = solve_stationarity(A, b)
+            except np.linalg.LinAlgError as exc:
+                out = FitResult(
+                    beta=beta0_,
+                    success=False,
+                    message=str(exc),
+                    n_iter=0,
+                    status="singular",
+                    fit_time=time.perf_counter() - t0,
+                )
+                self.beta_ = beta0_
+                self.fit_result_ = out
+                self._Phi = None
+                self._M = None
+                return out
             return self._finalize_fit(
                 X_,
                 Phi,

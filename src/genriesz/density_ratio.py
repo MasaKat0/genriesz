@@ -56,7 +56,7 @@ from .generators import (
     coerce_generator,
 )
 from .glm import DomainError, _branch_cache_of, _Penalty
-from .utils import as_2d, kfold_splits, sigmoid
+from .utils import as_2d, kfold_splits, sigmoid, solve_stationarity
 
 
 def _positive_branch(_x: NDArray[np.float64]) -> int:
@@ -193,12 +193,11 @@ def _solve_squared_closed_form(
     b = h - float(C) * m
 
     # A is singular when the penalty is off (lam = 0) and the features are
-    # rank-deficient (e.g. duplicated rows). Fall back to the minimum-norm
-    # solution, as GRRGLM does for the same closed form (glm.py).
-    try:
-        return np.linalg.solve(A, b)
-    except np.linalg.LinAlgError:
-        return np.asarray(np.linalg.lstsq(A, b, rcond=None)[0], dtype=float)
+    # rank-deficient (e.g. duplicated rows). solve_stationarity then returns the
+    # minimum-norm minimizer if one exists, and raises LinAlgError if the
+    # objective is unbounded below instead -- which the CV loop turns into an
+    # excluded candidate rather than a fit that merely looks successful.
+    return solve_stationarity(A, b)
 
 
 def _fit_bkl_classification(
@@ -558,29 +557,32 @@ def fit_density_ratio(
                 ).fit(np.vstack([Xn[tr_n], Xd[tr_d]]))
 
                 # A single failing candidate must not abort the whole CV; it is
-                # excluded (score = inf) and counted. LinAlgError is listed
+                # excluded (score = inf) and counted. This covers the scoring
+                # step too, not just the fit: the conjugate of the fitted v can
+                # itself leave the generator's domain. LinAlgError is listed
                 # explicitly because it derives from ValueError, not from
                 # RuntimeError, so a singular solve would otherwise escape and
                 # kill the whole sweep.
                 try:
                     beta = solve_beta(b, Xn[tr_n], Xd[tr_d], lam_, verbose_=False)
+
+                    # Validation score: unpenalized objective
+                    v_d = np.asarray(b(Xd[te_d]) @ beta, dtype=float).reshape(-1)
+                    v_n = np.asarray(b(Xn[te_n]) @ beta, dtype=float).reshape(-1)
+                    if isinstance(gen, BKLGenerator):
+                        score = float(
+                            np.mean(np.logaddexp(0.0, v_n) - v_n)
+                            + np.mean(np.logaddexp(0.0, v_d))
+                        )
+                    else:
+                        g_star, _ = gen.conjugate(Xd[te_d], v_d)
+                        score = float(np.mean(g_star) - np.mean(v_n))
                 except (RuntimeError, np.linalg.LinAlgError) as exc:
                     n_failed_fits += 1
                     last_failure = str(exc)
                     scores.append(float('inf'))
                     continue
 
-                # Validation score: unpenalized objective
-                v_d = np.asarray(b(Xd[te_d]) @ beta, dtype=float).reshape(-1)
-                v_n = np.asarray(b(Xn[te_n]) @ beta, dtype=float).reshape(-1)
-                if isinstance(gen, BKLGenerator):
-                    score = float(
-                        np.mean(np.logaddexp(0.0, v_n) - v_n)
-                        + np.mean(np.logaddexp(0.0, v_d))
-                    )
-                else:
-                    g_star, _ = gen.conjugate(Xd[te_d], v_d)
-                    score = float(np.mean(g_star) - np.mean(v_n))
                 if not np.isfinite(score):
                     score = float('inf')
                 scores.append(score)
