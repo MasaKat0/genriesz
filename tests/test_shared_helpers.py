@@ -317,22 +317,35 @@ def test_solve_stationarity_rejects_an_indefinite_matrix():
         solve_stationarity(np.diag([1.0, -1.0]), np.array([1.0, 0.0]))
 
 
-def test_solve_stationarity_symmetrizes_a_matrix_within_the_tolerance():
+def test_solve_stationarity_symmetrizes_rounding_and_refuses_anything_wider():
     """Tolerating BLAS rounding is not the same as solving one system.
 
     LAPACK reads one triangle and eigh the other, so an A that is asymmetric --
-    even by less than the validation tolerance -- has them solve different
-    systems. This one is asymmetric by ~5e-11 (inside the tolerance) and singular
-    when read as stored; the answer must be a solution of the symmetrized matrix,
-    which is the system both routines then see.
+    even slightly -- has them solve different systems. Rounding-level asymmetry is
+    averaged away and the answer must solve the symmetrized matrix, the system both
+    routines then see.
+
+    How much asymmetry is "rounding" is not free to choose, though, because
+    symmetrizing *is* a perturbation of A, and every guarantee this function makes
+    is about the matrix it actually solves. The second matrix here is asymmetric by
+    5.8e-11 -- five orders of magnitude past rounding, and exactly rank 1 as
+    written, with a b that misses its range by 2.9e-11. Under a tolerance wide
+    enough to admit it, it is symmetrized into diag(1, -k^2), the -k^2 direction is
+    discarded as numerically null, and b is declared in range: a backward error on A
+    that no stated bound covers. It has to be rejected instead.
     """
-    A = np.array([[1.0, 1.0], [1.00000000005, 1.00000000005]])
+    A = np.array([[1.0, 1.0], [1.0 + 4e-16, 1.0]])  # a few ulps out, as a Gram is
     A_sym = 0.5 * A + 0.5 * A.T
     b = np.linalg.eigh(A_sym)[1][:, -1]  # in the range of the symmetrized matrix
 
     beta = solve_stationarity(A, b)
-    resid = np.linalg.norm(A_sym @ beta - b) / np.linalg.norm(b)
-    assert resid < 1e-12
+    assert np.linalg.norm(A_sym @ beta - b) / np.linalg.norm(b) < 1e-12
+
+    k = 2.9103830456733704e-11
+    rank_one = np.array([[1.0, k], [-k, -k * k]])  # col2 = k * col1, exactly
+    assert np.linalg.matrix_rank(rank_one) == 1
+    with pytest.raises(ValueError, match="A must be symmetric"):
+        solve_stationarity(rank_one, np.array([1.0, 0.0]))
 
 
 @pytest.mark.parametrize(
@@ -571,11 +584,17 @@ def test_solve_stationarity_does_not_believe_an_unmeasurably_small_residual():
 
 
 def _assert_within_documented_backward_bound(A, b):
-    """An accepted (A, b) must sit within ``2 max(rtol, leak)`` of a consistent system."""
+    """An accepted (A, b) must sit within ``2 max(rtol, leak)`` of a consistent system.
+
+    The bound is about the matrix solve_stationarity actually solves, so the range
+    to measure against is that of the symmetrized matrix -- eigh would otherwise
+    read one triangle and answer about a different matrix than the caller passed.
+    """
 
     assert np.all(np.isfinite(solve_stationarity(A, b)))  # i.e. accepted
 
     A_unit = A / np.abs(A).max()
+    A_unit = 0.5 * (A_unit + A_unit.T)
     evals, evecs = np.linalg.eigh(A_unit)
     keep = evals > 1e-10 * evals[-1]
     leak = _null_space_resolution(A_unit, evals, evecs, keep, float(evals[keep].min()))

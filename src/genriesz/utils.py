@@ -34,6 +34,12 @@ _FAST_PATH_SAFETY = 100.0
 _EIGVEC_NOISE = 10.0
 _MAX_NULL_TOL = 1e-6
 
+# How far from symmetric ``solve_stationarity`` still calls a matrix symmetric,
+# relative to its largest entry: the rounding that accumulating a Gram matrix in
+# float64 leaves behind, and no more. It bounds how far the matrix actually solved,
+# ``(A + A.T) / 2``, sits from the ``A`` handed in.
+_SYM_ROUNDING = 10.0
+
 
 def as_2d(x: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
     """Convert an array-like object to a 2D float64 NumPy array."""
@@ -206,14 +212,23 @@ def solve_stationarity(
     possibly zero ridge), so it can be singular, and the two singular cases mean
     opposite things:
 
-    - ``b`` lies in the range of ``A``: minimizers exist and form an affine set.
-      The minimum-norm one is returned.
+    - ``b`` lies in the range of ``A``: minimizers exist and form an affine set,
+      and the minimum-norm one is returned (in the sense made precise below --
+      *exactly* the minimum-norm minimizer is not something a float64
+      decomposition can promise).
     - ``b`` has a component in the null space of ``A``: the quadratic has *no*
       stationary point and is unbounded below along that direction. A linear
       solver still hands back a finite vector, and passing that off as a solution
       would silently turn a divergent problem into a successful fit.
       :class:`numpy.linalg.LinAlgError` is raised instead, so the caller can fail
       honestly or drop the candidate.
+
+    Everything below is stated for the symmetric matrix actually solved, which is
+    ``(A + A.T) / 2``. That is not a hedge on the caller's behalf: an ``A`` more
+    asymmetric than the rounding that forming a Gram matrix in float64 can leave
+    (``_SYM_ROUNDING * n * eps`` relative to its largest entry) is a bug upstream
+    and is rejected outright, precisely so that the difference between ``A`` and
+    its symmetric part stays at the level of writing ``A`` down at all.
 
     Telling them apart cannot be done from the solver's residual alone: a
     near-singular ``A`` makes ``numpy.linalg.solve`` succeed *without* raising,
@@ -232,8 +247,12 @@ def solve_stationarity(
     that buys is a backward guarantee on ``b`` alone:
 
         the system is reported solvable only if there is a ``b_tilde`` with
-        ``||b_tilde - b||_2 <= 2 tol_b ||b||_2`` for which ``A beta = b_tilde`` is
-        consistent. ``A`` itself is never perturbed.
+        ``||b_tilde - b||_2 <= 2 tol_b ||b||_2`` for which the system is consistent.
+        The matrix is not perturbed to get there -- ``b`` alone absorbs it.
+
+    ("The matrix" being ``(A + A.T) / 2``, per above. For an ``A`` that is
+    symmetric as written, which is every ``A`` this library passes in, the two are
+    the same matrix.)
 
     Two ``tol_b`` s of room, not one, because the component being compared is itself
     only known to within ``leak``. Both ends matter: ``rtol`` is what the caller is
@@ -300,13 +319,22 @@ def solve_stationarity(
     # and halving them cannot underflow, whereas 0.5 * A on a subnormal A would
     # collapse it to the zero matrix.
     A_unit = A / a_max
-    if float(np.max(np.abs(A_unit - A_unit.T))) > 1e-10:
+    asym = float(np.max(np.abs(A_unit - A_unit.T)))
+    sym_tol = _SYM_ROUNDING * n * float(np.finfo(float).eps)
+    if asym > sym_tol:
         # LAPACK reads one triangle of A and eigh the other, so a non-symmetric
-        # argument would have them silently solve two different systems. A gross
-        # asymmetry is a bug upstream; the rounding BLAS can leave on a Gram
-        # matrix is tolerated -- and then averaged away, because tolerating it is
-        # not the same as making both routines see the same matrix.
-        raise ValueError("A must be symmetric.")
+        # argument would have them silently solve two different systems. Only the
+        # rounding BLAS can leave on a Gram matrix is tolerated -- and then averaged
+        # away, because tolerating it is not the same as making both routines see
+        # the same matrix. The tolerance has to stay at that rounding scale: solving
+        # the symmetrized system means perturbing A by asym/2, and every guarantee
+        # made below is about the matrix actually solved, so a wide tolerance would
+        # quietly widen the perturbation the caller is never told about.
+        raise ValueError(
+            f"A must be symmetric: |A - A.T| reaches {asym * a_max:.3g} "
+            f"({asym:.3g} relative to its largest entry), past the {sym_tol:.3g} "
+            "that rounding on a Gram matrix would explain."
+        )
     A_unit = 0.5 * A_unit + 0.5 * A_unit.T
 
     b_unit = b / b_scale if b_scale > 0.0 else np.zeros(n, dtype=float)
