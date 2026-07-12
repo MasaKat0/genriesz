@@ -147,15 +147,17 @@ def _null_space_resolution(
     the true retained spectrum. Both inputs have to be *bounds*, not readings:
 
     - ``R`` is evaluated in float64, and a residual below the rounding of its own
-      evaluation says nothing. The dot products behind ``A @ V`` carry an error up
-      to ``n eps (|A| |V|)``, so that is added to what was measured. A backward
-      stable eigensolver leaves ``||R|| ~ eps ||A||`` anyway, which is why this
-      normally reproduces the familiar ``eps / gap``. What it does *not* do is
-      trust an unmeasurably small residual: an ``A`` whose null column is exactly
-      zero (a diagonal one, say) has ``|A| |V| = 0`` there, and only then -- when
-      the rounding bound itself vanishes -- is the decomposition credited with
-      resolving the direction exactly, rather than charged a worst case it did not
-      pay and waving through a null-space component it resolved perfectly well.
+      evaluation says nothing. Every step of ``fl(A V - V L)`` -- the dot products,
+      the scaling, the subtraction -- is bounded componentwise in the standard way
+      (Higham, ASNA 2nd ed., §3.5: ``|fl(x'y) - x'y| <= gamma_n |x|'|y|`` with
+      ``gamma_k = k u / (1 - k u)``), and that bound is added to what was measured.
+      A backward stable eigensolver leaves ``||R|| ~ eps ||A||`` anyway, which is
+      why this normally reproduces the familiar ``eps / gap``. What it does *not*
+      do is trust an unmeasurably small residual: an ``A`` whose null column is
+      exactly zero (a diagonal one, say) has ``|A| |V| = 0`` there, and only then
+      -- when the rounding bound itself vanishes -- is the decomposition credited
+      with resolving the direction exactly, rather than charged a worst case it did
+      not pay and waving through a null-space component it resolved perfectly well.
     - the computed eigenvalues sit within ``~n eps ||A||`` of the true ones (Weyl),
       so the separation is that much smaller than the computed one.
 
@@ -164,7 +166,7 @@ def _null_space_resolution(
     """
 
     n = A_unit.shape[0]
-    eps = float(np.finfo(float).eps)
+    eps = float(np.finfo(float).eps)  # 2u, so using it for u is already conservative
     floor = _EIGVEC_NOISE * eps * np.sqrt(n)
     if bool(np.all(keep)):
         return float(floor)  # no null space to leak into: A is (numerically) PD
@@ -172,8 +174,13 @@ def _null_space_resolution(
     V = evecs[:, ~keep]
     lam_null = evals[~keep]
     measured = _safe_norm((A_unit @ V - V * lam_null).ravel())
-    rounding = n * eps * _safe_norm((np.abs(A_unit) @ np.abs(V)).ravel()) + 2.0 * eps * (
-        _safe_norm((np.abs(V) * np.abs(lam_null)).ravel())
+
+    # gamma_{n+2}: n for the dot products in A @ V, one each for the scaling V L and
+    # the subtraction. (n + 2) eps < 1 for any n float64 can index.
+    gamma = (n + 2) * eps / (1.0 - (n + 2) * eps)
+    rounding = gamma * (
+        _safe_norm((np.abs(A_unit) @ np.abs(V)).ravel())
+        + _safe_norm((np.abs(V) * np.abs(lam_null)).ravel())
     )
 
     # Null eigenvalues sitting below 0 (rounding on an exactly-singular direction)
@@ -219,23 +226,29 @@ def solve_stationarity(
     What can be certified there is bounded by the accuracy of the
     eigendecomposition itself: when the computed null basis is off by an angle,
     leakage from the retained subspace can cancel a real null-space component of
-    ``b``. The component is therefore tested against ``max(rtol, leak)``, where
-    ``leak`` bounds that angle on this particular matrix
+    ``b``. The component is therefore tested against ``tol_b = max(rtol, leak)``,
+    where ``leak`` bounds that angle on this particular matrix
     (:func:`_null_space_resolution`), and a component below it is accepted. What
     that buys is a backward guarantee on ``b`` alone:
 
         the system is reported solvable only if there is a ``b_tilde`` with
-        ``||b_tilde - b||_2 <= 2 leak ||b||_2`` for which ``A beta = b_tilde`` is
-        consistent (``A`` itself is not perturbed), and the returned ``beta`` is
-        the minimum-norm solution of that system.
+        ``||b_tilde - b||_2 <= 2 tol_b ||b||_2`` for which ``A beta = b_tilde`` is
+        consistent. ``A`` itself is never perturbed.
 
-    Two ``leak`` s of room, not one, because the component being compared is itself
-    only known to within ``leak``. Note also what is *not* promised: ``beta`` is
-    reconstructed by dividing by the retained eigenvalues, so its residual against
-    ``b_tilde`` is the usual ``~eps lambda_max / lambda_min_kept`` of an
-    ill-conditioned solve, which for a barely-retained eigenvalue is far coarser
-    than ``rtol``. ``rtol`` bounds the component of ``b`` that is discarded, not
-    the accuracy of what is returned.
+    Two ``tol_b`` s of room, not one, because the component being compared is itself
+    only known to within ``leak``. Both ends matter: ``rtol`` is what the caller is
+    willing to discard, ``leak`` is what the decomposition cannot see, and the test
+    -- so the guarantee -- runs on whichever is larger.
+
+    What ``beta`` is *not* is the exact minimum-norm solution of that ``b_tilde``.
+    It is the minimum-norm solution as the computed decomposition sees it: it is
+    orthogonal to the *computed* null basis rather than the true one, so it keeps a
+    component of order ``leak * ||beta||`` along the true null space, and it is
+    reconstructed by dividing by the retained eigenvalues, so its residual carries
+    the usual ``~eps lambda_max / lambda_min_kept`` of an ill-conditioned solve --
+    which, for an eigenvalue barely above the rank threshold, is far coarser than
+    ``rtol``. ``rtol`` bounds the component of ``b`` that is thrown away; it says
+    nothing about the accuracy of what is handed back.
 
     If ``leak`` itself grows past ``_MAX_NULL_TOL`` the decomposition can certify
     nothing at all, and the rank is reported as ambiguous rather than guessed at.

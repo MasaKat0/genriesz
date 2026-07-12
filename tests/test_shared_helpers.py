@@ -502,27 +502,27 @@ def test_solve_stationarity_reports_an_ambiguous_rank_instead_of_guessing():
 def test_solve_stationarity_certifies_a_null_component_the_decomposition_resolves():
     """The leak that hides a null-space component is measured, not assumed.
 
-    Both matrices here have spectrum (1, 1e-8, 0), so the worst-case eigenvector
-    error ~eps/lambda_min_kept is ~2e-7 for either -- and a floor set from that
-    worst case waves through the 1e-7 null-space component of b in both, reporting
+    Both matrices here have spectrum (1, 1e-7, 0), so the worst-case eigenvector
+    error ~eps/lambda_min_kept is ~1e-7 for either -- and a floor set from that
+    worst case waves through the 1e-8 null-space component of b in both, reporting
     a stationary point for an objective that has none.
 
     But the two decompositions are not equally accurate. eigh recovers a diagonal
     matrix exactly: its null basis has zero residual, it resolves the component
     perfectly, and the absent solution has to be reported. Only when the
-    eigenvectors really are uncertain -- the generic rotation, whose measured leak
-    is ~2e-7 -- is the component genuinely indistinguishable from decomposition
-    noise, and accepting it means returning the exact solution of a system that far
-    away from the one asked about.
+    eigenvectors really are uncertain -- the generic rotation, whose leak really is
+    ~1e-7 -- is the component genuinely indistinguishable from decomposition noise,
+    and accepting it means returning the solution of a system that far away from
+    the one asked about.
     """
-    exact = np.diag([1.0, 1e-8, 0.0])
+    exact = np.diag([1.0, 1e-7, 0.0])
     with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
-        solve_stationarity(exact, np.array([1.0, 0.0, 1e-7]))
+        solve_stationarity(exact, np.array([1.0, 0.0, 1e-8]))
 
     Q, _ = np.linalg.qr(np.random.default_rng(11).normal(size=(3, 3)))
-    rotated = Q @ np.diag([1.0, 1e-8, 0.0]) @ Q.T
+    rotated = Q @ np.diag([1.0, 1e-7, 0.0]) @ Q.T
     rotated = 0.5 * (rotated + rotated.T)
-    beta = solve_stationarity(rotated, Q[:, 0] + 1e-7 * Q[:, 2])
+    beta = solve_stationarity(rotated, Q[:, 0] + 1e-8 * Q[:, 2])
     assert np.all(np.isfinite(beta))
 
     # A component the rotated decomposition *can* resolve is still rejected: the
@@ -565,8 +565,40 @@ def test_solve_stationarity_does_not_believe_an_unmeasurably_small_residual():
     keep = evals > 1e-10 * evals[-1]
     leak = _null_space_resolution(A / np.abs(A).max(), evals, evecs, keep, float(evals[keep].min()))
 
-    assert null_component <= 2 * leak  # the guarantee the returned beta comes with
+    tol_b = max(1e-12, leak)  # the default rtol, or the leak, whichever binds
+    assert null_component <= 2 * tol_b  # the guarantee the returned beta comes with
     assert np.all(np.isfinite(solve_stationarity(A, b)))
+
+
+def _assert_within_documented_backward_bound(A, b):
+    """An accepted (A, b) must sit within ``2 max(rtol, leak)`` of a consistent system."""
+
+    assert np.all(np.isfinite(solve_stationarity(A, b)))  # i.e. accepted
+
+    A_unit = A / np.abs(A).max()
+    evals, evecs = np.linalg.eigh(A_unit)
+    keep = evals > 1e-10 * evals[-1]
+    leak = _null_space_resolution(A_unit, evals, evecs, keep, float(evals[keep].min()))
+
+    dist = np.linalg.norm(evecs[:, ~keep].T @ b)  # distance from b to range(A)
+    assert dist <= 2 * max(1e-12, leak) * np.linalg.norm(b)  # 1e-12 is the default rtol
+
+
+def test_solve_stationarity_accepts_only_within_its_documented_backward_bound():
+    """The guarantee has to quote both knobs, because they bind in different regimes.
+
+    An exactly diagonal A leaks only ~3e-15, so it is rtol that lets b = (1, 5e-13)
+    through -- and the smallest perturbation making *that* system consistent is
+    exactly 5e-13, eighty times what a bound quoted in terms of the leak alone would
+    have promised. Rotate the spectrum and the leak takes over at ~1e-7.
+    """
+    _assert_within_documented_backward_bound(np.diag([1.0, 0.0]), np.array([1.0, 5e-13]))
+
+    Q, _ = np.linalg.qr(np.random.default_rng(11).normal(size=(3, 3)))
+    rotated = Q @ np.diag([1.0, 1e-7, 0.0]) @ Q.T
+    _assert_within_documented_backward_bound(
+        0.5 * (rotated + rotated.T), Q @ np.array([1.0, 0.0, 1e-8])
+    )
 
 
 def test_solve_stationarity_refuses_a_solution_that_underflows():
