@@ -173,6 +173,50 @@ def test_unfitted_data_dependent_bases_raise_instead_of_leaking():
             basis(X_eval)
 
 
+def test_kernel_bases_reject_a_column_count_that_differs_from_fit():
+    """A (n, 1) input against a d-column fit must raise, not broadcast.
+
+    ``(X - mean) / std`` broadcasts a single-column X against a d-entry mean, so
+    these bases used to return a (n, d) feature matrix built from nonsense
+    instead of failing. PolynomialBasis already checked the column count; the
+    kernel bases now match it.
+    """
+    import pytest
+
+    from genriesz import (
+        GaussianRKHSBasis,
+        KNNCatchmentBasis,
+        RBFNystromBasis,
+        RBFRandomFourierBasis,
+    )
+
+    rng = np.random.default_rng(11)
+    X_fit = rng.normal(size=(30, 3))
+    X_bad = rng.normal(size=(10, 1))  # broadcasts against a 3-column fit
+    X_wide = rng.normal(size=(10, 4))  # never broadcast, but must raise the same way
+
+    for basis in [
+        GaussianRKHSBasis(n_centers=8, sigma=1.0, random_state=0).fit(X_fit),
+        RBFRandomFourierBasis(n_features=8, sigma=1.0, random_state=0).fit(X_fit),
+        RBFNystromBasis(n_centers=8, sigma=1.0, random_state=0).fit(X_fit),
+        KNNCatchmentBasis(n_neighbors=2).fit(X_fit),
+    ]:
+        for X_wrong in (X_bad, X_wide):
+            with pytest.raises(ValueError, match="column"):
+                basis(X_wrong)
+
+    rff = RBFRandomFourierBasis(n_features=8, sigma=1.0, random_state=0).fit(X_fit)
+    with pytest.raises(ValueError, match="column"):
+        rff.derivative(X_bad, 0)
+
+    rkhs = GaussianRKHSBasis(n_centers=8, sigma=1.0, random_state=0).fit(X_fit)
+    with pytest.raises(ValueError, match="column"):
+        rkhs.diagnostics(X_bad)
+
+    # The fitted column count still evaluates normally.
+    assert rkhs(rng.normal(size=(5, 3))).shape == (5, rkhs.n_features)
+
+
 def test_unfitted_polynomial_basis_raises_by_default():
     """Default PolynomialBasis refuses an unfitted call/derivative.
 
