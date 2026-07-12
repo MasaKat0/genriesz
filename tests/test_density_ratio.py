@@ -220,3 +220,46 @@ def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, re
     assert np.all(np.isfinite(res.beta))
     messages = [str(w.message) for w in recwarn.list]
     assert any("candidate fit(s) failed" in msg for msg in messages)
+
+
+def test_cv_excludes_a_candidate_that_fails_while_being_scored(monkeypatch, recwarn):
+    """The candidate handler covers scoring, not just fitting.
+
+    ``gen.conjugate`` runs on the fitted v of the validation fold and can leave
+    the generator's domain there even though the fit itself succeeded. That
+    raised out of the loop and aborted the sweep.
+    """
+    import genriesz.density_ratio as dr
+    from genriesz import DomainError, SquaredGenerator
+
+    real_conjugate = SquaredGenerator.conjugate
+    seen: list[float] = []
+
+    def flaky_conjugate(self, X, v):
+        # Fail while scoring the first lam candidate only.
+        seen.append(1.0)
+        if len(seen) <= 3:  # folds=3
+            raise DomainError("conjugate left the domain")
+        return real_conjugate(self, X, v)
+
+    monkeypatch.setattr(dr.SquaredGenerator, "conjugate", flaky_conjugate)
+
+    rng = np.random.default_rng(12)
+    X_num = rng.normal(0.0, 1.0, size=(60, 1))
+    X_den = rng.normal(0.5, 1.0, size=(60, 1))
+
+    res = fit_density_ratio(
+        X_num,
+        X_den,
+        generator="sq",
+        n_centers=20,
+        sigma_grid=[1.0],
+        lam_grid=[1e-3, 1e-1],
+        cv=True,
+        folds=3,
+        random_state=0,
+    )
+
+    assert res.lam == 1e-1  # the candidate that failed to score was excluded
+    messages = [str(w.message) for w in recwarn.list]
+    assert any("candidate fit(s) failed" in msg for msg in messages)

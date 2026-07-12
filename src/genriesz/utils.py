@@ -58,43 +58,76 @@ def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
 
 
 def solve_stationarity(
-    A: NDArray[np.float64], b: NDArray[np.float64], *, atol: float = 1e-8
+    A: NDArray[np.float64],
+    b: NDArray[np.float64],
+    *,
+    rcond: float = 1e-10,
+    rtol: float = 1e-12,
 ) -> NDArray[np.float64]:
     """Solve the stationarity condition ``A beta = b`` of a convex quadratic.
 
-    ``A`` is positive *semi*-definite here (a Gram matrix plus a possibly zero
-    ridge), so it can be singular. Two singular cases must be told apart:
+    ``A`` is symmetric positive *semi*-definite here (a Gram matrix plus a
+    possibly zero ridge), so it can be singular, and the two singular cases mean
+    opposite things:
 
     - ``b`` lies in the range of ``A``: minimizers exist and form an affine set.
-      ``lstsq`` returns the minimum-norm one, which is a genuine minimizer.
+      The minimum-norm one is returned; it is a genuine minimizer.
     - ``b`` has a component in the null space of ``A``: the quadratic has *no*
-      stationary point and is unbounded below along that direction. ``lstsq``
-      still returns a finite vector -- the least-squares fit of an unsolvable
-      system -- and passing it off as a solution would silently turn a divergent
-      problem into a successful fit.
+      stationary point and is unbounded below along that direction. A linear
+      solver still hands back a finite vector, and passing that off as a
+      solution would silently turn a divergent problem into a successful fit.
+      :class:`numpy.linalg.LinAlgError` is raised instead, so the caller can
+      fail honestly or drop the candidate.
 
-    So we take the minimum-norm solution only after checking that it actually
-    solves the system, and raise :class:`numpy.linalg.LinAlgError` otherwise so
-    the caller can fail or drop the candidate.
+    Telling them apart cannot be done from the solver's residual alone: a
+    near-singular ``A`` makes ``numpy.linalg.solve`` succeed *without* raising,
+    returning a huge vector whose backward error is small but which solves a
+    perturbed system, not this one. So a suspicious matrix is escalated to a
+    symmetric eigendecomposition, which says exactly where the range of ``A``
+    ends: ``rcond`` sets the numerical rank (eigenvalues at or below
+    ``rcond * lambda_max`` count as null) and ``rtol`` bounds the null-space
+    component of ``b`` relative to ``||b||``. Both criteria are invariant to
+    rescaling ``A`` or ``b``.
+
+    Note that a direction whose eigenvalue falls below the numerical rank
+    threshold is treated as null even if ``b`` has a component there and an
+    exact solution therefore exists on paper: recovering it would mean dividing
+    by a numerically-zero eigenvalue, and the resulting ``beta`` is not a
+    quantity an unpenalized fit should return. Add a ridge to get it.
     """
 
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
-    try:
-        return np.asarray(np.linalg.solve(A, b), dtype=float)
-    except np.linalg.LinAlgError:
-        pass
+    b_norm = float(np.linalg.norm(b))
 
-    beta = np.asarray(np.linalg.lstsq(A, b, rcond=None)[0], dtype=float)
-    resid = float(np.linalg.norm(A @ beta - b))
-    scale = max(float(np.linalg.norm(b)), 1.0)
-    if resid > atol * scale:
+    # Fast path. Cholesky both proves that A is numerically positive definite
+    # and bounds its conditioning through its pivots, so a healthy penalized
+    # system -- the overwhelmingly common case -- avoids the ~10x more expensive
+    # eigendecomposition below. The residual check catches a pivot ratio that
+    # flatters an ill-conditioned matrix; anything suspicious escalates.
+    try:
+        pivots = np.diag(np.linalg.cholesky(A))
+    except np.linalg.LinAlgError:
+        pivots = None
+    if pivots is not None and float(pivots.min()) ** 2 > rcond * float(pivots.max()) ** 2:
+        beta = np.asarray(np.linalg.solve(A, b), dtype=float)
+        if float(np.linalg.norm(A @ beta - b)) <= 1e-8 * b_norm:
+            return beta
+
+    evals, evecs = np.linalg.eigh(A)
+    tol = rcond * max(float(evals[-1]), 0.0)
+    keep = evals > tol
+
+    coeffs = evecs.T @ b
+    null_norm = float(np.linalg.norm(coeffs[~keep]))
+    if null_norm > rtol * b_norm:
         raise np.linalg.LinAlgError(
             "singular system with b outside the range of A: the objective has no "
             "stationary point and is unbounded below along the null space of A "
-            f"(residual {resid:.3g}). Add or increase the l2 penalty."
+            f"(null-space component {null_norm:.3g} of ||b|| = {b_norm:.3g}). "
+            "Add or increase the l2 penalty."
         )
-    return beta
+    return np.asarray(evecs[:, keep] @ (coeffs[keep] / evals[keep]), dtype=float)
 
 
 def standardize_columns(

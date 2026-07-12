@@ -154,6 +154,48 @@ class _UnrepresentableFunctional(LinearFunctional):
         return M
 
 
+# A wide feature map (p = 3 > n = 2): the Gram matrix is rank-deficient in exact
+# arithmetic, but its smallest eigenvalue lands at ~1e-16 rather than 0, so
+# np.linalg.solve accepts it. This is the case a "did solve raise?" guard misses.
+_PHI_WIDE = np.array(
+    [
+        [-0.98912135, -0.36778665, 1.28792526],
+        [0.19397442, 0.92023090, 0.57710379],
+    ]
+)
+_NULL_DIR = np.linalg.svd(_PHI_WIDE, full_matrices=True)[2][-1]
+
+
+class _WideBasis:
+    """Returns the fixed rank-deficient feature matrix above."""
+
+    def fit(self, X, y=None):
+        return self
+
+    def copy(self):
+        return _WideBasis()
+
+    def __call__(self, X):
+        return _PHI_WIDE.copy()
+
+    def derivative(self, X, coordinate):
+        return np.zeros_like(_PHI_WIDE)
+
+    @property
+    def n_features(self):
+        return _PHI_WIDE.shape[1]
+
+
+class _NullComponentFunctional(LinearFunctional):
+    """mean(M) has a component along the null direction of the feature map."""
+
+    def __init__(self):
+        super().__init__(name="null-component")
+
+    def m_basis_matrix(self, X, basis):
+        return np.tile(_PHI_WIDE.mean(axis=0) + _NULL_DIR, (len(_PHI_WIDE), 1))
+
+
 def test_singular_closed_form_without_a_stationary_point_fails_instead_of_succeeding():
     """No representer in the span + no penalty -> honest failure, not a fake fit.
 
@@ -187,6 +229,32 @@ def test_singular_closed_form_without_a_stationary_point_fails_instead_of_succee
     ).fit(X)
     assert ok.success
     assert np.all(np.isfinite(ok.beta))
+
+
+def test_singular_closed_form_fails_even_when_numpy_solve_does_not_raise():
+    """The rank deficiency LAPACK does not report.
+
+    ``_PHI_WIDE`` has p = 3 > n = 2, so its Gram matrix is singular; but rounding
+    leaves the smallest eigenvalue at ~1e-16 instead of 0 and ``np.linalg.solve``
+    returns a ~1e16-norm vector without raising. Keying the guard on "did solve
+    raise?" let this through as ``success=True, status='closed_form'`` with a KKT
+    residual of ~1. The check must be on where the range of A actually ends.
+    """
+    X = np.zeros((len(_PHI_WIDE), 2), dtype=float)  # the basis ignores X
+
+    A = 0.5 * _PHI_WIDE.T @ _PHI_WIDE / len(_PHI_WIDE)
+    b = _PHI_WIDE.mean(axis=0) + _NULL_DIR
+    assert np.linalg.norm(np.linalg.solve(A, b)) > 1e15  # LAPACK does not object
+
+    res = GRRGLM(
+        functional=_NullComponentFunctional(),
+        basis=_WideBasis(),
+        generator=SquaredGenerator(C=0.0),
+        penalty=None,
+    ).fit(X)
+
+    assert not res.success
+    assert res.status == "singular"
 
 
 def test_domain_violation_yields_explicit_failure_not_silent_success():

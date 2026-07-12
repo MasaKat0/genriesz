@@ -239,3 +239,67 @@ def test_solve_stationarity_raises_when_b_leaves_the_range_of_A():
     b = np.array([1.0, 1.0])
     with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
         solve_stationarity(A, b)
+
+
+def test_solve_stationarity_catches_the_case_where_numpy_solve_does_not_raise():
+    """A numerically singular Gram matrix that ``np.linalg.solve`` still accepts.
+
+    With ``p > n`` the Gram matrix is rank-deficient in exact arithmetic, but
+    rounding can leave its smallest eigenvalue at ~1e-16 rather than 0, so LAPACK
+    reports no error and returns a ~1e16-norm vector that solves a *perturbed*
+    system. Checking the residual only on the ``lstsq`` branch missed this
+    entirely, so the guard must not be keyed on whether ``solve`` raised.
+    """
+    Phi = np.array(
+        [
+            [-0.98912135, -0.36778665, 1.28792526],
+            [0.19397442, 0.92023090, 0.57710379],
+        ]
+    )
+    A = 0.5 * Phi.T @ Phi / 2
+    null_dir = np.linalg.svd(Phi, full_matrices=True)[2][-1]
+
+    # np.linalg.solve really does succeed here -- the test is not vacuous.
+    huge = np.linalg.solve(A, Phi.mean(axis=0) + null_dir)
+    assert np.linalg.norm(huge) > 1e15
+
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(A, Phi.mean(axis=0) + null_dir)
+
+    # The same matrix with a right-hand side inside its range still solves.
+    b_in_range = A @ np.array([1.0, 2.0, -1.0])
+    beta = solve_stationarity(A, b_in_range)
+    np.testing.assert_allclose(A @ beta, b_in_range, atol=1e-10)
+
+
+def test_solve_stationarity_criteria_are_scale_invariant():
+    # A null-space component of b is a geometric fact, so shrinking b must not
+    # let it slip under an absolute tolerance, and rescaling A must not matter.
+    A = np.array([[0.5, 0.0], [0.0, 0.0]])
+    b = np.array([1.0, 1.0])
+    for a_scale in (1e-6, 1.0, 1e6):
+        for b_scale in (1e-9, 1.0, 1e9):
+            with pytest.raises(np.linalg.LinAlgError):
+                solve_stationarity(a_scale * A, b_scale * b)
+
+
+def test_solve_stationarity_rejects_a_tiny_but_real_null_component():
+    # Unbounded below along e2, just slowly: the objective still has no minimum.
+    A = np.diag([1.0, 0.0])
+    b = np.array([1.0, 5e-9])
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(A, b)
+
+
+def test_solve_stationarity_treats_a_numerically_zero_eigenvalue_as_null():
+    # An exact solution exists on paper (beta = [0, 2e8, 0]), but only by
+    # dividing by an eigenvalue of 1e-16. Below the numerical rank threshold that
+    # direction is null, and an unpenalized fit must not return that vector.
+    A = np.diag([1.0, 1e-16, 0.0])
+    b = np.array([0.0, 2e-8, 0.0])
+    with pytest.raises(np.linalg.LinAlgError):
+        solve_stationarity(A, b)
+
+    # A ridge lifts the direction above the threshold and the fit succeeds.
+    beta = solve_stationarity(A + 1e-3 * np.eye(3), b)
+    assert np.all(np.isfinite(beta))
