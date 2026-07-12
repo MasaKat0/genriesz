@@ -35,9 +35,12 @@ _EIGVEC_NOISE = 10.0
 _MAX_NULL_TOL = 1e-6
 
 # How far from symmetric ``solve_stationarity`` still calls a matrix symmetric,
-# relative to its largest entry: the rounding that accumulating a Gram matrix in
-# float64 leaves behind, and no more. It bounds how far the matrix actually solved,
-# ``(A + A.T) / 2``, sits from the ``A`` handed in.
+# relative to its largest entry: ``_SYM_ROUNDING * n * eps``. This is a policy for
+# the Gram matrices this library forms -- ``Phi.T @ Phi / n + lam I``, which the
+# NumPy/BLAS paths in use return exactly symmetric, orders of magnitude inside it --
+# and not a general bound on what any BLAS could leave behind. What it buys is that
+# the matrix actually solved, ``(A + A.T) / 2``, stays within rounding of the ``A``
+# handed in, so the backward guarantees below can be stated about ``b`` alone.
 _SYM_ROUNDING = 10.0
 
 
@@ -392,10 +395,12 @@ def solve_stationarity(
     null_norm = _safe_norm(coeffs[~keep])
     if null_norm > null_tol * b_norm:
         raise np.linalg.LinAlgError(
-            "singular system with b outside the range of A: the objective has no "
-            "stationary point and is unbounded below along the null space of A "
-            f"(null-space component {null_norm:.3g} of ||b|| = {b_norm:.3g}, "
-            "after rescaling b to unit sup-norm). Add or increase the l2 penalty."
+            "singular system with b outside the *numerical* range of A: the objective "
+            "has no stationary point this can stand behind and is unbounded below "
+            "along the numerical null space of A -- either no stationary point exists, "
+            "or reaching it would mean dividing by an eigenvalue at the rank threshold "
+            f"(null-space component {null_norm:.3g} of ||b|| = {b_norm:.3g}, after "
+            "rescaling b to unit sup-norm). Add or increase the l2 penalty."
         )
     beta_unit = evecs[:, keep] @ (coeffs[keep] / evals[keep])
     return _rescale_or_raise(np.asarray(beta_unit, dtype=float), b_scale, a_max)
