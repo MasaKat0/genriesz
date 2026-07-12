@@ -138,37 +138,52 @@ def _null_space_resolution(
     The computed null basis ``V`` spans a true invariant subspace of ``A`` only up
     to an angle, and leakage across that angle mixes the (comparatively large)
     retained part of ``b`` into the measured null component. A component below the
-    leak is therefore indistinguishable from decomposition noise: some backward
-    perturbation of ``A`` at the level the decomposition was computed to would make
-    the system consistent, so its absence of a solution cannot be certified.
+    leak is therefore indistinguishable from decomposition noise -- a perturbation
+    of ``b`` that small would make the system consistent -- so its absence of a
+    solution cannot be certified.
 
-    The sin-theta theorem bounds that angle by ``||R|| / gap``, where ``R = A V -
-    V L`` is the residual of the computed null basis and ``gap`` its separation
-    from the retained spectrum (the computed eigenvalues are within ``~eps`` of the
-    true ones, by Weyl). ``R`` is *measured*, not assumed: a symmetric eigensolver
-    is backward stable, so ``||R||`` is generally ``~eps ||A||`` and this recovers
-    the familiar ``eps / gap`` -- but a decomposition that happens to be exact (a
-    diagonal ``A``, say) has ``R = 0`` and is credited for it, instead of being
-    charged a worst case it never paid and waving through a null-space component it
-    resolved perfectly well.
+    The sin-theta theorem bounds the angle by ``||R|| / gap``, where ``R = A V - V
+    L`` is the residual of the computed null basis and ``gap`` its separation from
+    the true retained spectrum. Both inputs have to be *bounds*, not readings:
+
+    - ``R`` is evaluated in float64, and a residual below the rounding of its own
+      evaluation says nothing. The dot products behind ``A @ V`` carry an error up
+      to ``n eps (|A| |V|)``, so that is added to what was measured. A backward
+      stable eigensolver leaves ``||R|| ~ eps ||A||`` anyway, which is why this
+      normally reproduces the familiar ``eps / gap``. What it does *not* do is
+      trust an unmeasurably small residual: an ``A`` whose null column is exactly
+      zero (a diagonal one, say) has ``|A| |V| = 0`` there, and only then -- when
+      the rounding bound itself vanishes -- is the decomposition credited with
+      resolving the direction exactly, rather than charged a worst case it did not
+      pay and waving through a null-space component it resolved perfectly well.
+    - the computed eigenvalues sit within ``~n eps ||A||`` of the true ones (Weyl),
+      so the separation is that much smaller than the computed one.
 
     Rounding in forming the projections ``V' b`` puts a floor of ``~sqrt(n) eps``
     under all of this, no matter how clean the decomposition is.
     """
 
+    n = A_unit.shape[0]
     eps = float(np.finfo(float).eps)
-    floor = _EIGVEC_NOISE * eps * np.sqrt(A_unit.shape[0])
+    floor = _EIGVEC_NOISE * eps * np.sqrt(n)
     if bool(np.all(keep)):
         return float(floor)  # no null space to leak into: A is (numerically) PD
 
     V = evecs[:, ~keep]
-    resid = _safe_norm((A_unit @ V - V * evals[~keep]).ravel())
+    lam_null = evals[~keep]
+    measured = _safe_norm((A_unit @ V - V * lam_null).ravel())
+    rounding = n * eps * _safe_norm((np.abs(A_unit) @ np.abs(V)).ravel()) + 2.0 * eps * (
+        _safe_norm((np.abs(V) * np.abs(lam_null)).ravel())
+    )
+
     # Null eigenvalues sitting below 0 (rounding on an exactly-singular direction)
-    # only widen the separation; do not take credit for that.
-    gap = lam_min_kept - max(float(np.max(evals[~keep])), 0.0)
-    if gap <= 0.0:  # unreachable while keep = evals > tol, but do not divide by it
-        return np.inf
-    return float(max(floor, _EIGVEC_NOISE * resid / gap))
+    # only widen the separation; do not take credit for that. Weyl's bound on the
+    # eigenvalue error eats into it from both ends.
+    weyl = n * eps * max(float(evals[-1]), 0.0)  # ||A_unit||_2 = lambda_max
+    gap = lam_min_kept - max(float(np.max(lam_null)), 0.0) - 2.0 * weyl
+    if gap <= 0.0:
+        return np.inf  # the two clusters are not even separated: nothing to certify
+    return float(max(floor, _EIGVEC_NOISE * (measured + rounding) / gap))
 
 
 def solve_stationarity(
@@ -205,13 +220,25 @@ def solve_stationarity(
     eigendecomposition itself: when the computed null basis is off by an angle,
     leakage from the retained subspace can cancel a real null-space component of
     ``b``. The component is therefore tested against ``max(rtol, leak)``, where
-    ``leak`` is that angle *as measured on this matrix*
-    (:func:`_null_space_resolution`) -- a component below it is indistinguishable
-    from decomposition noise and is accepted, which is to say the returned ``beta``
-    is the exact minimum-norm stationary point of a system within ``leak`` of the
-    one asked about. If ``leak`` itself grows past ``_MAX_NULL_TOL`` the
-    decomposition can certify nothing at all, and the rank is reported as ambiguous
-    rather than guessed at.
+    ``leak`` bounds that angle on this particular matrix
+    (:func:`_null_space_resolution`), and a component below it is accepted. What
+    that buys is a backward guarantee on ``b`` alone:
+
+        the system is reported solvable only if there is a ``b_tilde`` with
+        ``||b_tilde - b||_2 <= 2 leak ||b||_2`` for which ``A beta = b_tilde`` is
+        consistent (``A`` itself is not perturbed), and the returned ``beta`` is
+        the minimum-norm solution of that system.
+
+    Two ``leak`` s of room, not one, because the component being compared is itself
+    only known to within ``leak``. Note also what is *not* promised: ``beta`` is
+    reconstructed by dividing by the retained eigenvalues, so its residual against
+    ``b_tilde`` is the usual ``~eps lambda_max / lambda_min_kept`` of an
+    ill-conditioned solve, which for a barely-retained eigenvalue is far coarser
+    than ``rtol``. ``rtol`` bounds the component of ``b`` that is discarded, not
+    the accuracy of what is returned.
+
+    If ``leak`` itself grows past ``_MAX_NULL_TOL`` the decomposition can certify
+    nothing at all, and the rank is reported as ambiguous rather than guessed at.
 
     Note that a direction whose eigenvalue falls below the numerical rank
     threshold is treated as null even if ``b`` has a component there and an

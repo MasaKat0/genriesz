@@ -14,6 +14,7 @@ import pytest
 
 import genriesz
 from genriesz.utils import (
+    _null_space_resolution,
     as_1d_of_length,
     as_2d,
     kfold_splits,
@@ -528,6 +529,44 @@ def test_solve_stationarity_certifies_a_null_component_the_decomposition_resolve
     # leak buys tolerance, it does not disable the test.
     with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
         solve_stationarity(rotated, Q[:, 0] + 1e-4 * Q[:, 2])
+
+
+def test_solve_stationarity_does_not_believe_an_unmeasurably_small_residual():
+    """The leak is a bound on the eigenvector error, not a reading of it.
+
+    ``A = T diag(1, 2^-21) T'`` is built from dyadic entries, so ``A @ q`` is
+    *exactly* zero for the integer null vector ``q`` -- and the residual of the
+    computed null basis, evaluated in the same arithmetic, cancels to ~1e-21 while
+    the basis is actually off by an angle of ~1e-10. Reading that residual as the
+    eigenvector error understates it by nine orders of magnitude, which lands the
+    split wrong in both directions at once: a b outside the range of A is waved
+    through with a guarantee it does not meet, and a b that lies exactly *in* the
+    range is failed as unbounded below. Bounding the rounding of the residual's own
+    evaluation -- the dot products behind ``A @ V`` are only good to ``n eps (|A|
+    |V|)`` -- is what keeps the leak an upper bound.
+    """
+    T = np.array([[-16.0, 12.0], [9.0, -16.0], [-10.0, 13.0]])
+    A = T @ np.diag([1.0, 2.0**-21]) @ T.T
+    q = np.array([-43.0, 88.0, 148.0])
+    assert np.all(A @ q == 0.0)  # exactly, in float64
+
+    # b in range(A) = range(T): consistent, and must not be called unbounded below.
+    beta = solve_stationarity(A, T[:, 1])
+    assert np.all(np.isfinite(beta))
+
+    # b outside range(A): the null component (~1.2e-10 of ||b||) is real but far
+    # below the leak the decomposition can honestly claim (~7e-8), so it is
+    # accepted -- and the promise made about it, that some b within 2*leak of this
+    # one is consistent, does hold. What must not happen is the old claim of a
+    # 1e-13 leak, which this b violates by two orders of magnitude.
+    b = np.array([0.5962246454995345, 0.7541753704477557, -0.2752011677099944])
+    null_component = abs(q @ b) / (np.linalg.norm(q) * np.linalg.norm(b))
+    evals, evecs = np.linalg.eigh(A / np.abs(A).max())
+    keep = evals > 1e-10 * evals[-1]
+    leak = _null_space_resolution(A / np.abs(A).max(), evals, evecs, keep, float(evals[keep].min()))
+
+    assert null_component <= 2 * leak  # the guarantee the returned beta comes with
+    assert np.all(np.isfinite(solve_stationarity(A, b)))
 
 
 def test_solve_stationarity_refuses_a_solution_that_underflows():

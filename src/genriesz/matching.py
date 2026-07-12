@@ -328,6 +328,11 @@ def local_polynomial_nn_lsif_density_ratio(
         This is mostly relevant for in-sample evaluation. Only a single coincident
         point (the nearest, at distance ~0) is dropped; if the same point occurs
         several times among the neighbors, the exclusion is incomplete.
+        "Coincident" is a heuristic -- a nearest neighbor within 1e-12 of the eval
+        point -- so an out-of-sample eval point that merely lies that close to a
+        denominator sample is also treated as a self match, and its radius is
+        widened to the next neighbor. The alternative (tracking identity by index)
+        is not available here: the eval points arrive as coordinates.
     ridge:
         A small ridge term added to H_hat(x) for numerical stability.
     metric, n_jobs:

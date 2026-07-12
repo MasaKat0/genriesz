@@ -18,6 +18,8 @@ link does not.
 
 from __future__ import annotations
 
+import decimal
+
 import numpy as np
 import pytest
 
@@ -116,6 +118,49 @@ def test_bkl_g_does_not_cancel_at_large_alpha():
     assert g == pytest.approx(-2.0 * C * (1.0 + np.log(a)), rel=1e-12)
     # The naive difference of the two O(|alpha| log|alpha|) terms returned 0.0.
     assert np.all(g < -1.0)
+
+
+def _bkl_g_exact(a: np.ndarray, C: float) -> np.ndarray:
+    """``t1 log t1 - t2 log t2`` evaluated to 60 digits, then rounded once."""
+
+    with decimal.localcontext() as ctx:
+        ctx.prec = 60
+        out = []
+        for ai in a:
+            t1 = decimal.Decimal(abs(float(ai))) - decimal.Decimal(float(C))
+            t2 = decimal.Decimal(abs(float(ai))) + decimal.Decimal(float(C))
+            out.append(float(t1 * t1.ln() - t2 * t2.ln()))
+    return np.array(out)
+
+
+@pytest.mark.parametrize("C", [1.0, 1e-6, 1e-13])
+def test_bkl_g_rewrite_is_an_identity_off_the_floor(C):
+    """The cancellation-free form is the same function, floor aside.
+
+    ``_bkl_g`` floors ``t1 = |alpha| - C`` at 1e-12, and the rewrite is an identity
+    only where that floor is inactive -- everywhere the link is actually evaluated,
+    since the domain is the open ``|alpha| > C``. Small ``C`` is the case to pin
+    down: ``C`` is not otherwise bounded below, and the rewrite reorganises the
+    expression precisely around ``2C / t1``.
+
+    The naive difference cannot serve as the reference here, because it is what
+    breaks: at ``C = 1e-13`` its two ``O(t1 log t1)`` terms agree to more than
+    16 digits and their difference is noise (0.0, at ``|alpha| ~ 1e12``, for a
+    value of -5.7e-12). The reference is the same expression in 60-digit decimal.
+    """
+    t1 = np.array([1e-11, 1e-8, 1e-3, 1.0, 1e3, 1e12])  # distance past the boundary
+    a = C + t1  # strictly inside the domain, floor inactive
+    assert np.all(np.abs(a) - C >= 1e-12)
+
+    assert _bkl_g(a, C) == pytest.approx(_bkl_g_exact(a, C), rel=1e-12)
+
+    # In the floored sliver the rewrite is no longer that identity: t2 != t1 + 2C
+    # once t1 is clamped. Both forms are then surrogates of a value the floor has
+    # already made arbitrary, and they stay within ~1e-11 of each other.
+    edge = np.array([C + 1e-14, C + 1e-13])
+    floored = np.maximum(np.abs(edge) - C, 1e-12)
+    naive_edge = floored * np.log(floored) - (edge + C) * np.log(edge + C)
+    assert _bkl_g(edge, C) == pytest.approx(naive_edge, abs=1e-10)
 
 
 @pytest.mark.parametrize("u", [-1e-17, -1e-13, -1e-9, -1e-5, -1e-1, -1.0, -5.0])
