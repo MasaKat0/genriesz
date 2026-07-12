@@ -12,7 +12,16 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from scipy.linalg import lapack
 from scipy.stats import norm
+
+# Reciprocal-condition floor for taking the Cholesky fast path in
+# ``solve_stationarity``. Two orders of magnitude above the default numerical
+# rank threshold (``rcond=1e-10``), which leaves room for LAPACK's condition
+# *estimator* to be optimistic while still guaranteeing the matrix is nowhere
+# near rank-deficient. Realistic penalized Gram matrices sit well above it
+# (a 400-center RKHS basis with lam=1e-3 estimates ~1e-6 to ~3e-5).
+_FAST_PATH_RCOND = 1e-8
 
 
 def as_2d(x: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
@@ -70,14 +79,14 @@ def solve_stationarity(
     possibly zero ridge), so it can be singular, and the two singular cases mean
     opposite things:
 
-    - ``b`` lies in the range of ``A``: minimizers exist and form an affine set.
-      The minimum-norm one is returned; it is a genuine minimizer.
-    - ``b`` has a component in the null space of ``A``: the quadratic has *no*
-      stationary point and is unbounded below along that direction. A linear
-      solver still hands back a finite vector, and passing that off as a
-      solution would silently turn a divergent problem into a successful fit.
-      :class:`numpy.linalg.LinAlgError` is raised instead, so the caller can
-      fail honestly or drop the candidate.
+    - ``b`` lies in the range of ``A`` (to within ``rtol``): minimizers exist and
+      form an affine set. The minimum-norm one is returned.
+    - ``b`` has a component in the null space of ``A`` larger than ``rtol``: the
+      quadratic has *no* stationary point and is unbounded below along that
+      direction. A linear solver still hands back a finite vector, and passing
+      that off as a solution would silently turn a divergent problem into a
+      successful fit. :class:`numpy.linalg.LinAlgError` is raised instead, so the
+      caller can fail honestly or drop the candidate.
 
     Telling them apart cannot be done from the solver's residual alone: a
     near-singular ``A`` makes ``numpy.linalg.solve`` succeed *without* raising,
@@ -93,26 +102,33 @@ def solve_stationarity(
     threshold is treated as null even if ``b`` has a component there and an
     exact solution therefore exists on paper: recovering it would mean dividing
     by a numerically-zero eigenvalue, and the resulting ``beta`` is not a
-    quantity an unpenalized fit should return. Add a ridge to get it.
+    quantity an unpenalized fit should return. Add a ridge to get it. Symmetric
+    with that, stationarity is only enforced to within ``rtol``: a null-space
+    component of ``b`` smaller than that is accepted, so what comes back is the
+    minimum-norm vector satisfying the stationarity condition to numerical
+    tolerance, not necessarily an exact minimizer.
     """
 
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
     b_norm = float(np.linalg.norm(b))
 
-    # Fast path. Cholesky both proves that A is numerically positive definite
-    # and bounds its conditioning through its pivots, so a healthy penalized
-    # system -- the overwhelmingly common case -- avoids the ~10x more expensive
-    # eigendecomposition below. The residual check catches a pivot ratio that
-    # flatters an ill-conditioned matrix; anything suspicious escalates.
-    try:
-        pivots = np.diag(np.linalg.cholesky(A))
-    except np.linalg.LinAlgError:
-        pivots = None
-    if pivots is not None and float(pivots.min()) ** 2 > rcond * float(pivots.max()) ** 2:
-        beta = np.asarray(np.linalg.solve(A, b), dtype=float)
-        if float(np.linalg.norm(A @ beta - b)) <= 1e-8 * b_norm:
-            return beta
+    # Fast path for a comfortably positive-definite A -- the penalized case, and
+    # the overwhelmingly common one. LAPACK's Cholesky proves definiteness and
+    # pocon estimates the reciprocal 1-norm condition number from that same
+    # factor in O(p^2), which is what makes skipping the ~6x more expensive
+    # eigendecomposition below safe: for a symmetric matrix cond_2 <= cond_1, so
+    # 1/cond_1 > _FAST_PATH_RCOND >> rcond implies the smallest eigenvalue is far
+    # above the numerical rank threshold. (The Cholesky *pivots* do not bound the
+    # eigenvalue ratio -- a matrix with pivot ratio 1 can still be singular to
+    # working precision -- so they cannot be used for this.)
+    chol, info = lapack.dpotrf(A, lower=0, clean=1)
+    if info == 0:
+        rcond_1, _ = lapack.dpocon(chol, float(np.linalg.norm(A, 1)))
+        if float(rcond_1) > _FAST_PATH_RCOND:
+            beta, info_s = lapack.dpotrs(chol, b, lower=0)
+            if info_s == 0:
+                return np.asarray(beta, dtype=float).reshape(-1)
 
     evals, evecs = np.linalg.eigh(A)
     tol = rcond * max(float(evals[-1]), 0.0)

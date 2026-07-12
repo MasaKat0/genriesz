@@ -155,6 +155,9 @@ def test_singular_but_solvable_closed_form_returns_the_minimum_norm_minimizer():
     assert np.all(np.isfinite(beta))
     # It really solves the stationarity condition, which is what makes it a minimizer.
     np.testing.assert_allclose(A @ beta, b, atol=1e-10)
+    # And it is the minimum-norm one: the minimizers are {beta : sum(beta) = 2},
+    # whose smallest member is the constant vector.
+    np.testing.assert_allclose(beta, [2 / 3, 2 / 3, 2 / 3], atol=1e-10)
 
 
 def test_singular_and_unsolvable_closed_form_raises_instead_of_returning_a_non_solution():

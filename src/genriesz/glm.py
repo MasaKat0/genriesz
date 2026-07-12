@@ -72,9 +72,10 @@ class FitResult:
     status:
         One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
         ``"domain_error"``, ``"domain_error_at_solution"``, ``"singular"``
-        (the closed-form system has no stationary point: unpenalized and
-        rank-deficient, so the objective is unbounded below), or ``""`` for
-        results produced by callers that do not set it.
+        (the closed-form system is numerically rank-deficient -- usually an
+        unpenalized path -- and has no stationary point, so the objective is
+        unbounded below), or ``""`` for results produced by callers that do not
+        set it.
     objective_value:
         Penalized objective evaluated at ``beta``.
     gradient_norm:

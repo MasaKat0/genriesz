@@ -303,3 +303,55 @@ def test_solve_stationarity_treats_a_numerically_zero_eigenvalue_as_null():
     # A ridge lifts the direction above the threshold and the fit succeeds.
     beta = solve_stationarity(A + 1e-3 * np.eye(3), b)
     assert np.all(np.isfinite(beta))
+
+
+def test_solve_stationarity_rejects_a_matrix_whose_cholesky_pivots_look_healthy():
+    """Cholesky pivots do not bound the eigenvalue ratio.
+
+    ``A = L L' / (M^2 + 1)`` with ``L = [[1, 0], [M, 1]]`` has a pivot ratio of
+    essentially 1 -- so a pivot-based gate waves it through -- yet its eigenvalue
+    ratio is ~1e-10, i.e. singular to working precision. The relative residual of
+    the resulting 1e10-norm vector is ~2e-9, small enough to slip past a residual
+    check too. Only a real condition estimate (or the eigendecomposition itself)
+    catches this.
+    """
+    scale = 320.0
+    L = np.array([[1.0, 0.0], [scale, 1.0]])
+    A = (L @ L.T) / (scale**2 + 1.0)
+    evals, evecs = np.linalg.eigh(A)
+
+    pivots = np.diag(np.linalg.cholesky(A))
+    assert (pivots.min() / pivots.max()) ** 2 > 0.99  # pivots claim it is healthy
+    assert evals[0] / evals[-1] < 1e-10  # while it is numerically rank-deficient
+
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(A, evecs[:, 0])
+
+
+def test_solve_stationarity_keeps_the_fast_path_for_a_penalized_gram_matrix():
+    # The Cholesky/pocon gate must not send an ordinary ridge-penalized system to
+    # the eigendecomposition: that path is ~10x slower and runs on every fit.
+    rng = np.random.default_rng(3)
+    Phi = rng.normal(size=(500, 60))
+    A = 0.5 * (Phi.T @ Phi) / 500 + 1e-3 * np.eye(60)
+    b = rng.normal(size=60)
+
+    beta = solve_stationarity(A, b)
+    np.testing.assert_allclose(A @ beta, b, atol=1e-10)
+
+
+@pytest.mark.parametrize(
+    "A,b,solvable",
+    [
+        (np.array([[2.0]]), np.array([4.0]), True),  # p = 1
+        (np.zeros((2, 2)), np.zeros(2), True),  # A = 0, b = 0 -> beta = 0
+        (np.zeros((2, 2)), np.array([1.0, 0.0]), False),  # A = 0, b != 0
+    ],
+)
+def test_solve_stationarity_edge_shapes(A, b, solvable):
+    if solvable:
+        beta = solve_stationarity(A, b)
+        np.testing.assert_allclose(A @ beta, b, atol=1e-12)
+    else:
+        with pytest.raises(np.linalg.LinAlgError):
+            solve_stationarity(A, b)
