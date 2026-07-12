@@ -465,3 +465,51 @@ def test_solve_stationarity_edge_shapes(A, b, solvable):
     else:
         with pytest.raises(np.linalg.LinAlgError):
             solve_stationarity(A, b)
+
+
+def test_solve_stationarity_checks_definiteness_even_when_b_is_zero():
+    # beta = 0 is a stationary point of an indefinite quadratic, but the quadratic
+    # is still unbounded below along the negative eigenvector. Returning zeros for
+    # b = 0 used to short-circuit the definiteness check entirely.
+    with pytest.raises(np.linalg.LinAlgError, match="not positive semi-definite"):
+        solve_stationarity(np.diag([1.0, -1.0]), np.zeros(2))
+    with pytest.raises(np.linalg.LinAlgError, match="not positive semi-definite"):
+        solve_stationarity(np.array([[-1.0]]), np.zeros(1))
+
+    # A PSD matrix with b = 0 still returns the zero solution.
+    np.testing.assert_allclose(solve_stationarity(np.diag([1.0, 0.0]), np.zeros(2)), [0.0, 0.0])
+
+
+def test_solve_stationarity_reports_an_ambiguous_rank_instead_of_guessing():
+    """A retained eigenvalue sitting on the rank threshold cannot be trusted.
+
+    An eigenvector is determined to ~eps/gap, so an eigenvalue ~1e-10 above its
+    neighbours carries ~1e-6 of eigenvector error -- enough for leakage from the
+    retained subspace to cancel a real null-space component of b, and hand back a
+    finite vector whose residual is ~3e-6 while every tolerance says it solved.
+    The split has to be declared undecidable rather than guessed.
+    """
+    Q, _ = np.linalg.qr(np.random.default_rng(7).normal(size=(3, 3)))
+    A = Q @ np.diag([1.0, 1.01e-10, 0.0]) @ Q.T
+    A = 0.5 * (A + A.T)
+    b = 0.76 * Q[:, 0] - 0.61 * Q[:, 1] + 2.965e-6 * Q[:, 2]  # real null component
+
+    with pytest.raises(np.linalg.LinAlgError, match="numerical rank of A is ambiguous"):
+        solve_stationarity(A, b)
+
+
+def test_solve_stationarity_refuses_a_solution_that_underflows():
+    # scale = b_scale / a_max underflows to 0, so the only representable beta is
+    # zero -- which does not solve the system (residual is 100% of b).
+    tiny = np.nextafter(0.0, 1.0)  # 5e-324
+    with pytest.raises(np.linalg.LinAlgError, match="underflows float64"):
+        solve_stationarity(np.array([[1e308]]), np.array([tiny]))
+
+
+def test_solve_stationarity_solves_a_subnormal_system():
+    # Normalizing before symmetrizing matters: 0.5 * A on a subnormal A collapses
+    # it to the zero matrix, and a solvable system would be called unbounded.
+    tiny = np.nextafter(0.0, 1.0)
+    np.testing.assert_allclose(
+        solve_stationarity(np.array([[tiny]]), np.array([tiny])), [1.0]
+    )

@@ -25,6 +25,15 @@ from scipy.stats import norm
 _FAST_PATH_RCOND = 1e-8
 _FAST_PATH_SAFETY = 100.0
 
+# An eigenvector is determined to about eps / gap, so the smallest retained
+# eigenvalue sets the finest null-space component ``solve_stationarity`` can tell
+# apart from decomposition noise. _EIGVEC_NOISE is the safety factor on that
+# floor; _MAX_NULL_TOL is where the floor gets so coarse that the range/null
+# split stops being a decision and becomes a guess, and the rank is reported as
+# ambiguous instead.
+_EIGVEC_NOISE = 10.0
+_MAX_NULL_TOL = 1e-6
+
 
 def as_2d(x: ArrayLike, *, name: str = "X") -> NDArray[np.float64]:
     """Convert an array-like object to a 2D float64 NumPy array."""
@@ -68,15 +77,51 @@ def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
     return out
 
 
-def _scaled_or_raise(scale: float, beta_unit: NDArray[np.float64]) -> NDArray[np.float64]:
-    """Undo the unit-scaling, refusing a solution float64 cannot represent."""
+def _safe_norm(x: NDArray[np.float64]) -> float:
+    """Euclidean norm that neither underflows nor overflows on extreme inputs.
 
-    beta = scale * beta_unit
+    ``np.linalg.norm`` squares before summing, so it returns 0.0 for a vector of
+    ~1e-200 and inf for one of ~1e200.
+    """
+
+    m = float(np.max(np.abs(x))) if x.size else 0.0
+    if m == 0.0 or not np.isfinite(m):
+        return m if np.isfinite(m) else float("inf")
+    return m * float(np.linalg.norm(x / m))
+
+
+def _rescale_or_raise(
+    beta_unit: NDArray[np.float64], b_scale: float, a_max: float
+) -> NDArray[np.float64]:
+    """Undo the unit-scaling, refusing a solution float64 cannot represent.
+
+    ``beta = (b_scale / a_max) * beta_unit`` can overflow (a vanishing ``A``
+    against an ordinary ``b``) or underflow to exactly zero (a huge ``A`` against
+    a subnormal ``b``). Either way the true solution is outside float64, and a
+    finite-looking answer would be a wrong one: zeros do not solve the system any
+    more than infinities do. The two associations are tried because only the
+    *intermediate* may overflow.
+    """
+
+    if b_scale == 0.0:
+        return np.zeros(beta_unit.shape[0], dtype=float)
+
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        beta = (beta_unit * b_scale) / a_max
+        if not np.isfinite(beta).all():
+            beta = (beta_unit / a_max) * b_scale
+
     if not np.isfinite(beta).all():
         raise np.linalg.LinAlgError(
             "the solution overflows float64: A is vanishingly small relative to b, "
             "so no representable beta satisfies the stationarity condition. Rescale "
             "the features or add an l2 penalty."
+        )
+    if not np.any(beta):
+        raise np.linalg.LinAlgError(
+            "the solution underflows float64: A is enormous relative to b, so the "
+            "only representable beta is zero, which does not solve the system. "
+            "Rescale the features."
         )
     return np.asarray(beta, dtype=float)
 
@@ -94,34 +139,45 @@ def solve_stationarity(
     possibly zero ridge), so it can be singular, and the two singular cases mean
     opposite things:
 
-    - ``b`` lies in the range of ``A`` (to within ``rtol``): minimizers exist and
-      form an affine set. The minimum-norm one is returned.
-    - ``b`` has a component in the null space of ``A`` larger than ``rtol``: the
-      quadratic has *no* stationary point and is unbounded below along that
-      direction. A linear solver still hands back a finite vector, and passing
-      that off as a solution would silently turn a divergent problem into a
-      successful fit. :class:`numpy.linalg.LinAlgError` is raised instead, so the
-      caller can fail honestly or drop the candidate.
+    - ``b`` lies in the range of ``A``: minimizers exist and form an affine set.
+      The minimum-norm one is returned.
+    - ``b`` has a component in the null space of ``A``: the quadratic has *no*
+      stationary point and is unbounded below along that direction. A linear
+      solver still hands back a finite vector, and passing that off as a solution
+      would silently turn a divergent problem into a successful fit.
+      :class:`numpy.linalg.LinAlgError` is raised instead, so the caller can fail
+      honestly or drop the candidate.
 
     Telling them apart cannot be done from the solver's residual alone: a
     near-singular ``A`` makes ``numpy.linalg.solve`` succeed *without* raising,
     returning a huge vector whose backward error is small but which solves a
     perturbed system, not this one. So a suspicious matrix is escalated to a
-    symmetric eigendecomposition, which says exactly where the range of ``A``
-    ends: ``rcond`` sets the numerical rank (eigenvalues at or below
-    ``rcond * lambda_max`` count as null) and ``rtol`` bounds the null-space
-    component of ``b`` relative to ``||b||``. Both criteria are invariant to
-    rescaling ``A`` or ``b``.
+    symmetric eigendecomposition, which says where the range of ``A`` ends:
+    ``rcond`` sets the numerical rank (eigenvalues at or below ``rcond *
+    lambda_max`` count as null).
+
+    What can be certified there is bounded by the accuracy of the
+    eigendecomposition itself. An eigenvector is only determined to about
+    ``eps / gap``, where ``gap`` is the distance from its eigenvalue to the rest
+    of the spectrum, so a retained eigenvalue that sits just above the rank
+    threshold has an eigenvector so poorly determined that leakage from it can
+    cancel a real null-space component of ``b``. The null-space component is
+    therefore tested against ``max(rtol, ~eps / lambda_min_kept)`` rather than
+    ``rtol`` alone -- a component below that floor is indistinguishable from
+    eigenvector error and is accepted -- and if that floor itself grows past
+    ``_MAX_NULL_TOL`` the decomposition can certify nothing at all, so the rank
+    is reported as ambiguous rather than guessed at.
 
     Note that a direction whose eigenvalue falls below the numerical rank
     threshold is treated as null even if ``b`` has a component there and an
     exact solution therefore exists on paper: recovering it would mean dividing
-    by a numerically-zero eigenvalue, and the resulting ``beta`` is not a
-    quantity an unpenalized fit should return. Add a ridge to get it. Symmetric
-    with that, stationarity is only enforced to within ``rtol``: a null-space
-    component of ``b`` smaller than that is accepted, so what comes back is the
-    minimum-norm vector satisfying the stationarity condition to numerical
-    tolerance, not necessarily an exact minimizer.
+    by a numerically-zero eigenvalue, and the resulting ``beta`` is not a quantity
+    an unpenalized fit should return. Add a ridge to get it.
+
+    Both criteria are invariant to rescaling ``A`` or ``b``: the two sides are put
+    on a unit sup-norm scale up front, which also keeps the raw norms of extreme
+    inputs from underflowing to 0 or overflowing to inf and quietly vacating every
+    test below.
     """
 
     A = np.asarray(A, dtype=float)
@@ -133,9 +189,7 @@ def solve_stationarity(
         # rtol >= 1 would accept a b that is purely null-space, and NaN compares
         # false against everything, so either would quietly disable the check
         # below. rtol = 0 is refused too: it would promise to detect *any*
-        # null-space component, which float64 cannot deliver -- a component
-        # 1e-324 times ||b|| is not representable once b is put on a common
-        # scale. The criterion is relative by construction.
+        # null-space component, which no float64 decomposition can deliver.
         raise ValueError(f"rtol must be finite and in (0, 1). Got {rtol!r}.")
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
         raise ValueError(f"A must be a square 2D array. Got shape {A.shape}.")
@@ -147,52 +201,46 @@ def solve_stationarity(
     if n == 0:
         return np.zeros(0, dtype=float)
 
-    # LAPACK reads one triangle of A and eigh reads the other, so a non-symmetric
-    # argument would have them silently solve two different systems. The callers
-    # pass Gram matrices; a gross asymmetry is a bug upstream, while the rounding
-    # that BLAS can leave behind is tolerated -- and then averaged away, because
-    # tolerating it is not the same as making both routines see the same matrix.
     a_max = float(np.max(np.abs(A)))
-    if float(np.max(np.abs(A - A.T))) > 1e-10 * a_max:
-        raise ValueError("A must be symmetric.")
-    A = 0.5 * A + 0.5 * A.T  # scale before adding: A may hold ~1e308 entries
-
     b_scale = float(np.max(np.abs(b)))
-    if b_scale == 0.0:
-        return np.zeros(n, dtype=float)  # A @ 0 = 0 = b
     if a_max == 0.0:
+        if b_scale == 0.0:
+            return np.zeros(n, dtype=float)  # 0 @ beta = 0 = b
         raise np.linalg.LinAlgError(
             "A is zero and b is not: the objective has no stationary point and is "
             "unbounded below. Add or increase the l2 penalty."
         )
 
-    # Put both sides on a unit sup-norm scale and restore the scale at the end.
-    # Norms of the raw arrays are not usable as yardsticks: ||b|| underflows to 0
-    # for a b of ~1e-300 (so every relative test passes vacuously) and overflows
-    # to inf for a b of ~1e308 (same), and a lambda_max of ~1e-320 makes the
-    # eigen-path division overflow to inf. On the unit scale the eigenvalues live
-    # in [0, 1] and ||b_unit|| in [1, sqrt(n)], so neither can happen; the system
-    # is linear in b, and A_unit shares its eigenvectors with A.
+    # Normalize before symmetrizing: on the unit scale the entries are in [-1, 1]
+    # and halving them cannot underflow, whereas 0.5 * A on a subnormal A would
+    # collapse it to the zero matrix.
     A_unit = A / a_max
-    b_unit = b / b_scale
-    b_norm = float(np.linalg.norm(b_unit))
-    scale = b_scale / a_max  # may overflow; the result is checked for finiteness
+    if float(np.max(np.abs(A_unit - A_unit.T))) > 1e-10:
+        # LAPACK reads one triangle of A and eigh the other, so a non-symmetric
+        # argument would have them silently solve two different systems. A gross
+        # asymmetry is a bug upstream; the rounding BLAS can leave on a Gram
+        # matrix is tolerated -- and then averaged away, because tolerating it is
+        # not the same as making both routines see the same matrix.
+        raise ValueError("A must be symmetric.")
+    A_unit = 0.5 * A_unit + 0.5 * A_unit.T
+
+    b_unit = b / b_scale if b_scale > 0.0 else np.zeros(n, dtype=float)
+    b_norm = _safe_norm(b_unit)  # 1 <= b_norm <= sqrt(n), or 0 when b is zero
 
     # Fast path for a comfortably positive-definite A -- the penalized case, and
-    # the overwhelmingly common one. A numerically successful Cholesky gives
-    # pocon the factor it needs to estimate the reciprocal 1-norm condition
-    # number in O(p^2), and that is what lets us skip the ~6x more expensive
+    # the overwhelmingly common one. A numerically successful Cholesky gives pocon
+    # the factor it needs to estimate the reciprocal 1-norm condition number in
+    # O(p^2), and that is what lets us skip the ~6x more expensive
     # eigendecomposition below: for a symmetric matrix cond_2 <= cond_1, so
     # 1/cond_1 above the gate puts the smallest eigenvalue well above the
-    # numerical rank threshold. (The Cholesky *pivots* do not bound the
-    # eigenvalue ratio -- a matrix with pivot ratio 1 can still be singular to
-    # working precision -- so they cannot be used for this.)
+    # numerical rank threshold. (The Cholesky *pivots* do not bound the eigenvalue
+    # ratio -- a matrix with pivot ratio 1 can still be singular to working
+    # precision -- so they cannot be used for this.)
     #
     # The gate has to move with ``rcond``, or a caller who widens the numerical
     # null space would still get directions the exact path would have rejected.
-    # pocon returns an *estimate*, biased optimistic, so the factor above
-    # ``rcond`` is an empirical margin rather than a proof: an estimate has to be
-    # off by more than _FAST_PATH_SAFETY to let a rank-deficient matrix through.
+    # pocon returns an *estimate*, biased optimistic, so the factor above ``rcond``
+    # is an empirical margin rather than a proof.
     gate = max(_FAST_PATH_RCOND, _FAST_PATH_SAFETY * rcond)
     chol, info = lapack.dpotrf(A_unit, lower=0, clean=1)
     if info == 0:
@@ -200,7 +248,8 @@ def solve_stationarity(
         if info_c == 0 and float(rcond_1) > gate:
             beta_unit, info_s = lapack.dpotrs(chol, b_unit, lower=0)
             if info_s == 0:
-                return _scaled_or_raise(scale, np.asarray(beta_unit, dtype=float).reshape(-1))
+                beta_unit = np.asarray(beta_unit, dtype=float).reshape(-1)
+                return _rescale_or_raise(beta_unit, b_scale, a_max)
 
     evals, evecs = np.linalg.eigh(A_unit)
     tol = rcond * max(float(evals[-1]), 0.0)
@@ -209,11 +258,26 @@ def solve_stationarity(
             f"A is not positive semi-definite (smallest eigenvalue {evals[0] * a_max:.3g}): "
             "the quadratic is unbounded below along that eigenvector."
         )
+    if b_scale == 0.0:
+        return np.zeros(n, dtype=float)  # beta = 0 solves it, and A is now known PSD
+
     keep = evals > tol
+    lam_min_kept = float(np.min(evals[keep]))  # > 0: lambda_max > tol for rcond < 1
+
+    # How small a null-space component this decomposition can still resolve.
+    null_tol = max(rtol, _EIGVEC_NOISE * float(np.finfo(float).eps) / lam_min_kept)
+    if null_tol > _MAX_NULL_TOL:
+        raise np.linalg.LinAlgError(
+            f"the numerical rank of A is ambiguous: its smallest retained eigenvalue "
+            f"({lam_min_kept * a_max:.3g}) sits so close to the rank threshold that "
+            f"eigenvector error (~{null_tol:.1g}) would swamp any null-space component "
+            "of b, so neither a solution nor its absence can be certified. Add or "
+            "increase the l2 penalty."
+        )
 
     coeffs = evecs.T @ b_unit
-    null_norm = float(np.linalg.norm(coeffs[~keep]))
-    if null_norm > rtol * b_norm:
+    null_norm = _safe_norm(coeffs[~keep])
+    if null_norm > null_tol * b_norm:
         raise np.linalg.LinAlgError(
             "singular system with b outside the range of A: the objective has no "
             "stationary point and is unbounded below along the null space of A "
@@ -221,7 +285,7 @@ def solve_stationarity(
             "after rescaling b to unit sup-norm). Add or increase the l2 penalty."
         )
     beta_unit = evecs[:, keep] @ (coeffs[keep] / evals[keep])
-    return _scaled_or_raise(scale, np.asarray(beta_unit, dtype=float))
+    return _rescale_or_raise(np.asarray(beta_unit, dtype=float), b_scale, a_max)
 
 
 def standardize_columns(
