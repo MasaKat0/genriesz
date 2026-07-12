@@ -498,6 +498,38 @@ def test_solve_stationarity_reports_an_ambiguous_rank_instead_of_guessing():
         solve_stationarity(A, b)
 
 
+def test_solve_stationarity_certifies_a_null_component_the_decomposition_resolves():
+    """The leak that hides a null-space component is measured, not assumed.
+
+    Both matrices here have spectrum (1, 1e-8, 0), so the worst-case eigenvector
+    error ~eps/lambda_min_kept is ~2e-7 for either -- and a floor set from that
+    worst case waves through the 1e-7 null-space component of b in both, reporting
+    a stationary point for an objective that has none.
+
+    But the two decompositions are not equally accurate. eigh recovers a diagonal
+    matrix exactly: its null basis has zero residual, it resolves the component
+    perfectly, and the absent solution has to be reported. Only when the
+    eigenvectors really are uncertain -- the generic rotation, whose measured leak
+    is ~2e-7 -- is the component genuinely indistinguishable from decomposition
+    noise, and accepting it means returning the exact solution of a system that far
+    away from the one asked about.
+    """
+    exact = np.diag([1.0, 1e-8, 0.0])
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(exact, np.array([1.0, 0.0, 1e-7]))
+
+    Q, _ = np.linalg.qr(np.random.default_rng(11).normal(size=(3, 3)))
+    rotated = Q @ np.diag([1.0, 1e-8, 0.0]) @ Q.T
+    rotated = 0.5 * (rotated + rotated.T)
+    beta = solve_stationarity(rotated, Q[:, 0] + 1e-7 * Q[:, 2])
+    assert np.all(np.isfinite(beta))
+
+    # A component the rotated decomposition *can* resolve is still rejected: the
+    # leak buys tolerance, it does not disable the test.
+    with pytest.raises(np.linalg.LinAlgError, match="unbounded below"):
+        solve_stationarity(rotated, Q[:, 0] + 1e-4 * Q[:, 2])
+
+
 def test_solve_stationarity_refuses_a_solution_that_underflows():
     # scale = b_scale / a_max underflows to 0, so the only representable beta is
     # zero -- which does not solve the system (residual is 100% of b).

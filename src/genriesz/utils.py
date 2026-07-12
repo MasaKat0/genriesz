@@ -25,12 +25,12 @@ from scipy.stats import norm
 _FAST_PATH_RCOND = 1e-8
 _FAST_PATH_SAFETY = 100.0
 
-# An eigenvector is determined to about eps / gap, so the smallest retained
-# eigenvalue sets the finest null-space component ``solve_stationarity`` can tell
-# apart from decomposition noise. _EIGVEC_NOISE is the safety factor on that
-# floor; _MAX_NULL_TOL is where the floor gets so coarse that the range/null
-# split stops being a decision and becomes a guess, and the rank is reported as
-# ambiguous instead.
+# The computed null basis spans a true invariant subspace of ``A`` only up to an
+# angle, and that angle sets the finest null-space component ``solve_stationarity``
+# can tell apart from decomposition noise (see ``_null_space_resolution``).
+# _EIGVEC_NOISE is the safety factor on that bound; _MAX_NULL_TOL is where the
+# bound gets so coarse that the range/null split stops being a decision and
+# becomes a guess, and the rank is reported as ambiguous instead.
 _EIGVEC_NOISE = 10.0
 _MAX_NULL_TOL = 1e-6
 
@@ -126,6 +126,51 @@ def _rescale_or_raise(
     return np.asarray(beta, dtype=float)
 
 
+def _null_space_resolution(
+    A_unit: NDArray[np.float64],
+    evals: NDArray[np.float64],
+    evecs: NDArray[np.float64],
+    keep: NDArray[np.bool_],
+    lam_min_kept: float,
+) -> float:
+    """Smallest null-space component of ``b`` the decomposition can still resolve.
+
+    The computed null basis ``V`` spans a true invariant subspace of ``A`` only up
+    to an angle, and leakage across that angle mixes the (comparatively large)
+    retained part of ``b`` into the measured null component. A component below the
+    leak is therefore indistinguishable from decomposition noise: some backward
+    perturbation of ``A`` at the level the decomposition was computed to would make
+    the system consistent, so its absence of a solution cannot be certified.
+
+    The sin-theta theorem bounds that angle by ``||R|| / gap``, where ``R = A V -
+    V L`` is the residual of the computed null basis and ``gap`` its separation
+    from the retained spectrum (the computed eigenvalues are within ``~eps`` of the
+    true ones, by Weyl). ``R`` is *measured*, not assumed: a symmetric eigensolver
+    is backward stable, so ``||R||`` is generally ``~eps ||A||`` and this recovers
+    the familiar ``eps / gap`` -- but a decomposition that happens to be exact (a
+    diagonal ``A``, say) has ``R = 0`` and is credited for it, instead of being
+    charged a worst case it never paid and waving through a null-space component it
+    resolved perfectly well.
+
+    Rounding in forming the projections ``V' b`` puts a floor of ``~sqrt(n) eps``
+    under all of this, no matter how clean the decomposition is.
+    """
+
+    eps = float(np.finfo(float).eps)
+    floor = _EIGVEC_NOISE * eps * np.sqrt(A_unit.shape[0])
+    if bool(np.all(keep)):
+        return float(floor)  # no null space to leak into: A is (numerically) PD
+
+    V = evecs[:, ~keep]
+    resid = _safe_norm((A_unit @ V - V * evals[~keep]).ravel())
+    # Null eigenvalues sitting below 0 (rounding on an exactly-singular direction)
+    # only widen the separation; do not take credit for that.
+    gap = lam_min_kept - max(float(np.max(evals[~keep])), 0.0)
+    if gap <= 0.0:  # unreachable while keep = evals > tol, but do not divide by it
+        return np.inf
+    return float(max(floor, _EIGVEC_NOISE * resid / gap))
+
+
 def solve_stationarity(
     A: NDArray[np.float64],
     b: NDArray[np.float64],
@@ -157,16 +202,16 @@ def solve_stationarity(
     lambda_max`` count as null).
 
     What can be certified there is bounded by the accuracy of the
-    eigendecomposition itself. An eigenvector is only determined to about
-    ``eps / gap``, where ``gap`` is the distance from its eigenvalue to the rest
-    of the spectrum, so a retained eigenvalue that sits just above the rank
-    threshold has an eigenvector so poorly determined that leakage from it can
-    cancel a real null-space component of ``b``. The null-space component is
-    therefore tested against ``max(rtol, ~eps / lambda_min_kept)`` rather than
-    ``rtol`` alone -- a component below that floor is indistinguishable from
-    eigenvector error and is accepted -- and if that floor itself grows past
-    ``_MAX_NULL_TOL`` the decomposition can certify nothing at all, so the rank
-    is reported as ambiguous rather than guessed at.
+    eigendecomposition itself: when the computed null basis is off by an angle,
+    leakage from the retained subspace can cancel a real null-space component of
+    ``b``. The component is therefore tested against ``max(rtol, leak)``, where
+    ``leak`` is that angle *as measured on this matrix*
+    (:func:`_null_space_resolution`) -- a component below it is indistinguishable
+    from decomposition noise and is accepted, which is to say the returned ``beta``
+    is the exact minimum-norm stationary point of a system within ``leak`` of the
+    one asked about. If ``leak`` itself grows past ``_MAX_NULL_TOL`` the
+    decomposition can certify nothing at all, and the rank is reported as ambiguous
+    rather than guessed at.
 
     Note that a direction whose eigenvalue falls below the numerical rank
     threshold is treated as null even if ``b`` has a component there and an
@@ -265,7 +310,7 @@ def solve_stationarity(
     lam_min_kept = float(np.min(evals[keep]))  # > 0: lambda_max > tol for rcond < 1
 
     # How small a null-space component this decomposition can still resolve.
-    null_tol = max(rtol, _EIGVEC_NOISE * float(np.finfo(float).eps) / lam_min_kept)
+    null_tol = max(rtol, _null_space_resolution(A_unit, evals, evecs, keep, lam_min_kept))
     if null_tol > _MAX_NULL_TOL:
         raise np.linalg.LinAlgError(
             f"the numerical rank of A is ambiguous: its smallest retained eigenvalue "
