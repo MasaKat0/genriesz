@@ -286,18 +286,52 @@ def test_solve_stationarity_criteria_are_scale_invariant():
                 solve_stationarity(a_scale * A, b_scale * b)
 
 
-def test_solve_stationarity_is_exactly_linear_in_b_at_extreme_scales():
-    # Rescaling b to unit sup-norm must be a pure reparametrization: the solution
-    # of a solvable system scales with b, all the way to the float64 extremes.
+@pytest.mark.parametrize("a_scale", [1e-150, 1.0, 1e150])
+@pytest.mark.parametrize("b_scale", [1e-150, 1.0, 1e150])
+def test_solve_stationarity_is_linear_across_extreme_scales(a_scale, b_scale):
+    # Rescaling both sides to unit sup-norm must be a pure reparametrization:
+    # scaling A or b just scales the solution, all the way out to where the raw
+    # norms would have underflowed or overflowed.
     rng = np.random.default_rng(4)
     Phi = rng.normal(size=(200, 10))
     A = 0.5 * (Phi.T @ Phi) / 200 + 1e-3 * np.eye(10)
     reference = solve_stationarity(A, np.ones(10))
 
-    for scale in (1e-300, 1e-9, 1e9, 1e300):
-        beta = solve_stationarity(A, np.ones(10) * scale)
-        assert np.all(np.isfinite(beta))
-        np.testing.assert_allclose(beta / scale, reference, rtol=1e-12)
+    beta = solve_stationarity(A * a_scale, np.ones(10) * b_scale)
+    assert np.all(np.isfinite(beta))
+    np.testing.assert_allclose(beta / (b_scale / a_scale), reference, rtol=1e-12)
+
+
+def test_solve_stationarity_refuses_a_solution_float64_cannot_represent():
+    # lambda_max ~ 1e-320 against a unit b: the exact solution is ~1e320. The
+    # eigen-path division used to overflow and return [inf, nan] as a success.
+    with pytest.raises(np.linalg.LinAlgError, match="overflows float64"):
+        solve_stationarity(np.diag([1e-320, 0.0]), np.array([1.0, 0.0]))
+
+
+def test_solve_stationarity_rejects_an_indefinite_matrix():
+    # A negative eigenvalue means the quadratic is unbounded below along it, even
+    # though the system A beta = b is perfectly solvable.
+    with pytest.raises(np.linalg.LinAlgError, match="not positive semi-definite"):
+        solve_stationarity(np.diag([1.0, -1.0]), np.array([1.0, 0.0]))
+
+
+def test_solve_stationarity_symmetrizes_a_matrix_within_the_tolerance():
+    """Tolerating BLAS rounding is not the same as solving one system.
+
+    LAPACK reads one triangle and eigh the other, so an A that is asymmetric --
+    even by less than the validation tolerance -- has them solve different
+    systems. This one is asymmetric by ~5e-11 (inside the tolerance) and singular
+    when read as stored; the answer must be a solution of the symmetrized matrix,
+    which is the system both routines then see.
+    """
+    A = np.array([[1.0, 1.0], [1.00000000005, 1.00000000005]])
+    A_sym = 0.5 * A + 0.5 * A.T
+    b = np.linalg.eigh(A_sym)[1][:, -1]  # in the range of the symmetrized matrix
+
+    beta = solve_stationarity(A, b)
+    resid = np.linalg.norm(A_sym @ beta - b) / np.linalg.norm(b)
+    assert resid < 1e-12
 
 
 @pytest.mark.parametrize(
@@ -309,10 +343,11 @@ def test_solve_stationarity_is_exactly_linear_in_b_at_extreme_scales():
         {"rtol": 1.0},  # rtol >= 1 would accept a b that is purely null-space
         {"rtol": 1e300},
         {"rtol": np.nan},  # NaN compares false against everything
+        {"rtol": 0.0},  # promises exactness float64 cannot deliver
     ],
 )
 def test_solve_stationarity_rejects_tolerances_that_would_disable_the_check(kwargs):
-    with pytest.raises(ValueError, match=r"must be finite and in \[0, 1\)"):
+    with pytest.raises(ValueError, match=r"must be finite and in"):
         solve_stationarity(np.diag([1.0, 0.0]), np.array([0.0, 1.0]), **kwargs)
 
 

@@ -68,6 +68,19 @@ def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
     return out
 
 
+def _scaled_or_raise(scale: float, beta_unit: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Undo the unit-scaling, refusing a solution float64 cannot represent."""
+
+    beta = scale * beta_unit
+    if not np.isfinite(beta).all():
+        raise np.linalg.LinAlgError(
+            "the solution overflows float64: A is vanishingly small relative to b, "
+            "so no representable beta satisfies the stationarity condition. Rescale "
+            "the features or add an l2 penalty."
+        )
+    return np.asarray(beta, dtype=float)
+
+
 def solve_stationarity(
     A: NDArray[np.float64],
     b: NDArray[np.float64],
@@ -114,11 +127,16 @@ def solve_stationarity(
     A = np.asarray(A, dtype=float)
     b = np.asarray(b, dtype=float)
 
-    for name, value in (("rcond", rcond), ("rtol", rtol)):
-        if not np.isfinite(value) or not 0.0 <= float(value) < 1.0:
-            # rtol >= 1 would accept a pure null-space b, and NaN compares false
-            # against everything, so either would quietly disable the check below.
-            raise ValueError(f"{name} must be finite and in [0, 1). Got {value!r}.")
+    if not np.isfinite(rcond) or not 0.0 <= float(rcond) < 1.0:
+        raise ValueError(f"rcond must be finite and in [0, 1). Got {rcond!r}.")
+    if not np.isfinite(rtol) or not 0.0 < float(rtol) < 1.0:
+        # rtol >= 1 would accept a b that is purely null-space, and NaN compares
+        # false against everything, so either would quietly disable the check
+        # below. rtol = 0 is refused too: it would promise to detect *any*
+        # null-space component, which float64 cannot deliver -- a component
+        # 1e-324 times ||b|| is not representable once b is put on a common
+        # scale. The criterion is relative by construction.
+        raise ValueError(f"rtol must be finite and in (0, 1). Got {rtol!r}.")
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
         raise ValueError(f"A must be a square 2D array. Got shape {A.shape}.")
     n = A.shape[0]
@@ -129,22 +147,36 @@ def solve_stationarity(
     if n == 0:
         return np.zeros(0, dtype=float)
 
-    # LAPACK reads one triangle of A and eigh reads the other by default, so a
-    # non-symmetric argument would have them silently solve two different
-    # systems. The callers pass Gram matrices; anything else is a bug upstream.
+    # LAPACK reads one triangle of A and eigh reads the other, so a non-symmetric
+    # argument would have them silently solve two different systems. The callers
+    # pass Gram matrices; a gross asymmetry is a bug upstream, while the rounding
+    # that BLAS can leave behind is tolerated -- and then averaged away, because
+    # tolerating it is not the same as making both routines see the same matrix.
     a_max = float(np.max(np.abs(A)))
     if float(np.max(np.abs(A - A.T))) > 1e-10 * a_max:
         raise ValueError("A must be symmetric.")
+    A = 0.5 * A + 0.5 * A.T  # scale before adding: A may hold ~1e308 entries
 
-    # Work with b rescaled to unit sup-norm. ||b|| itself is not usable as the
-    # yardstick: it underflows to 0 for a b of ~1e-300 (making every relative
-    # test vacuously pass) and overflows to inf for a b of ~1e308 (same). The
-    # system is linear in b, so solving for b/scale and scaling back is exact.
     b_scale = float(np.max(np.abs(b)))
     if b_scale == 0.0:
         return np.zeros(n, dtype=float)  # A @ 0 = 0 = b
+    if a_max == 0.0:
+        raise np.linalg.LinAlgError(
+            "A is zero and b is not: the objective has no stationary point and is "
+            "unbounded below. Add or increase the l2 penalty."
+        )
+
+    # Put both sides on a unit sup-norm scale and restore the scale at the end.
+    # Norms of the raw arrays are not usable as yardsticks: ||b|| underflows to 0
+    # for a b of ~1e-300 (so every relative test passes vacuously) and overflows
+    # to inf for a b of ~1e308 (same), and a lambda_max of ~1e-320 makes the
+    # eigen-path division overflow to inf. On the unit scale the eigenvalues live
+    # in [0, 1] and ||b_unit|| in [1, sqrt(n)], so neither can happen; the system
+    # is linear in b, and A_unit shares its eigenvectors with A.
+    A_unit = A / a_max
     b_unit = b / b_scale
-    b_norm = float(np.linalg.norm(b_unit))  # in [1, sqrt(n)]
+    b_norm = float(np.linalg.norm(b_unit))
+    scale = b_scale / a_max  # may overflow; the result is checked for finiteness
 
     # Fast path for a comfortably positive-definite A -- the penalized case, and
     # the overwhelmingly common one. A numerically successful Cholesky gives
@@ -162,16 +194,21 @@ def solve_stationarity(
     # ``rcond`` is an empirical margin rather than a proof: an estimate has to be
     # off by more than _FAST_PATH_SAFETY to let a rank-deficient matrix through.
     gate = max(_FAST_PATH_RCOND, _FAST_PATH_SAFETY * rcond)
-    chol, info = lapack.dpotrf(A, lower=0, clean=1)
+    chol, info = lapack.dpotrf(A_unit, lower=0, clean=1)
     if info == 0:
-        rcond_1, info_c = lapack.dpocon(chol, float(np.linalg.norm(A, 1)))
+        rcond_1, info_c = lapack.dpocon(chol, float(np.linalg.norm(A_unit, 1)))
         if info_c == 0 and float(rcond_1) > gate:
-            beta, info_s = lapack.dpotrs(chol, b_unit, lower=0)
+            beta_unit, info_s = lapack.dpotrs(chol, b_unit, lower=0)
             if info_s == 0:
-                return b_scale * np.asarray(beta, dtype=float).reshape(-1)
+                return _scaled_or_raise(scale, np.asarray(beta_unit, dtype=float).reshape(-1))
 
-    evals, evecs = np.linalg.eigh(A)
+    evals, evecs = np.linalg.eigh(A_unit)
     tol = rcond * max(float(evals[-1]), 0.0)
+    if float(evals[0]) < -tol:
+        raise np.linalg.LinAlgError(
+            f"A is not positive semi-definite (smallest eigenvalue {evals[0] * a_max:.3g}): "
+            "the quadratic is unbounded below along that eigenvector."
+        )
     keep = evals > tol
 
     coeffs = evecs.T @ b_unit
@@ -184,7 +221,7 @@ def solve_stationarity(
             "after rescaling b to unit sup-norm). Add or increase the l2 penalty."
         )
     beta_unit = evecs[:, keep] @ (coeffs[keep] / evals[keep])
-    return b_scale * np.asarray(beta_unit, dtype=float)
+    return _scaled_or_raise(scale, np.asarray(beta_unit, dtype=float))
 
 
 def standardize_columns(
