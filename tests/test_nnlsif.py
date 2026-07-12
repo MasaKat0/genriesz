@@ -79,6 +79,40 @@ def test_local_polynomial_nn_lsif_exclude_self_requires_room_for_neighbor():
         )
 
 
+def test_exclude_self_uses_the_Mth_neighbor_radius_at_out_of_sample_points():
+    """exclude_self must not widen the ball where there is no self to exclude.
+
+    With ``degree=0`` and ``ridge=0`` the estimate is exactly the ratio of the
+    in-ball counts, ``(n_Z/N1) / (n_X/N0)``, so it pins the radius. The M+1
+    neighbors are queried up front; the code used to take the last of them at
+    every eval point without a coincident neighbor, i.e. the (M+1)-th, so an
+    out-of-sample point silently got an (M+1)-neighbor ball.
+    """
+    X = np.array([[0.0], [1.0], [2.0], [3.0], [4.0]])  # denominator, N0 = 5
+    Z = np.array([[0.4], [1.8]])  # numerator, N1 = 2
+    kw = dict(numerator=Z, denominator=X, M=2, degree=0, ridge=0.0)
+
+    # x = 0.5 is not a denominator point. Its 2nd-neighbor radius is 0.5, which
+    # holds X = {0, 1} and Z = {0.4}: r = (1/2) / (2/5) = 1.25. The 3rd-neighbor
+    # radius 1.5 would hold X = {0, 1, 2} and Z = {0.4, 1.8}: r = 1 / (3/5) = 1.667.
+    oos = np.array([[0.5]])
+    r_excl = local_polynomial_nn_lsif_density_ratio(eval_points=oos, exclude_self=True, **kw)
+    r_keep = local_polynomial_nn_lsif_density_ratio(eval_points=oos, exclude_self=False, **kw)
+    assert r_excl[0] == pytest.approx(1.25)
+    # With no self match, excluding it changes nothing.
+    assert r_excl[0] == pytest.approx(r_keep[0])
+
+    # x = 0.0 *is* a denominator point: the coincident neighbor is dropped, so
+    # the radius steps out to the 3rd queried distance (2.0), holding X = {0, 1, 2}
+    # and Z = {0.4, 1.8}: r = 1 / (3/5) = 1.667. Without exclusion the radius is
+    # the 2nd distance (1.0), holding X = {0, 1} and Z = {0.4}: r = 1.25.
+    ins = np.array([[0.0]])
+    r_excl_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=True, **kw)
+    r_keep_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=False, **kw)
+    assert r_excl_in[0] == pytest.approx(5.0 / 3.0)
+    assert r_keep_in[0] == pytest.approx(1.25)
+
+
 def test_non_euclidean_metric_raises_instead_of_being_ignored():
     # An unsupported metric fails loudly with NotImplementedError, rather than
     # being accepted and quietly ignored.

@@ -43,6 +43,28 @@ def _as_2d_allow_1d(X: ArrayLike, *, name: str = "X") -> tuple[NDArray[np.float6
     raise ValueError(f"{name} must be 1D or 2D. Got shape {X_.shape}.")
 
 
+def _check_n_input_features(
+    X2: NDArray[np.float64], mean: NDArray[np.float64], *, name: str
+) -> None:
+    """Reject evaluation inputs whose column count differs from fit time.
+
+    The standardization step ``(X - mean) / std`` broadcasts instead of failing
+    whenever one of the operands has a single column, so a ``(n, 1)`` input
+    against a ``d``-column fit silently yields a ``(n, d)`` array of nonsense
+    rather than an error. ``mean`` always has one entry per fit-time column (it
+    is stored even when ``standardize=False``), so it doubles as the record of
+    the fitted input dimension.
+    """
+
+    d_fit = int(mean.shape[0])
+    d_got = int(X2.shape[1])
+    if d_got != d_fit:
+        raise ValueError(
+            f"{name} was fit on X with {d_fit} column(s) but received {d_got}. "
+            "Broadcasting would silently return a wrong feature matrix."
+        )
+
+
 class Basis(Protocol):
     """Protocol for basis objects."""
 
@@ -857,6 +879,7 @@ class RBFRandomFourierBasis(BaseBasis):
                 "RBFRandomFourierBasis must be fit() on training data before use. "
                 "Silently fitting on evaluation data would leak its standardization."
             )
+        _check_n_input_features(X2, self._mean, name="RBFRandomFourierBasis")
 
         Z = (X2 - self._mean) / self._std
         proj = Z @ self._W + self._b
@@ -878,6 +901,7 @@ class RBFRandomFourierBasis(BaseBasis):
                 "RBFRandomFourierBasis must be fit() on training data before use. "
                 "Silently fitting on evaluation data would leak its standardization."
             )
+        _check_n_input_features(X2, self._mean, name="RBFRandomFourierBasis")
 
         n, d = X2.shape
         coordinate = int(coordinate)
@@ -1086,6 +1110,7 @@ class GaussianRKHSBasis(BaseBasis):
                 "Silently fitting on evaluation data would leak centers and "
                 "standardization."
             )
+        _check_n_input_features(X2, self._mean, name="GaussianRKHSBasis")
 
         Xs = (X2 - self._mean) / self._std
         K = _rbf_kernel(Xs, self._centers, sigma=self.sigma_)
@@ -1131,6 +1156,7 @@ class GaussianRKHSBasis(BaseBasis):
             raise RuntimeError("GaussianRKHSBasis must be fit() before diagnostics().")
 
         X2, _ = _as_2d_allow_1d(X)
+        _check_n_input_features(X2, self._mean, name="GaussianRKHSBasis")
         n = X2.shape[0]
         if n > int(max_rows):
             rng = np.random.default_rng(random_state)
@@ -1295,6 +1321,7 @@ class RBFNystromBasis(BaseBasis):
                 "Silently fitting on evaluation data would leak centers and "
                 "standardization."
             )
+        _check_n_input_features(X2, self._mean, name="RBFNystromBasis")
 
         Xs = (X2 - self._mean) / self._std
         Knm = _rbf_kernel(Xs, self._centers, sigma=self.sigma_)
@@ -1373,6 +1400,7 @@ class KNNCatchmentBasis(BaseBasis):
             raise RuntimeError("KNNCatchmentBasis must be fit() before use.")
 
         Q2, single = _as_2d_allow_1d(X)
+        _check_n_input_features(Q2, self._mean, name="KNNCatchmentBasis")
 
         Q_std = (Q2 - self._mean) / self._std
 
