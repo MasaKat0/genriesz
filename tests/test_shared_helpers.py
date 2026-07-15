@@ -18,6 +18,7 @@ from genriesz.utils import (
     as_1d_of_length,
     as_2d,
     kfold_splits,
+    se_ci_pvalue,
     sigmoid,
     solve_stationarity,
     standardize_columns,
@@ -106,9 +107,53 @@ def test_sigmoid_is_stable_where_the_naive_formula_overflows():
             1.0 / (1.0 + np.exp(-z))
 
 
+def test_sigmoid_promotes_integer_input_to_float():
+    # np.empty_like on an int array would allocate an int output and truncate
+    # every value in (0, 1) to 0.
+    z = np.array([-1, 0, 1])
+    out = sigmoid(z)
+    assert out.dtype == np.float64
+    np.testing.assert_allclose(out, 1.0 / (1.0 + np.exp(-z.astype(float))), atol=1e-15)
+
+
 # ---------------------------------------------------------------------------
-# standardize_columns
+# se_ci_pvalue
 # ---------------------------------------------------------------------------
+
+
+def test_se_ci_pvalue_basic_normal_approximation():
+    rng = np.random.default_rng(0)
+    psi = rng.normal(size=200)
+    se, lo, hi, p = se_ci_pvalue(1.0, psi, alpha=0.05, null=0.0)
+    assert se == pytest.approx(float(np.std(psi, ddof=1)) / np.sqrt(200))
+    assert lo < 1.0 < hi
+    assert hi - 1.0 == pytest.approx(1.0 - lo)  # symmetric Wald interval
+    assert 0.0 < p < 1.0
+
+
+@pytest.mark.parametrize("alpha", [0.0, 1.0, -0.5, 1.5, float("nan")])
+def test_se_ci_pvalue_rejects_invalid_significance_level(alpha):
+    # alpha = 1.5 used to return an *inverted* interval (ci_low > ci_high),
+    # alpha = -0.5 a NaN one; both are caller errors, not data conditions.
+    psi = np.arange(10.0)
+    with pytest.raises(ValueError, match="alpha"):
+        se_ci_pvalue(1.0, psi, alpha=alpha, null=0.0)
+
+
+def test_se_ci_pvalue_rejects_non_finite_estimate_and_null():
+    psi = np.arange(10.0)
+    with pytest.raises(ValueError, match="est"):
+        se_ci_pvalue(float("nan"), psi, alpha=0.05, null=0.0)
+    with pytest.raises(ValueError, match="null"):
+        se_ci_pvalue(1.0, psi, alpha=0.05, null=float("inf"))
+
+
+def test_se_ci_pvalue_keeps_a_tail_for_extreme_z():
+    # 2 * (1 - cdf(z)) rounds to exactly 0 past |z| ~ 8.3; the survival
+    # function keeps the true magnitude down to ~1e-308.
+    psi = np.array([-1.0, 1.0] * 50)  # se ~ 0.1005
+    se, _, _, p = se_ci_pvalue(3.0, psi, alpha=0.05, null=0.0)  # z ~ 29.8
+    assert 0.0 < p < 1e-100
 
 
 def test_standardize_columns_centers_and_scales():

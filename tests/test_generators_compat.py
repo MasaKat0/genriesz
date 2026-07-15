@@ -345,7 +345,7 @@ def test_all_candidates_failing_raises_without_the_sensitivity_warning():
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with pytest.raises(RuntimeError, match="All Riesz candidates failed"):
+        with pytest.raises(RuntimeError, match="No Riesz candidate could be fitted and scored"):
             _select(gen, n=120, seed=13)
 
     assert not [w for w in caught if "modifies the estimand" in str(w.message)]

@@ -76,8 +76,11 @@ def sigmoid(z: NDArray[np.float64]) -> NDArray[np.float64]:
 
     Splitting on ``z >= 0`` keeps ``exp`` away from overflow on either tail:
     the positive branch exponentiates ``-z`` and the negative branch ``z``.
+    The result is always float64: ``np.empty_like`` on an integer input would
+    otherwise truncate every value in (0, 1) to 0.
     """
 
+    z = np.asarray(z, dtype=float)
     out = np.empty_like(z)
     pos = z >= 0
     out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
@@ -500,7 +503,19 @@ def se_ci_pvalue(
 
     We use the usual normal approximation and the empirical variance of the
     provided influence function (or score) values.
+
+    ``alpha`` must lie strictly in (0, 1) and ``est``/``null`` must be finite;
+    these are caller errors and raise ``ValueError`` rather than degrading to
+    NaN (an ``alpha`` outside (0, 1) would silently produce an inverted or
+    infinite interval).
     """
+
+    if not np.isfinite(alpha) or not 0.0 < float(alpha) < 1.0:
+        raise ValueError(f"alpha (significance level) must be in (0, 1). Got {alpha!r}.")
+    if not np.isfinite(est):
+        raise ValueError(f"est must be finite. Got {est!r}.")
+    if not np.isfinite(null):
+        raise ValueError(f"null must be finite. Got {null!r}.")
 
     def _nan_result(reason: str) -> tuple[float, float, float, float]:
         warnings.warn(
@@ -528,7 +543,9 @@ def se_ci_pvalue(
     ci_high = float(est + z * se)
 
     z_stat = float((est - null) / se)
-    p_value = float(2.0 * (1.0 - norm.cdf(abs(z_stat))))
+    # norm.sf instead of 1 - norm.cdf: the subtraction cancels to exactly 0 for
+    # |z| beyond ~8, whereas the survival function keeps its ~1e-16 tail.
+    p_value = float(2.0 * norm.sf(abs(z_stat)))
     return se, ci_low, ci_high, p_value
 
 
@@ -571,18 +588,28 @@ def coverage_decomposition(
     n: int,
     b_hat: float,
     truth: float | None = None,
+    significance_level: float = 0.05,
 ) -> dict[str, float]:
     """Assemble a bias / variance / standardized-bias decomposition for a cell.
 
-    Returns a dictionary with the pieces needed for the coverage-failure tables
-    (revision plan section 5.2/5.3): the point estimate, its standard error, the
-    implied score variance ``V_hat = n * se^2``, the bias proxy ``b_hat`` and the
-    standardized bias ``sqrt(n) * b_hat / sqrt(V_hat) = b_hat / se``.
+    Returns a dictionary with the pieces needed for coverage-failure tables:
+    the point estimate, its standard error, the implied score variance
+    ``V_hat = n * se^2``, the bias proxy ``b_hat`` and the standardized bias
+    ``sqrt(n) * b_hat / sqrt(V_hat) = b_hat / se``.
 
     When ``truth`` is provided (simulation only), the realized signed bias and a
-    nominal coverage indicator for the Wald interval are added. These oracle
-    quantities are for *evaluation only* and must not drive selection.
+    nominal coverage indicator for the Wald interval at the given
+    ``significance_level`` are added. The level must match the one used to
+    report the interval -- a 90% interval judged against the 95% critical value
+    would overstate coverage. These oracle quantities are for *evaluation only*
+    and must not drive selection. ``covered`` is NaN when ``se`` is not finite
+    and positive: a degenerate interval cannot be judged either way.
     """
+
+    if not np.isfinite(significance_level) or not 0.0 < float(significance_level) < 1.0:
+        raise ValueError(
+            f"significance_level must be in (0, 1). Got {significance_level!r}."
+        )
 
     n = int(n)
     se = float(se)
@@ -595,14 +622,16 @@ def coverage_decomposition(
         "v_hat": v_hat,
         "b_hat": float(b_hat),
         "std_bias": std_bias,
+        "significance_level": float(significance_level),
+        "confidence_level": 1.0 - float(significance_level),
     }
     if truth is not None:
-        from scipy.stats import norm as _norm
-
-        z = float(_norm.ppf(0.975))
+        z = float(norm.ppf(1.0 - float(significance_level) / 2.0))
         bias = float(estimate) - float(truth)
         out["bias"] = bias
-        out["covered"] = float(abs(bias) <= z * se) if np.isfinite(se) else float("nan")
+        out["covered"] = (
+            float(abs(bias) <= z * se) if np.isfinite(se) and se > 0 else float("nan")
+        )
     return out
 
 
@@ -653,7 +682,17 @@ def oracle_decomposition(
     mg0 = np.asarray(m_gamma0, dtype=float).reshape(-1)
 
     n = y.shape[0]
-    if not (a_hat.shape[0] == a0.shape[0] == g_hat.shape[0] == g0.shape[0] == n):
+    if not (
+        a_hat.shape[0]
+        == a0.shape[0]
+        == g_hat.shape[0]
+        == g0.shape[0]
+        == mg_hat.shape[0]
+        == mg0.shape[0]
+        == n
+    ):
+        # mg_hat / mg0 included: a length-1 array would silently broadcast in the
+        # oracle one-step means below and return a wrong decomposition.
         raise ValueError("all nuisance arrays must have the same length as y")
 
     alpha_rmse = float(np.sqrt(np.mean((a_hat - a0) ** 2)))

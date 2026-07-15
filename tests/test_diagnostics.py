@@ -268,3 +268,39 @@ def test_coverage_decomposition_pieces():
     # Without a truth, no oracle fields are added.
     d2 = coverage_decomposition(estimate=1.0, se=0.1, n=100, b_hat=0.05)
     assert "bias" not in d2 and "covered" not in d2
+
+
+def test_coverage_decomposition_uses_the_requested_significance_level():
+    # |bias| = 0.18 with se = 0.1: covered at the 95% level (z=1.96) but not at
+    # the 90% level (z=1.645). A fixed 97.5% quantile would call both covered.
+    kw = dict(estimate=1.0, se=0.1, n=100, b_hat=0.05, truth=1.18)
+    d95 = coverage_decomposition(**kw)  # default significance_level=0.05
+    d90 = coverage_decomposition(**kw, significance_level=0.10)
+    assert d95["covered"] == 1.0
+    assert d90["covered"] == 0.0
+    assert d95["significance_level"] == pytest.approx(0.05)
+    assert d90["confidence_level"] == pytest.approx(0.90)
+
+    with pytest.raises(ValueError, match="significance_level"):
+        coverage_decomposition(**kw, significance_level=1.5)
+
+    # A degenerate interval cannot be judged either way.
+    d0 = coverage_decomposition(estimate=1.0, se=0.0, n=100, b_hat=0.05, truth=1.0)
+    assert np.isnan(d0["covered"])
+
+
+def test_oracle_decomposition_rejects_broadcastable_m_gamma():
+    # A length-1 m_gamma array would silently broadcast in the oracle one-step
+    # means and return a wrong decomposition.
+    n = 5
+    ones = np.ones(n)
+    with pytest.raises(ValueError, match="same length"):
+        oracle_decomposition(
+            y=ones, alpha_hat=ones, alpha0=ones, gamma_hat=ones, gamma0=ones,
+            m_gamma_hat=np.array([9.0]), m_gamma0=ones,
+        )
+    with pytest.raises(ValueError, match="same length"):
+        oracle_decomposition(
+            y=ones, alpha_hat=ones, alpha0=ones, gamma_hat=ones, gamma0=ones,
+            m_gamma_hat=ones, m_gamma0=np.array([1.0]),
+        )

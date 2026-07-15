@@ -594,3 +594,33 @@ def test_squared_loss_validation_rejects_ame():
             config=cfg,
             outcome_link="identity",
         )
+
+
+def test_criterion_is_nan_when_required_metrics_are_missing():
+    """A candidate whose bias/variance metrics are missing must not win by default.
+
+    NaN-metric rows used to have b/v replaced by 0 -- the best possible value --
+    so an un-evaluable candidate would beat every honestly-evaluated one.
+    """
+
+    from genriesz.model_selection import _criterion
+
+    row_missing = {"b_hat": float("nan"), "v_hat": float("nan"), "r_hat": 0.01, "k_hat": 0.0}
+    row_valid = {"b_hat": 0.5, "v_hat": 2.0, "r_hat": 0.01, "k_hat": 0.0}
+
+    c_missing = _criterion(row_missing, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3)
+    c_valid = _criterion(row_valid, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3)
+
+    assert np.isnan(c_missing)
+    assert np.isfinite(c_valid)
+
+    # Partial missingness (only the variance piece) is just as unscoreable.
+    row_partial = {"b_hat": 0.5, "v_hat": float("nan"), "r_hat": 0.01, "k_hat": 0.0}
+    assert np.isnan(_criterion(row_partial, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3))
+
+    # imbalance_validation requires the standardized imbalance; the raw
+    # imbalance is on a different scale and must not be silently substituted.
+    row_no_std = {"std_imbalance": float("nan"), "held_out_imbalance": 0.1}
+    assert np.isnan(
+        _criterion(row_no_std, score="imbalance_validation", n=100, tau_R=1e-2, tau_K=1e-3)
+    )

@@ -236,7 +236,10 @@ class GRRGLM:
                     status="singular",
                     fit_time=time.perf_counter() - t0,
                 )
-                self.beta_ = beta0_
+                # No solution was ever computed: leave the model unpredictable
+                # rather than letting predict_alpha() silently evaluate the
+                # (meaningless) initial point. The failure lives in fit_result_.
+                self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
                 self._M = None
@@ -300,7 +303,9 @@ class GRRGLM:
                     status="domain_error",
                     fit_time=time.perf_counter() - t0,
                 )
-                self.beta_ = beta0_
+                # Same as the singular closed-form path: no solution exists, so
+                # do not leave the initial point behind as a predictable state.
+                self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
                 self._M = None

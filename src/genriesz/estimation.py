@@ -195,6 +195,12 @@ def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...
         canon = mapping[key]
         if canon not in out:
             out.append(canon)  # preserve order
+    if not out:
+        # An empty tuple would silently fit every nuisance and return a result
+        # object with no estimates in it.
+        raise ValueError(
+            "estimators must contain at least one of 'ra', 'rw', 'arw', 'tmle'."
+        )
     return tuple(out)
 
 
@@ -396,6 +402,13 @@ def grr_functional(
         outcome_basis = coerce_basis(outcome_basis)
 
     ests = _canonical_estimators(estimators)
+
+    # Fail on an invalid inference request before any nuisance is fitted;
+    # se_ci_pvalue would only raise after all the cross-fitting work is done.
+    if not np.isfinite(alpha) or not 0.0 < float(alpha) < 1.0:
+        raise ValueError(f"alpha (significance level) must be in (0, 1). Got {alpha!r}.")
+    if not np.isfinite(null):
+        raise ValueError(f"null must be finite. Got {null!r}.")
 
     riesz_method_ = str(riesz_method).lower()
 
@@ -1033,10 +1046,17 @@ def grr_functional(
 
         b_dir_fold: list[float] = []
         b_bound_fold: list[float] = []
+        # The directional product Delta^T theta is only meaningful when both
+        # vectors live in the same basis coordinates, i.e. the outcome model was
+        # fit on the *same fitted basis object* as the Riesz representer (the
+        # "shared" variant). A "separate" outcome basis can coincidentally have
+        # the same number of columns, and the dot product would then pair
+        # unrelated coordinates.
+        same_span = tag_pref == "shared"
         for i in range(n_pair):
             d_vec = imbalance_delta[i]
             th = theta_vecs[i] if i < len(theta_vecs) else None
-            if th is not None and th.shape[0] == d_vec.shape[0]:
+            if same_span and th is not None and th.shape[0] == d_vec.shape[0]:
                 # Shared span: exact empirical second-order term.
                 b_dir_fold.append(float(abs(float(np.dot(d_vec, th)))))
             else:
