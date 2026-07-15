@@ -153,13 +153,16 @@ class GRRCVConfig:
     lam_grid: object = None
     n_centers_grid: object = None
     cv_folds: int = 3
-    strict_nested: bool = True
     selection_score: str = "bias_variance"
     admissibility_thresholds: dict[str, float | None] | None = None
     tau_R: float = 1e-2
     tau_K: float = 1e-3
     return_path: bool = False
     random_state: int | None = 0
+    # Keyword-only so adding it leaves the positional signature and
+    # ``__match_args__`` of the previous release intact (a 5th positional still
+    # means ``selection_score``, not ``strict_nested``).
+    strict_nested: bool = field(default=True, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.selection_score not in SELECTION_SCORES:
@@ -634,6 +637,20 @@ def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> 
     return float(b * b + v / max(n, 1) + tau_R * r + tau_K * k)
 
 
+def _positive_median(value: float) -> float:
+    """Return ``value`` if it is a usable bandwidth anchor, else ``1.0``.
+
+    A degenerate inner fold (identical inner-training rows) yields a zero or NaN
+    median; ``value * multiplier`` would then be ``0`` and make the Gaussian basis
+    raise. The fallback is a fixed ``1.0`` -- the same degenerate fallback
+    ``GaussianRKHSBasis(sigma="auto")`` uses -- and crucially *not* the
+    outer-training median, which would read that fold's validation rows and
+    reintroduce the leakage strict nested CV removes.
+    """
+
+    return float(value) if np.isfinite(value) and value > 0 else 1.0
+
+
 def _sigma_candidate_specs(
     spec: object, *, global_median: float
 ) -> list[tuple[str, float | None]]:
@@ -748,15 +765,9 @@ def select_grr_hyperparams(
     # validation rows into the map that scores them).
     # A degenerate fold (identical inner-training rows) has a zero/NaN median; a
     # 0 bandwidth would make ``GaussianRKHSBasis`` raise and halt the whole
-    # selection. Fall back to the (positive) global median, then to 1.0 -- the
-    # same degenerate fallback ``GaussianRKHSBasis(sigma="auto")`` uses.
-    _median_fallback = (
-        float(global_median) if np.isfinite(global_median) and global_median > 0 else 1.0
-    )
-
-    def _positive_median(value: float) -> float:
-        return float(value) if np.isfinite(value) and value > 0 else _median_fallback
-
+    # selection. ``_positive_median`` falls back to a fixed 1.0 -- validation-
+    # independent, so the degenerate fold's bandwidth still never reads its own
+    # validation rows (using the outer-training median here would leak).
     if config.strict_nested:
         fold_medians = [
             _positive_median(

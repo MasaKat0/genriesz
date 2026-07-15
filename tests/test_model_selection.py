@@ -26,6 +26,8 @@ from genriesz.glm import GRRGLM
 from genriesz.model_selection import (
     DEFAULT_LAM_GRID,
     DEFAULT_SIGMA_MULTIPLIERS,
+    GRRCVResult,
+    _positive_median,
     _standardized,
     make_candidate_basis,
     normalize_grid,
@@ -316,6 +318,39 @@ def test_strict_nested_survives_degenerate_inner_fold(monkeypatch):
     )
     assert res.sigma is not None and np.isfinite(res.sigma) and res.sigma > 0
     assert res.fold_provenance[0]["preprocess_fit_index"].tolist() == A.tolist()
+
+
+def test_positive_median_falls_back_to_unit_not_outer_median():
+    # The degenerate-fold bandwidth fallback is a fixed 1.0 -- validation
+    # independent -- never the outer-training median (which would read the fold's
+    # own validation rows and reintroduce leakage). A usable median passes through.
+    assert _positive_median(0.0) == 1.0
+    assert _positive_median(float("nan")) == 1.0
+    assert _positive_median(-2.0) == 1.0
+    assert _positive_median(2.5) == pytest.approx(2.5)
+
+
+def test_grrcvconfig_positional_signature_is_stable():
+    # strict_nested must be keyword-only so it does not shift the positional
+    # arguments of a previously-valid call (the 5th positional stays
+    # selection_score, not strict_nested).
+    cfg = GRRCVConfig(None, [0.1], None, 3, "bregman_validation")
+    assert cfg.selection_score == "bregman_validation"
+    assert cfg.strict_nested is True
+    assert "strict_nested" not in GRRCVConfig.__match_args__
+    assert GRRCVConfig.__match_args__[:5] == (
+        "sigma_grid",
+        "lam_grid",
+        "n_centers_grid",
+        "cv_folds",
+        "selection_score",
+    )
+    # GRRCVResult's added fields are keyword-only too: the positional constructor
+    # and __match_args__ of the previous release still hold.
+    res = GRRCVResult(None, 1e-2, None, "bias_variance", 0.5, 1, 1, [])
+    assert res.strict_nested is True and res.fold_provenance == []
+    assert "strict_nested" not in GRRCVResult.__match_args__
+    assert "fold_provenance" not in GRRCVResult.__match_args__
 
 
 def test_outer_refit_reselects_centers_when_n_centers_cv_active(monkeypatch):
