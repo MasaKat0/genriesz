@@ -113,7 +113,11 @@ class GRRCVConfig:
         are computed once on the whole outer-training fold and shared across inner
         folds -- cheaper, but the inner-validation rows leak into their own
         scoring feature map. The choice is recorded on
-        :class:`GRRCVResult.strict_nested`.
+        :class:`GRRCVResult.strict_nested`. The guarantee covers the CV-selected
+        centers and the standardization / median heuristic; *fixed* centers passed
+        explicitly on the basis (``GaussianRKHSBasis(centers=...)``) are the
+        caller's own choice and are used as given when ``n_centers_grid`` is not
+        cross-validated.
     selection_score:
         One of ``"bias_variance"`` (default), ``"bregman_validation"``,
         ``"squared_loss_validation"``, ``"imbalance_validation"``.
@@ -187,10 +191,12 @@ class GRRCVResult:
     older outer-fixed feature map (audit P0-05). ``fold_provenance`` holds, per
     inner fold, the ``validation_index`` (inner-validation rows), the
     ``preprocess_fit_index`` (rows the standardization / median / center pool were
-    fit on) and the ``center_index`` (global rows chosen as kernel centers). Under
-    strict nested CV the center and preprocess indices are disjoint from the
-    validation index; under the outer-fixed feature map they overlap it (the
-    honest record of the leak). Both fields are keyword-only to keep the
+    fit on) and the ``center_index`` (global rows in the ``max(n_centers_grid)``
+    center pool; a candidate with a smaller ``n_centers`` uses a prefix of it, and
+    it is empty when the basis selects its own centers). Under strict nested CV the
+    center and preprocess indices are disjoint from the validation index (so is any
+    prefix); under the outer-fixed feature map they overlap it (the honest record
+    of the leak). Both fields are keyword-only to keep the
     positional signature and ``__match_args__`` intact.
     """
 
@@ -204,7 +210,11 @@ class GRRCVResult:
     path: list[dict] = field(default_factory=list)
     modifies_estimand: bool = field(default=False, kw_only=True)
     strict_nested: bool = field(default=True, kw_only=True)
-    fold_provenance: list[dict] = field(default_factory=list, kw_only=True)
+    # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
+    # would make dataclass equality raise a truth-value ``ValueError``. Provenance
+    # is diagnostic metadata, not identity, so two results with equal scalar
+    # fields still compare equal.
+    fold_provenance: list[dict] = field(default_factory=list, kw_only=True, compare=False)
 
 
 def _effective_sample_size(w: NDArray[np.float64]) -> float:
@@ -736,10 +746,23 @@ def select_grr_hyperparams(
     # fold's inner-training rows; the outer-fixed feature map fits them once on
     # the whole outer-training fold and shares them (leaking each fold's own
     # validation rows into the map that scores them).
+    # A degenerate fold (identical inner-training rows) has a zero/NaN median; a
+    # 0 bandwidth would make ``GaussianRKHSBasis`` raise and halt the whole
+    # selection. Fall back to the (positive) global median, then to 1.0 -- the
+    # same degenerate fallback ``GaussianRKHSBasis(sigma="auto")`` uses.
+    _median_fallback = (
+        float(global_median) if np.isfinite(global_median) and global_median > 0 else 1.0
+    )
+
+    def _positive_median(value: float) -> float:
+        return float(value) if np.isfinite(value) and value > 0 else _median_fallback
+
     if config.strict_nested:
         fold_medians = [
-            _median_pairwise_distance(
-                _standardized(X_tr[fold.train]), random_state=config.random_state
+            _positive_median(
+                _median_pairwise_distance(
+                    _standardized(X_tr[fold.train]), random_state=config.random_state
+                )
             )
             for fold in inner_folds
         ]

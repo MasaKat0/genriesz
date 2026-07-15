@@ -616,6 +616,12 @@ def grr_functional(
                     overrides["sigma"] = sel.sigma
                 if sel.n_centers is not None:
                     overrides["n_centers"] = sel.n_centers
+                    # Drop any fixed centers the basis was built with so the outer
+                    # refit reselects ``n_centers`` from this outer-training fold.
+                    # Otherwise ``copy_with_params`` keeps the original centers and
+                    # silently ignores the selected count (the refit feature map
+                    # would not match the ``n_centers`` the CV scored).
+                    overrides["centers"] = None
                 if overrides:
                     basis_r = basis.copy_with_params(**overrides).fit(X_tr, y_tr)
                 else:

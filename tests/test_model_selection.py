@@ -280,6 +280,79 @@ def test_outer_fixed_feature_map_leaks_and_is_recorded():
     assert total_leaked == 60  # every center falls in exactly one fold's val set
 
 
+def test_strict_nested_survives_degenerate_inner_fold(monkeypatch):
+    # A fold whose inner-training rows are identical has a zero median. The strict
+    # "auto" multiplier path must not pass sigma = mult * 0 = 0 to the basis (which
+    # raises "sigma must be positive" and halts the entire selection); it falls
+    # back to the positive global median, exactly as GaussianRKHSBasis(sigma="auto")
+    # falls back to 1.0 on a degenerate fit.
+    import genriesz.model_selection as ms
+
+    k = 30
+    ident_z = np.tile(np.array([0.5, -0.3, 1.2]), (k, 1))
+    rng = np.random.default_rng(0)
+    dist_z = rng.normal(size=(k, 3)) + 5.0
+    Z = np.vstack([ident_z, dist_z])
+    D = np.concatenate([np.zeros(k), (np.arange(k) % 2).astype(float)])
+    X = np.column_stack([D, Z])
+    Y = rng.normal(size=2 * k)
+    A = np.arange(k)  # identical rows -> a degenerate inner-training fold
+    B = np.arange(k, 2 * k)
+
+    def fake_splits(n, *, folds, random_state=None, shuffle=True):
+        yield Fold(train=A, test=B)  # fold-0 inner-training is all identical
+        yield Fold(train=B, test=A)
+
+    monkeypatch.setattr(ms, "kfold_splits", fake_splits)
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=2, random_state=0)
+    res = select_grr_hyperparams(  # must not raise
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=20, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        config=cfg,
+        outcome_link="identity",
+    )
+    assert res.sigma is not None and np.isfinite(res.sigma) and res.sigma > 0
+    assert res.fold_provenance[0]["preprocess_fit_index"].tolist() == A.tolist()
+
+
+def test_outer_refit_reselects_centers_when_n_centers_cv_active(monkeypatch):
+    # When the inner CV selects an ``n_centers``, the outer refit must drop any
+    # fixed centers the basis carried, so it reselects that many centers from the
+    # outer-training fold. Otherwise copy_with_params keeps the original centers
+    # and silently ignores the selected count.
+    X, Y, _ = _make_ate(n=300, seed=4)
+    explicit = X[:120].copy()  # a basis built with fixed centers
+    base = GaussianRKHSBasis(n_centers=300, sigma=1.0, random_state=0, centers=explicit)
+
+    captured: list[dict] = []
+    orig = GaussianRKHSBasis.copy_with_params
+
+    def spy(self, **overrides):
+        captured.append(dict(overrides))
+        return orig(self, **overrides)
+
+    monkeypatch.setattr(GaussianRKHSBasis, "copy_with_params", spy)
+    grr_ate(
+        X=X,
+        Y=Y,
+        basis=base,
+        generator=SquaredGenerator(),
+        folds=2,
+        cross_fit=True,
+        random_state=0,
+        riesz_n_centers_grid=[20, 40],
+        riesz_lam=1e-2,
+    )
+    # The outer-refit copies are exactly those overriding ``n_centers``; each must
+    # also clear the fixed centers so the count actually takes effect.
+    refit_calls = [c for c in captured if "n_centers" in c]
+    assert refit_calls
+    assert all(c.get("centers", "MISSING") is None for c in refit_calls)
+
+
 # ---------------------------------------------------------------------------
 # lam_grid=None means "keep riesz_lam", exactly as for sigma_grid/n_centers_grid
 # ---------------------------------------------------------------------------
