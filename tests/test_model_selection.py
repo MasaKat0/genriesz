@@ -286,8 +286,8 @@ def test_strict_nested_survives_degenerate_inner_fold(monkeypatch):
     # A fold whose inner-training rows are identical has a zero median. The strict
     # "auto" multiplier path must not pass sigma = mult * 0 = 0 to the basis (which
     # raises "sigma must be positive" and halts the entire selection); it falls
-    # back to the positive global median, exactly as GaussianRKHSBasis(sigma="auto")
-    # falls back to 1.0 on a degenerate fit.
+    # back to a fixed, validation-independent 1.0 (see _positive_median), exactly
+    # as GaussianRKHSBasis(sigma="auto") falls back to 1.0 on a degenerate fit.
     import genriesz.model_selection as ms
 
     k = 30

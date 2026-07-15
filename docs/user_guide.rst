@@ -458,7 +458,11 @@ the outer-training rows).  Set ``riesz_strict_nested=False`` for the cheaper
 *outer-fixed feature map*, which fits the centers and median heuristic once on the
 whole outer-training fold and shares them across the inner folds — faster, but it
 leaks each inner fold's validation rows into its own scoring feature map; the
-choice is recorded on :attr:`genriesz.GRRCVResult.strict_nested`.
+choice is recorded on :attr:`genriesz.GRRCVResult.strict_nested`.  The guarantee
+covers the CV-selected centers and the standardization / median heuristic; *fixed*
+centers you pass explicitly on the basis (``GaussianRKHSBasis(centers=...)``) are
+your own choice and are used as given when ``riesz_n_centers_grid`` is not
+cross-validated.
 
 Selection is two-stage.  A candidate must first pass an **admissibility screen**
 (optimizer success, an effective-sample-size floor, a scale-free *kernel-health
