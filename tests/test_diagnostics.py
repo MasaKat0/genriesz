@@ -16,6 +16,7 @@ import pytest
 from genriesz import (
     ATEFunctional,
     GaussianRKHSBasis,
+    PolynomialBasis,
     SquaredGenerator,
     bias_proxy,
     coverage_decomposition,
@@ -130,6 +131,81 @@ def test_grr_reports_held_out_imbalance_and_bias_diagnostics():
     assert b["outcome_tag"] == "shared"
     # std_bias = b_hat / se of the primary (ARW) estimate.
     assert b["std_bias"] == pytest.approx(b["b_hat"] / res.arw.se)
+
+
+def test_bias_diagnostics_with_separate_outcome_basis_depend_on_predictions_only():
+    """P0-04: the directional term must not pair coordinates across bases.
+
+    With ``outcome_models='separate'`` and an outcome basis of coincidentally
+    equal column count, the Riesz-span ``Delta`` used to be dotted with the
+    separate-basis ``theta``. Rescaling the outcome basis columns leaves the
+    predictions (hence the true second-order term) unchanged while rescaling
+    ``theta`` inversely -- so any coordinate-pairing implementation moves with
+    the scale, and the prediction-based one does not. The cross-basis
+    Cauchy-Schwarz bound has no meaning at all, so it must be NaN.
+    """
+
+    X, Y, _ = _make_synthetic_ate(n=300, d=3, seed=4)
+
+    def feats(Z):
+        Z = np.asarray(Z, dtype=float)
+        return np.column_stack([np.ones(len(Z)), Z])
+
+    def feats_scaled(Z):
+        return 1000.0 * feats(Z)
+
+    common = dict(
+        X=X,
+        Y=Y,
+        m=ATEFunctional(treatment_index=0),
+        basis=PolynomialBasis(degree=1, include_bias=True),  # same column count as feats
+        generator=SquaredGenerator(),
+        riesz_lam=1e-3,
+        outcome_models="separate",
+        outcome_lam=1e-10,
+        estimators=("arw",),
+        folds=3,
+        random_state=0,
+    )
+    b_plain = grr_functional(outcome_basis=feats, **common).diagnostics["bias"]
+    b_scaled = grr_functional(outcome_basis=feats_scaled, **common).diagnostics["bias"]
+
+    assert b_plain["outcome_tag"] == "separate"
+    assert np.isfinite(b_plain["b_hat"]) and b_plain["b_hat"] >= 0
+    assert b_plain["b_hat"] == pytest.approx(b_scaled["b_hat"], rel=1e-6)
+    assert np.isnan(b_plain["b_bound"])
+    assert "b_bound_unavailable_reason" in b_plain
+
+
+def test_bias_bound_is_nan_for_logit_link_even_on_the_shared_basis():
+    """||Delta||*||theta|| bounds Delta^T theta, and under a logit link
+    gamma_hat = sigmoid(phi^T theta) is not linear in theta: theta = 0 gives
+    the constant prediction 0.5 with a generally nonzero second-order term
+    while the would-be bound is 0. So b_bound must be NaN for logit."""
+
+    rng = np.random.default_rng(5)
+    n = 300
+    Z = rng.normal(size=(n, 2))
+    D = (rng.uniform(size=n) < 0.5).astype(float)
+    X = np.column_stack([D, Z])
+    Yb = (Z[:, 0] + 0.5 * D + rng.normal(size=n) > 0).astype(float)
+
+    res = grr_ate(
+        X=X,
+        Y=Yb,
+        basis=PolynomialBasis(degree=1, include_bias=True),
+        generator=SquaredGenerator(),
+        riesz_lam=1e-3,
+        outcome_link="logit",
+        estimators=("arw",),
+        folds=3,
+        random_state=0,
+    )
+    b = res.diagnostics["bias"]
+    assert b["outcome_tag"] == "shared"
+    assert np.isfinite(b["b_hat"])
+    assert np.isnan(b["b_bound"])
+    assert "logit" in b["b_bound_unavailable_reason"]
 
 
 def test_tiny_bandwidth_underfitting_is_visible():
@@ -268,3 +344,39 @@ def test_coverage_decomposition_pieces():
     # Without a truth, no oracle fields are added.
     d2 = coverage_decomposition(estimate=1.0, se=0.1, n=100, b_hat=0.05)
     assert "bias" not in d2 and "covered" not in d2
+
+
+def test_coverage_decomposition_uses_the_requested_significance_level():
+    # |bias| = 0.18 with se = 0.1: covered at the 95% level (z=1.96) but not at
+    # the 90% level (z=1.645). A fixed 97.5% quantile would call both covered.
+    kw = dict(estimate=1.0, se=0.1, n=100, b_hat=0.05, truth=1.18)
+    d95 = coverage_decomposition(**kw)  # default significance_level=0.05
+    d90 = coverage_decomposition(**kw, significance_level=0.10)
+    assert d95["covered"] == 1.0
+    assert d90["covered"] == 0.0
+    assert d95["significance_level"] == pytest.approx(0.05)
+    assert d90["confidence_level"] == pytest.approx(0.90)
+
+    with pytest.raises(ValueError, match="significance_level"):
+        coverage_decomposition(**kw, significance_level=1.5)
+
+    # A degenerate interval cannot be judged either way.
+    d0 = coverage_decomposition(estimate=1.0, se=0.0, n=100, b_hat=0.05, truth=1.0)
+    assert np.isnan(d0["covered"])
+
+
+def test_oracle_decomposition_rejects_broadcastable_m_gamma():
+    # A length-1 m_gamma array would silently broadcast in the oracle one-step
+    # means and return a wrong decomposition.
+    n = 5
+    ones = np.ones(n)
+    with pytest.raises(ValueError, match="same length"):
+        oracle_decomposition(
+            y=ones, alpha_hat=ones, alpha0=ones, gamma_hat=ones, gamma0=ones,
+            m_gamma_hat=np.array([9.0]), m_gamma0=ones,
+        )
+    with pytest.raises(ValueError, match="same length"):
+        oracle_decomposition(
+            y=ones, alpha_hat=ones, alpha0=ones, gamma_hat=ones, gamma0=ones,
+            m_gamma_hat=ones, m_gamma0=np.array([1.0]),
+        )

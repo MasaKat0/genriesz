@@ -520,16 +520,30 @@ def _is_admissible(row: dict, thr: dict[str, float | None]) -> bool:
 
 
 def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> float:
+    """Selection criterion of one candidate; NaN when a required metric is missing.
+
+    A candidate whose required metrics could not be computed (e.g. its outcome
+    fit failed on every inner fold, so ``b_hat``/``v_hat`` are NaN) must not be
+    scored as if those pieces were zero -- zero is the *best possible* value, so
+    the un-evaluable candidate would beat every honestly-evaluated one. NaN
+    criteria are filtered out of both the admissible pool and the fallback pool.
+    """
+
     if score == "bregman_validation":
         return float(row["bregman_validation"])
     if score == "squared_loss_validation":
         return float(row["squared_loss_validation"])
     if score == "imbalance_validation":
-        val = row["std_imbalance"]
-        return float(val) if np.isfinite(val) else float(row["held_out_imbalance"])
-    # bias_variance (default): B^2 + V/n + tau_R R + tau_K K.
-    b = row["b_hat"] if np.isfinite(row["b_hat"]) else 0.0
-    v = row["v_hat"] if np.isfinite(row["v_hat"]) else 0.0
+        # Requires the score-variance normalization; falling back to the raw
+        # imbalance would compare candidates on two different scales.
+        return float(row["std_imbalance"])
+    # bias_variance (default): B^2 + V/n + tau_R R + tau_K K. B and V are
+    # required; R and K are structural extras (K is genuinely absent for
+    # non-kernel bases) and only refine the ranking.
+    b = row["b_hat"]
+    v = row["v_hat"]
+    if not (np.isfinite(b) and np.isfinite(v)):
+        return float("nan")
     r = row["r_hat"] if np.isfinite(row["r_hat"]) else 0.0
     k = row["k_hat"] if np.isfinite(row["k_hat"]) else 0.0
     return float(b * b + v / max(n, 1) + tau_R * r + tau_K * k)
@@ -654,8 +668,11 @@ def select_grr_hyperparams(
         pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
         if not pool:
             raise RuntimeError(
-                "All Riesz candidates failed to fit on this training fold. "
-                "Check the basis, generator, and grids."
+                "No Riesz candidate could be fitted and scored on this training "
+                "fold (a candidate whose required selection metrics are missing "
+                "-- e.g. its outcome fit failed on every inner fold -- has no "
+                "criterion). Check the basis, generator, grids, and the outcome "
+                "model, or inspect the CV path (return_riesz_cv_path=True)."
             )
         if modifies_estimand:
             warnings.warn(

@@ -594,3 +594,121 @@ def test_squared_loss_validation_rejects_ame():
             config=cfg,
             outcome_link="identity",
         )
+
+
+def test_criterion_is_nan_when_required_metrics_are_missing():
+    """A candidate whose bias/variance metrics are missing must not win by default.
+
+    NaN-metric rows used to have b/v replaced by 0 -- the best possible value --
+    so an un-evaluable candidate would beat every honestly-evaluated one.
+    """
+
+    from genriesz.model_selection import _criterion
+
+    row_missing = {"b_hat": float("nan"), "v_hat": float("nan"), "r_hat": 0.01, "k_hat": 0.0}
+    row_valid = {"b_hat": 0.5, "v_hat": 2.0, "r_hat": 0.01, "k_hat": 0.0}
+
+    c_missing = _criterion(row_missing, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3)
+    c_valid = _criterion(row_valid, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3)
+
+    assert np.isnan(c_missing)
+    assert np.isfinite(c_valid)
+
+    # Partial missingness (only the variance piece) is just as unscoreable.
+    row_partial = {"b_hat": 0.5, "v_hat": float("nan"), "r_hat": 0.01, "k_hat": 0.0}
+    assert np.isnan(_criterion(row_partial, score="bias_variance", n=100, tau_R=1e-2, tau_K=1e-3))
+
+    # imbalance_validation requires the standardized imbalance; the raw
+    # imbalance is on a different scale and must not be silently substituted.
+    row_no_std = {"std_imbalance": float("nan"), "held_out_imbalance": 0.1}
+    assert np.isnan(
+        _criterion(row_no_std, score="imbalance_validation", n=100, tau_R=1e-2, tau_K=1e-3)
+    )
+
+
+def test_selection_prefers_scoreable_candidates_over_missing_metric_ones(monkeypatch):
+    """Integration: a candidate whose outcome fit fails on every inner fold has
+    no b_hat/v_hat and must lose the bias_variance selection, not win it."""
+
+    from genriesz.glm import FitResult, OutcomeGLM
+
+    X, Y, _ = _make_ate(n=240, seed=21)
+    basis = GaussianRKHSBasis(n_centers=30, sigma=1.0, random_state=0)
+    cfg = GRRCVConfig(
+        sigma_grid=[0.5, 1.0, 2.0], lam_grid=[1e-2], return_path=True, random_state=0
+    )
+
+    def run():
+        return select_grr_hyperparams(
+            X_train=X,
+            y_train=Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=basis,
+            generator=SquaredGenerator(),
+            config=cfg,
+            riesz_lam=1e-2,
+            outcome_link="identity",
+        )
+
+    winner = run().sigma  # the candidate that wins when everything is scoreable
+
+    real_fit = OutcomeGLM.fit
+
+    def poisoned_fit(self, X_, y_, **kw):
+        sigma = getattr(self.basis, "sigma", None)
+        if sigma is not None and np.isclose(float(sigma), float(winner)):
+            self.theta_ = None
+            return FitResult(
+                beta=np.zeros(1), success=False, message="poisoned", n_iter=0,
+                status="optimizer_failure",
+            )
+        return real_fit(self, X_, y_, **kw)
+
+    monkeypatch.setattr(OutcomeGLM, "fit", poisoned_fit)
+    res = run()
+
+    # The previous winner is now un-evaluable: NaN criterion (it used to get
+    # b = v = 0, the best possible score) and a different candidate is chosen.
+    assert res.sigma != winner
+    poisoned_rows = [r for r in res.path if r["sigma"] == pytest.approx(winner)]
+    assert poisoned_rows
+    assert all(np.isnan(r["criterion"]) for r in poisoned_rows)
+
+
+def test_all_candidates_unscoreable_raises_for_bias_variance_only(monkeypatch):
+    """Integration: with every outcome fit failing, bias_variance has nothing it
+    can score (RuntimeError), while bregman_validation does not need the
+    outcome side and still selects."""
+
+    from genriesz.glm import FitResult, OutcomeGLM
+
+    X, Y, _ = _make_ate(n=200, seed=22)
+    basis = GaussianRKHSBasis(n_centers=30, sigma=1.0, random_state=0)
+
+    def failing_fit(self, X_, y_, **kw):
+        self.theta_ = None
+        return FitResult(
+            beta=np.zeros(1), success=False, message="always fails", n_iter=0,
+            status="optimizer_failure",
+        )
+
+    monkeypatch.setattr(OutcomeGLM, "fit", failing_fit)
+
+    def run(score):
+        cfg = GRRCVConfig(lam_grid=[1e-2, 1e-1], selection_score=score, random_state=0)
+        return select_grr_hyperparams(
+            X_train=X,
+            y_train=Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=basis,
+            generator=SquaredGenerator(),
+            config=cfg,
+            riesz_lam=1e-2,
+            outcome_link="identity",
+        )
+
+    with pytest.raises(RuntimeError, match="fitted and scored"):
+        run("bias_variance")
+
+    res = run("bregman_validation")
+    assert np.isfinite(res.best_score)

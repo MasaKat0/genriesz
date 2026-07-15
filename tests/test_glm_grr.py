@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from genriesz import (
     GRRGLM,
@@ -219,6 +220,13 @@ def test_singular_closed_form_without_a_stationary_point_fails_instead_of_succee
     assert res.status == "singular"
     assert "unbounded below" in res.message
 
+    # No solution was ever computed, so the model must not be predictable: the
+    # old behaviour kept beta_ = beta0 (zeros) and predict_alpha() silently
+    # evaluated the generator at that meaningless point.
+    assert model.beta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict_alpha(X)
+
     # An l2 penalty makes A positive definite again, and the fit succeeds.
     ok = GRRGLM(
         functional=_UnrepresentableFunctional(),
@@ -279,3 +287,9 @@ def test_domain_violation_yields_explicit_failure_not_silent_success():
 
     assert not res.success
     assert res.status == "domain_error"
+
+    # Same contract as the singular closed form: a fit that never produced a
+    # solution must not leave a predictable state behind.
+    assert model.beta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict_alpha(X)

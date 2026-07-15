@@ -31,9 +31,48 @@ from .basis import Basis
 from .utils import as_2d
 
 
+def _validate_treatment_index_arg(treatment_index: object) -> int:
+    """Coerce ``treatment_index`` to a non-negative integer column index.
+
+    ``int(-0.5)`` truncates to 0 and would silently point at the first column,
+    so non-integral values are rejected rather than rounded. Booleans are
+    rejected too: ``True`` is almost certainly a treatment *value*, not the
+    index of the treatment column.
+    """
+
+    if isinstance(treatment_index, (bool, np.bool_)):
+        raise ValueError(
+            "treatment_index must be a non-negative integer column index, "
+            f"not a boolean. Got {treatment_index!r}."
+        )
+    idx = int(treatment_index)  # type: ignore[call-overload]
+    if idx != treatment_index or idx < 0:
+        raise ValueError(
+            "treatment_index must be a non-negative integer column index. "
+            f"Got {treatment_index!r}."
+        )
+    return idx
+
+
+def _check_treatment_index(X: NDArray[np.float64], treatment_index: int) -> None:
+    """Require ``0 <= treatment_index < X.shape[1]``.
+
+    Negative indices are rejected at construction time already; this catches an
+    index past the last column, which NumPy would otherwise report as a bare
+    ``IndexError`` deep inside the fit.
+    """
+
+    if not 0 <= treatment_index < X.shape[1]:
+        raise ValueError(
+            f"treatment_index {treatment_index} is out of range for X with "
+            f"{X.shape[1]} column(s)."
+        )
+
+
 def _toggle_treatment(
     X: NDArray[np.float64], *, treatment_index: int, value: float
 ) -> NDArray[np.float64]:
+    _check_treatment_index(X, treatment_index)
     X_cf = X.copy()
     X_cf[:, treatment_index] = float(value)
     return X_cf
@@ -49,6 +88,26 @@ GammaFn = Callable[[NDArray[np.float64]], float]
 
 def _as_1d_row(x: ArrayLike) -> NDArray[np.float64]:
     return np.asarray(x, dtype=float).reshape(-1)
+
+
+def _as_prediction_vector(pred: ArrayLike, *, n: int, name: str = "predict") -> NDArray[np.float64]:
+    """Normalize a predictor's output to shape ``(n,)``.
+
+    Accepts ``(n,)`` and the ubiquitous column form ``(n, 1)`` only. Anything
+    else -- ``(1, n)``, multi-column output, a scalar, a wrong length -- is
+    rejected: multiplying a ``(n, 1)`` prediction by a ``(n,)`` weight vector
+    broadcasts to ``(n, n)`` and silently corrupts every downstream mean.
+    """
+
+    arr = np.asarray(pred, dtype=float)
+    if arr.ndim == 2 and arr.shape[1] == 1:
+        arr = arr[:, 0]
+    if arr.ndim != 1 or arr.shape[0] != n:
+        raise ValueError(
+            f"{name} must return an array of shape ({n},) or ({n}, 1). "
+            f"Got shape {np.shape(pred)}."
+        )
+    return arr
 
 
 @dataclass(frozen=True)
@@ -176,8 +235,9 @@ class ATEFunctional(LinearFunctional):
     treatment_index: int = 0
 
     def __init__(self, treatment_index: int = 0):
+        idx = _validate_treatment_index_arg(treatment_index)
         super().__init__(name="ATE")
-        object.__setattr__(self, "treatment_index", int(treatment_index))
+        object.__setattr__(self, "treatment_index", idx)
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -187,9 +247,12 @@ class ATEFunctional(LinearFunctional):
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
         X_ = as_2d(X)
+        n = X_.shape[0]
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
-        return np.asarray(predict(X1) - predict(X0), dtype=float).reshape(-1)
+        mu1 = _as_prediction_vector(predict(X1), n=n)
+        mu0 = _as_prediction_vector(predict(X0), n=n)
+        return mu1 - mu0
 
 
 @dataclass(frozen=True)
@@ -219,15 +282,25 @@ class ATTFunctional(LinearFunctional):
     pi_is_estimated: bool = False
 
     def __init__(self, *, treatment_index: int = 0, pi: float, pi_is_estimated: bool = False):
-        if not np.isfinite(pi) or pi <= 0.0:
-            raise ValueError("pi must be positive")
+        idx = _validate_treatment_index_arg(treatment_index)
+        if not np.isfinite(pi) or not 0.0 < pi <= 1.0:
+            # pi is a probability E[D]; a value above 1 would silently rescale
+            # the functional rather than fail.
+            raise ValueError(f"pi must be a probability in (0, 1]. Got {pi!r}.")
+        if pi_is_estimated and pi >= 1.0:
+            raise ValueError(
+                "pi_is_estimated=True requires pi in (0, 1): a sample-mean pi of "
+                "1 means there are no control observations, so the ATT is not "
+                "identified."
+            )
         super().__init__(name="ATT")
-        object.__setattr__(self, "treatment_index", int(treatment_index))
+        object.__setattr__(self, "treatment_index", idx)
         object.__setattr__(self, "pi", float(pi))
         object.__setattr__(self, "pi_is_estimated", bool(pi_is_estimated))
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         X_ = as_2d(X)
+        _check_treatment_index(X_, self.treatment_index)
         D = X_[:, self.treatment_index].reshape(-1, 1)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
@@ -235,10 +308,14 @@ class ATTFunctional(LinearFunctional):
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
         X_ = as_2d(X)
+        n = X_.shape[0]
+        _check_treatment_index(X_, self.treatment_index)
         D = X_[:, self.treatment_index].reshape(-1)
         X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
-        return (D / self.pi) * (predict(X1) - predict(X0))
+        mu1 = _as_prediction_vector(predict(X1), n=n)
+        mu0 = _as_prediction_vector(predict(X0), n=n)
+        return (D / self.pi) * (mu1 - mu0)
 
 
 @dataclass(frozen=True)

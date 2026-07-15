@@ -69,6 +69,10 @@ class FitResult:
     ----------
     beta, success, message, n_iter:
         Solution, optimizer success flag, optimizer message, iteration count.
+        On the ``"singular"`` and ``"domain_error"`` failure paths no solution
+        was ever computed: ``beta`` then holds the initial point (for shape
+        introspection only) and the model itself stays unpredictable
+        (``beta_ is None``).
     status:
         One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
         ``"domain_error"``, ``"domain_error_at_solution"``, ``"singular"``
@@ -236,7 +240,10 @@ class GRRGLM:
                     status="singular",
                     fit_time=time.perf_counter() - t0,
                 )
-                self.beta_ = beta0_
+                # No solution was ever computed: leave the model unpredictable
+                # rather than letting predict_alpha() silently evaluate the
+                # (meaningless) initial point. The failure lives in fit_result_.
+                self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
                 self._M = None
@@ -300,7 +307,9 @@ class GRRGLM:
                     status="domain_error",
                     fit_time=time.perf_counter() - t0,
                 )
-                self.beta_ = beta0_
+                # Same as the singular closed-form path: no solution exists, so
+                # do not leave the initial point behind as a predictable state.
+                self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
                 self._M = None

@@ -41,6 +41,8 @@ from .functionals import (
     CallableFunctional,
     DIDFunctional,
     LinearFunctional,
+    _check_treatment_index,
+    _validate_treatment_index_arg,
 )
 from .generators import (
     BKLGenerator,
@@ -63,7 +65,6 @@ from .utils import (
     Fold,
     as_1d_of_length,
     as_2d,
-    bias_proxy,
     is_binary_y,
     kfold_splits,
     se_ci_pvalue,
@@ -195,6 +196,12 @@ def _canonical_estimators(estimators: Iterable[str]) -> tuple[EstimatorName, ...
         canon = mapping[key]
         if canon not in out:
             out.append(canon)  # preserve order
+    if not out:
+        # An empty tuple would silently fit every nuisance and return a result
+        # object with no estimates in it.
+        raise ValueError(
+            "estimators must contain at least one of 'ra', 'rw', 'arw', 'tmle'."
+        )
     return tuple(out)
 
 
@@ -397,10 +404,18 @@ def grr_functional(
 
     ests = _canonical_estimators(estimators)
 
+    # Fail on an invalid inference request before any nuisance is fitted;
+    # se_ci_pvalue would only raise after all the cross-fitting work is done.
+    if not np.isfinite(alpha) or not 0.0 < float(alpha) < 1.0:
+        raise ValueError(f"alpha (significance level) must be in (0, 1). Got {alpha!r}.")
+    if not np.isfinite(null):
+        raise ValueError(f"null must be finite. Got {null!r}.")
+
     riesz_method_ = str(riesz_method).lower()
 
     if isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional)):
         t_idx = getattr(m, "treatment_index", 0)
+        _check_treatment_index(X_, t_idx)
         D = X_[:, t_idx]
         uniq = np.unique(D)
         if not np.all(np.isin(uniq, [0.0, 1.0])):
@@ -532,10 +547,9 @@ def grr_functional(
     # basis exposes a diagnostics() method (e.g. GaussianRKHSBasis).
     kernel_stats: list[dict[str, float]] = []
 
-    # Outcome coefficient budget (norm) and, on the shared span, the coefficient
-    # vectors per fold, used for the bias proxy (item I). Keyed by tag.
+    # Outcome coefficient budget (norm) per fold, used for the bias proxy
+    # (item I). Keyed by tag.
     outcome_coef_norm_stats: dict[str, list] = {}
-    outcome_coef_vec_stats: dict[str, list] = {}
 
     # Inner Riesz-hyperparameter cross-validation (item C). Active only when a
     # grid is supplied; otherwise the fixed riesz_lam path runs (backward compat).
@@ -775,11 +789,9 @@ def grr_functional(
             # Outcome coefficient budget on this fold's working span (item I).
             theta_out = getattr(out, "theta_", None)
             if theta_out is not None:
-                theta_vec = np.asarray(theta_out, dtype=float)
                 outcome_coef_norm_stats.setdefault(tag, []).append(
-                    float(np.linalg.norm(theta_vec))
+                    float(np.linalg.norm(np.asarray(theta_out, dtype=float)))
                 )
-                outcome_coef_vec_stats.setdefault(tag, []).append(theta_vec)
 
             mu_obs.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = out.predict(X_te)
 
@@ -859,6 +871,17 @@ def grr_functional(
         def compute_for_tag(tag: str, suffix: str = "") -> None:
             mu = mu_obs[tag]
             m_mu_tag = m_mu[tag]
+
+            # m(gamma_hat) is NaN when the functional could not be applied to the
+            # outcome model (m_from_function raised NotImplementedError above).
+            # RA/ARW would then propagate NaN into se_ci_pvalue, which rejects a
+            # non-finite estimate with a message that does not name the cause.
+            if any(e in ests for e in ("ra", "arw")) and not np.all(np.isfinite(m_mu_tag)):
+                raise RuntimeError(
+                    "RA/ARW require applying the functional m to the outcome "
+                    "regression, and m(gamma_hat) is not finite for this "
+                    "functional / outcome-model combination."
+                )
 
             if "ra" in ests:
                 theta_ra = float(np.mean(m_mu_tag))
@@ -1015,34 +1038,46 @@ def grr_functional(
             any(bool(k.get("underfitting", False)) for k in kernel_stats)
         )
 
-    # Bias proxy and standardized bias (item I). On the shared span, the fitted
-    # outcome model gives gamma_hat = phi^T theta, and the empirical second-order
-    # term that the balancing condition is meant to kill is exactly
-    #   E_n[alpha_hat*gamma_hat] - E_n[m(.,gamma_hat)] = Delta^T theta,
-    # so the *directional* proxy |Delta^T theta| is the realized bias driver
-    # (headline b_hat). We also keep a conservative Cauchy-Schwarz product
-    # ||Delta|| * ||theta|| (b_bound) for worst-case sensitivity. Both are
-    # diagnostics only and never used for selection.
+    # Bias proxy and standardized bias (item I). The empirical second-order
+    # term that the balancing condition is meant to kill is
+    #   E[alpha_hat * gamma_hat] - E[m(., gamma_hat)],
+    # evaluated here directly from the held-out predictions, with no coordinate
+    # matching between the Riesz span and the outcome span (pairing the
+    # Riesz-span Delta with a separate outcome basis of coincidentally equal
+    # column count used to dot unrelated coordinates). The headline b_hat is
+    # the unweighted across-fold mean of the per-fold absolute means
+    #   (1/K) sum_k |E_{I_k}[alpha_hat*gamma_hat - m(., gamma_hat)]|
+    # (the same fold aggregation as before, not a pooled |E_n[...]|), and
+    # b_hat_max is the worst fold. The conservative Cauchy-Schwarz bound
+    # ||Delta|| * ||theta|| (b_bound) is only a bound when the outcome model is
+    # *linear in the Riesz basis coordinates*: the outcome must be fit on the
+    # same fitted basis object ("shared") AND use the identity link -- under a
+    # logit link gamma_hat = sigmoid(phi^T theta), so theta = 0 gives a
+    # constant 0.5 prediction with a generally nonzero second-order term while
+    # ||Delta||*||theta|| = 0. Otherwise b_bound is NaN with the reason
+    # recorded. Both are diagnostics only and never used for selection.
     if imbalance_stats["max"] and outcome_coef_norm_stats:
         tag_pref = (
             "shared" if "shared" in outcome_coef_norm_stats else next(iter(outcome_coef_norm_stats))
         )
         cnorms = list(outcome_coef_norm_stats[tag_pref])
-        theta_vecs = outcome_coef_vec_stats.get(tag_pref, [])
-        n_pair = min(len(imbalance_delta), len(cnorms))
+        same_span = tag_pref == "shared"
+        bound_defined = same_span and outcome_link_ == "identity"
+        mu_pref = mu_obs[tag_pref]
+        m_mu_pref = m_mu[tag_pref]
 
         b_dir_fold: list[float] = []
         b_bound_fold: list[float] = []
-        for i in range(n_pair):
-            d_vec = imbalance_delta[i]
-            th = theta_vecs[i] if i < len(theta_vecs) else None
-            if th is not None and th.shape[0] == d_vec.shape[0]:
-                # Shared span: exact empirical second-order term.
-                b_dir_fold.append(float(abs(float(np.dot(d_vec, th)))))
+        for k, fold in enumerate(splits):
+            te = fold.test
+            second_order = alpha_obs[te] * mu_pref[te] - m_mu_pref[te]
+            b_dir_fold.append(
+                float(abs(float(np.mean(second_order)))) if second_order.size else float("nan")
+            )
+            if bound_defined and k < len(imbalance_delta) and k < len(cnorms):
+                b_bound_fold.append(float(np.linalg.norm(imbalance_delta[k]) * cnorms[k]))
             else:
-                # Separate/mismatched span: fall back to the conservative bound.
-                b_dir_fold.append(bias_proxy(float(np.max(np.abs(d_vec))), cnorms[i]))
-            b_bound_fold.append(float(np.linalg.norm(d_vec) * cnorms[i]))
+                b_bound_fold.append(float("nan"))
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -1075,6 +1110,16 @@ def grr_functional(
             "outcome_coef_norm_mean": float(np.mean(cnorms)) if cnorms else float("nan"),
             "outcome_tag": tag_pref,
         }
+        if not bound_defined:
+            cause = (
+                "the outcome basis differs from the Riesz basis"
+                if not same_span
+                else "the logit link makes gamma_hat nonlinear in theta"
+            )
+            diagnostics["bias"]["b_bound_unavailable_reason"] = (
+                "the Cauchy-Schwarz bound ||Delta||*||theta|| needs the outcome "
+                f"model to be linear in the Riesz basis coordinates: {cause}"
+            )
         diagnostics["bias_proxy"] = b_hat
         diagnostics["std_bias"] = std_bias
 
@@ -1188,12 +1233,14 @@ def grr_att(
 ) -> FunctionalEstimate:
     """Estimate ATT with the GRR API."""
 
+    t_idx = _validate_treatment_index_arg(treatment_index)
     X_ = as_2d(X)
-    D = X_[:, treatment_index]
+    _check_treatment_index(X_, t_idx)
+    D = X_[:, t_idx]
     pi = float(np.mean(D))
     if pi <= 0 or pi >= 1:
         raise ValueError("ATT requires both treatment groups to be non-empty")
-    m = ATTFunctional(treatment_index=treatment_index, pi=pi, pi_is_estimated=True)
+    m = ATTFunctional(treatment_index=t_idx, pi=pi, pi_is_estimated=True)
     return grr_functional(X=X, Y=Y, m=m, basis=basis, generator=generator, **kwargs)
 
 
@@ -1215,11 +1262,13 @@ def grr_did(
     y1 = as_1d_of_length(Y1, n=n, name="Y1")
     dy = y1 - y0
 
-    D = X_[:, treatment_index]
+    t_idx = _validate_treatment_index_arg(treatment_index)
+    _check_treatment_index(X_, t_idx)
+    D = X_[:, t_idx]
     pi = float(np.mean(D))
     if pi <= 0 or pi >= 1:
         raise ValueError("DID requires both treatment groups to be non-empty")
-    m = DIDFunctional(treatment_index=treatment_index, pi=pi, pi_is_estimated=True)
+    m = DIDFunctional(treatment_index=t_idx, pi=pi, pi_is_estimated=True)
     return grr_functional(X=X, Y=dy, m=m, basis=basis, generator=generator, **kwargs)
 
 
