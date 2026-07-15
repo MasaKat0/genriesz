@@ -559,7 +559,7 @@ def stratified_kfold_splits(
     # global test-fold sizes also differ by at most one -- no fold can end up
     # empty when n >= folds.
     rng = np.random.default_rng(random_state)
-    assignments = np.empty(n, dtype=int)
+    assignments = np.full(n, -1, dtype=int)
     cursor = 0
     for value in np.unique(labels_):
         stratum = np.flatnonzero(labels_ == value)
@@ -567,6 +567,16 @@ def stratified_kfold_splits(
             rng.shuffle(stratum)
         assignments[stratum] = (cursor + np.arange(stratum.size)) % folds
         cursor = (cursor + stratum.size) % folds
+    # Belt and braces for dtypes the float check above cannot cover (object or
+    # complex arrays holding NaN): a label that matched no stratum would leave
+    # its index out of every test fold, silently breaking the exactly-once
+    # partition contract.
+    if np.any(assignments < 0):
+        raise ValueError(
+            "labels contain values that match no stratum (e.g. NaN in an "
+            "object or complex array); every label must equal one of its "
+            "unique values."
+        )
 
     all_idx = np.arange(n, dtype=int)
     for k in range(folds):

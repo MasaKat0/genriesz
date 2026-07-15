@@ -754,3 +754,11 @@ def test_stratified_kfold_splits_reject_nan_labels_and_2d_labels():
         list(stratified_kfold_splits(labels, folds=2))
     with pytest.raises(ValueError, match="1-d"):
         list(stratified_kfold_splits(np.zeros((4, 2)), folds=2))
+
+
+def test_stratified_kfold_splits_reject_object_dtype_nan_labels():
+    # An object-dtype NaN bypasses the floating-dtype finiteness check but
+    # still matches no stratum; the post-assignment guard must catch it.
+    labels = np.array([0.0, 1.0, np.nan, 0.0], dtype=object)
+    with pytest.raises(ValueError, match="stratum"):
+        list(stratified_kfold_splits(labels, folds=2))
