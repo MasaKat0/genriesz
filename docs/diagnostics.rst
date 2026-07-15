@@ -228,11 +228,15 @@ You can also call the basis probe directly:
 Bias proxy
 ----------
 
-On a shared outcome/Riesz span the empirical second-order term that balancing is
-meant to remove is exactly :math:`\Delta^\top\theta`, where :math:`\theta` are the
-outcome coefficients. This *directional* proxy is reported together with a
-conservative Cauchy–Schwarz bound and a standardized version. These are
-**diagnostics only** and are never used to select hyper-parameters.
+The empirical second-order term that balancing is meant to remove,
+:math:`E[\hat\alpha\,\hat\gamma - m(\cdot,\hat\gamma)]`, is evaluated directly
+from the held-out predictions on each fold, so it is well defined for *any*
+outcome basis (shared or separate). For an identity-link outcome model on the
+shared span it coincides with the coordinate form :math:`\Delta^\top\theta`,
+where :math:`\theta` are the outcome coefficients. This *directional* proxy is
+reported together with a conservative Cauchy–Schwarz bound (when that bound is
+defined, see below) and a standardized version. These are **diagnostics only**
+and are never used to select hyper-parameters.
 
 .. list-table::
    :header-rows: 1
@@ -241,13 +245,20 @@ conservative Cauchy–Schwarz bound and a standardized version. These are
    * - Key
      - Description
    * - ``"bias_proxy"``
-     - Headline directional proxy :math:`b = \mathrm{mean}_k|\Delta^{(k)\top}\theta^{(-k)}|`.
+     - Headline directional proxy: the unweighted across-fold mean of the
+       per-fold absolute means,
+       :math:`b = \mathrm{mean}_k\,|E_{I_k}[\hat\alpha\,\hat\gamma -
+       m(\cdot,\hat\gamma)]|` (not a pooled :math:`|E_n[\cdot]|`).
    * - ``"std_bias"``
      - Standardized bias ``b / se`` of the primary (ARW) estimate.
    * - ``"bias"``
-     - Dict with ``b_hat``, ``b_hat_max``, ``b_bound`` (the
-       :math:`\lVert\Delta\rVert\,\lVert\theta\rVert` bound), ``v_hat``,
-       ``std_bias``, ``outcome_coef_norm_mean``, ``outcome_tag``.
+     - Dict with ``b_hat``, ``b_hat_max``, ``b_bound``, ``v_hat``,
+       ``std_bias``, ``outcome_coef_norm_mean``, ``outcome_tag``. The
+       :math:`\lVert\Delta\rVert\,\lVert\theta\rVert` bound ``b_bound`` needs
+       the outcome model to be *linear in the Riesz basis coordinates*, so it
+       is finite only for the shared basis with the identity link; for a
+       separate outcome basis or a logit link it is NaN and
+       ``b_bound_unavailable_reason`` records why.
 
 The helpers :func:`genriesz.bias_proxy` and
 :func:`genriesz.coverage_decomposition` build these quantities (and, in
