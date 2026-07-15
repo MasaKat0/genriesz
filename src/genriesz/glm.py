@@ -69,13 +69,16 @@ class FitResult:
     ----------
     beta, success, message, n_iter:
         Solution, optimizer success flag, optimizer message, iteration count.
-        On the ``"singular"`` and ``"domain_error"`` failure paths no solution
-        was ever computed: ``beta`` then holds the initial point (for shape
-        introspection only) and the model itself stays unpredictable
-        (``beta_ is None``).
+        On every failure path the model itself stays unpredictable
+        (``beta_ is None``); ``beta`` then holds the last iterate (or the
+        initial point when no solution was ever computed) for diagnostics and
+        shape introspection only.
     status:
         One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
-        ``"domain_error"``, ``"domain_error_at_solution"``, ``"singular"``
+        ``"domain_error"``, ``"domain_error_at_solution"``,
+        ``"degenerate_functional"`` (the functional's basis evaluations are
+        identically zero on the training data, e.g. an ATT fold with no treated
+        unit, so the Riesz problem has no information to fit), ``"singular"``
         (the closed-form system is numerically rank-deficient -- usually an
         unpenalized path -- and has no stationary point that can be stood behind:
         either none exists and the objective is unbounded below, or reaching it
@@ -207,6 +210,33 @@ class GRRGLM:
             raise ValueError(
                 f"m_basis_matrix returned shape {M.shape}, expected {(n, p)}."
             )
+
+        # A functional whose basis evaluations vanish identically on this
+        # training data (e.g. an ATT/DID M-matrix on a fold with no treated
+        # unit, or an AME derivative of a piecewise-constant basis) makes the
+        # Riesz problem degenerate: the "solution" is an artifact of the
+        # penalty alone (beta = 0 for the closed form), yet it would be
+        # reported as a successful fit and produce alpha_hat = const with a
+        # deceptively tight downstream CI (audit EST-07 / K-01).
+        if M.size and not np.any(M):
+            out = FitResult(
+                beta=np.zeros(p, dtype=float),
+                success=False,
+                message=(
+                    "m_basis_matrix(X) is identically zero on this training "
+                    "data, so the Riesz problem is degenerate (for a "
+                    "treatment-type functional this typically means the "
+                    "training fold contains no treated unit)."
+                ),
+                n_iter=0,
+                status="degenerate_functional",
+                fit_time=time.perf_counter() - t0,
+            )
+            self.beta_ = None
+            self.fit_result_ = out
+            self._Phi = None
+            self._M = None
+            return out
 
         if beta0 is None:
             beta0_ = np.zeros(p, dtype=float)
@@ -376,7 +406,11 @@ class GRRGLM:
             clip_binding_rate=binding,
             fit_time=time.perf_counter() - t0,
         )
-        self.beta_ = beta_hat
+        # Only a successful fit is allowed to predict (audit P0-07): an
+        # optimizer that hit max_iter or failed its diagnostics at the last
+        # iterate must not leave a silently predictable state behind. The
+        # iterate itself stays available on ``fit_result_.beta``.
+        self.beta_ = beta_hat if success else None
         self.fit_result_ = out
         # Do not keep the (n, p) design matrices alive on the fitted object.
         self._Phi = None
@@ -529,7 +563,9 @@ class OutcomeGLM:
         res = optimize.minimize(fun=fun, x0=theta0_, jac=jac, method="L-BFGS-B", options=opts_)
 
         theta_hat = np.asarray(res.x, dtype=float)
-        self.theta_ = theta_hat
+        # Same contract as GRRGLM (audit P0-07): a failed fit must not leave a
+        # predictable state behind. The last iterate stays on the FitResult.
+        self.theta_ = theta_hat if bool(res.success) else None
         return FitResult(
             beta=theta_hat,
             success=bool(res.success),

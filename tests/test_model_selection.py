@@ -166,7 +166,10 @@ def test_strict_nested_training_feature_map_ignores_validation_rows():
     med0 = _median_pairwise_distance(_standardized(X[train0]), random_state=0)
 
     X2 = X.copy()
-    X2[val0] += 1000.0  # blow up every fold-0 validation row
+    # Blow up every fold-0 validation row's *covariates*. The treatment column
+    # stays intact: the inner split is stratified on it, so corrupting D would
+    # change the fold membership itself rather than test feature-map leakage.
+    X2[np.ix_(val0, np.arange(1, X.shape[1]))] += 1000.0
 
     res2 = select_grr_hyperparams(X_train=X2, y_train=Y, config=cfg, **_nested_common())
     prov0b = res2.fold_provenance[0]
@@ -295,7 +298,15 @@ def test_strict_nested_survives_degenerate_inner_fold(monkeypatch):
     rng = np.random.default_rng(0)
     dist_z = rng.normal(size=(k, 3)) + 5.0
     Z = np.vstack([ident_z, dist_z])
-    D = np.concatenate([np.zeros(k), (np.arange(k) % 2).astype(float)])
+    # A deliberately non-binary treatment column: with a binary D the inner
+    # split is stratified on it (and an all-control fake fold like A would be
+    # rejected up front), so the monkeypatched plain kfold_splits below would
+    # never be called. ATE's m_basis_matrix never reads the D values, and this
+    # test targets the degenerate-median fallback only. (Not 0.5: the identical
+    # fold's kernel centers sit at the standardized D of 0, and toggling D to
+    # 1/0 would then give the symmetric offsets +-0.5, making m_basis_matrix
+    # exactly zero -- a degenerate-functional failure, which is not this test.)
+    D = np.full(2 * k, 0.25)
     X = np.column_stack([D, Z])
     Y = rng.normal(size=2 * k)
     A = np.arange(k)  # identical rows -> a degenerate inner-training fold
@@ -994,3 +1005,61 @@ def test_all_candidates_unscoreable_raises_for_bias_variance_only(monkeypatch):
 
     res = run("bregman_validation")
     assert np.isfinite(res.best_score)
+
+
+# ---------------------------------------------------------------------------
+# Stratified inner splits (audit CV-13)
+# ---------------------------------------------------------------------------
+
+
+def _make_rare_ate(n: int = 60, n_treated: int = 6, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(n, 3))
+    D = np.zeros(n)
+    D[:n_treated] = 1.0
+    rng.shuffle(D)
+    X = np.column_stack([D, Z])
+    Y = D + Z[:, 0] + rng.normal(scale=0.5, size=n)
+    return X, Y
+
+
+def test_inner_cv_is_stratified_on_a_binary_treatment():
+    # 6 treated / 60 rows / 3 inner folds: plain K-fold can hand an inner fold
+    # zero treated units and its metrics silently stop being comparable across
+    # candidates. The inner split must keep both groups in every inner-training
+    # fold, with the treated units spread across the folds as evenly as the
+    # counts allow.
+    X, Y = _make_rare_ate()
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=3, random_state=0)
+    res = select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+
+    treated_in_validation = []
+    for prov in res.fold_provenance:
+        d_tr = X[prov["preprocess_fit_index"], 0]
+        assert np.any(d_tr == 1.0) and np.any(d_tr == 0.0)
+        treated_in_validation.append(int(np.sum(X[prov["validation_index"], 0])))
+    assert max(treated_in_validation) - min(treated_in_validation) <= 1
+
+
+def test_inner_cv_with_a_single_treated_unit_raises():
+    # Whichever inner fold's validation receives the only treated unit leaves
+    # its inner-training all-control; that cannot be scored comparably and must
+    # fail loudly rather than run through.
+    X, Y = _make_rare_ate(n_treated=1)
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=3, random_state=0)
+    with pytest.raises(ValueError, match="single unit"):
+        select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+
+
+def test_inner_cv_rejects_a_single_group_binary_sample():
+    # A binary treatment column with only one group must not silently fall
+    # back to a plain, unchecked K-fold: every inner-training fold would be
+    # single-group, which is exactly what the stratified guard rejects.
+    rng = np.random.default_rng(0)
+    Z = rng.normal(size=(40, 3))
+    Y = Z[:, 0] + rng.normal(size=40)
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=3, random_state=0)
+    for d_value in (1.0, 0.0):
+        X = np.column_stack([np.full(40, d_value), Z])
+        with pytest.raises(ValueError, match="single-group"):
+            select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())

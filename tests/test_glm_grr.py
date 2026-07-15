@@ -293,3 +293,87 @@ def test_domain_violation_yields_explicit_failure_not_silent_success():
     assert model.beta_ is None
     with pytest.raises(RuntimeError, match="not fit"):
         model.predict_alpha(X)
+
+
+def test_all_zero_functional_matrix_is_a_loud_failure_not_a_zero_fit():
+    """M identically zero => degenerate Riesz problem, not a "successful" beta=0.
+
+    An ATT-style M matrix vanishes on training data with no treated unit; the
+    closed form then solves A beta = 0 and used to report the penalty artifact
+    beta = 0 as a converged fit, giving alpha == const on the eval fold and a
+    deceptively tight downstream CI (audit EST-07 / K-01).
+    """
+    from genriesz import ATTFunctional
+
+    rng = np.random.default_rng(3)
+    n = 40
+    Z = rng.normal(size=(n, 2))
+    X = np.column_stack([np.zeros(n), Z])  # no treated unit at all
+
+    m = ATTFunctional(treatment_index=0, pi=0.5)
+    basis = TreatmentInteractionBasis(
+        base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
+    ).fit(X)
+    model = GRRGLM(
+        functional=m,
+        basis=basis,
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        penalty="l2",
+        lam=1e-3,
+    )
+    res = model.fit(X)
+
+    assert not res.success
+    assert res.status == "degenerate_functional"
+    assert "identically zero" in res.message
+    assert model.beta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict_alpha(X)
+
+
+def test_optimizer_failure_leaves_the_model_unpredictable():
+    """A fit stopped at max_iter must not stay silently predictable (audit P0-07).
+
+    PR #23 fixed the "singular" and "domain_error" paths (no solution ever
+    computed); the optimizer-failure path still pinned the last iterate to
+    ``beta_`` and let ``predict_alpha`` evaluate it.
+    """
+    X = _make_synthetic_ate(n=80, d_z=2, seed=4)
+    m = ATEFunctional(treatment_index=0)
+    basis = TreatmentInteractionBasis(
+        base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
+    ).fit(X)
+    # l1 forces the numeric (L-BFGS) path; maxiter=1 cannot converge here.
+    model = GRRGLM(
+        functional=m,
+        basis=basis,
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        penalty="l1",
+        lam=1e-2,
+    )
+    res = model.fit(X, max_iter=1)
+
+    assert not res.success
+    assert res.status == "optimizer_failure"
+    # The iterate stays available for diagnostics on the FitResult itself.
+    assert np.all(np.isfinite(res.beta))
+    assert model.beta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict_alpha(X)
+
+
+def test_outcome_glm_optimizer_failure_leaves_the_model_unpredictable():
+    from genriesz import OutcomeGLM
+
+    rng = np.random.default_rng(5)
+    X = rng.normal(size=(60, 2))
+    y = (rng.random(60) < 0.5).astype(float)
+    basis = PolynomialBasis(degree=2, include_bias=True).fit(X)
+    model = OutcomeGLM(basis=basis, link="logit", penalty="l2", lam=1e-3)
+    res = model.fit(X, y, max_iter=1)
+
+    assert not res.success
+    assert res.status == "optimizer_failure"
+    assert model.theta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict(X)

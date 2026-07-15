@@ -79,6 +79,25 @@ def _standardize(X: NDArray[np.float64]) -> NDArray[np.float64]:
     return standardize_columns(X)[0]
 
 
+def _drop_one_coincident_row(
+    points: NDArray[np.float64], x0: NDArray[np.float64]
+) -> NDArray[np.float64]:
+    """Drop at most one row of ``points`` coinciding with ``x0`` (self match).
+
+    "Coinciding" uses the same heuristic as the self-exclusion radius rule: the
+    nearest row within 1e-12 of ``x0``. Only a single row is dropped -- exact
+    duplicates of the eval point are distinct observations and stay.
+    """
+
+    if len(points) == 0:
+        return points
+    dists = np.linalg.norm(points - x0, axis=1)
+    j = int(np.argmin(dists))
+    if dists[j] <= 1e-12:
+        return np.delete(points, j, axis=0)
+    return points
+
+
 @dataclass(frozen=True)
 class NNMatchingWeights:
     """Output of :func:`nn_matching_inverse_propensity_weights`."""
@@ -323,16 +342,20 @@ def local_polynomial_nn_lsif_density_ratio(
     kernel:
         Currently only "ball" (M-NN ball kernel) is implemented.
     exclude_self:
-        If True, then when an eval point equals a denominator sample point, we attempt to
-        exclude that identical point when defining the M-th neighbor radius.
-        This is mostly relevant for in-sample evaluation. Only a single coincident
-        point (the nearest, at distance ~0) is dropped; if the same point occurs
-        several times among the neighbors, the exclusion is incomplete.
-        "Coincident" is a heuristic -- a nearest neighbor within 1e-12 of the eval
-        point -- so an out-of-sample eval point that merely lies that close to a
-        denominator sample is also treated as a self match, and its radius is
-        widened to the next neighbor. The alternative (tracking identity by index)
-        is not available here: the eval points arrive as coordinates.
+        If True, then when an eval point equals a denominator sample point, we
+        attempt to exclude that identical point -- from the M-th neighbor
+        radius definition *and* from both ball counts (the denominator count
+        and, when the eval point is also a numerator sample, the numerator
+        count). Excluding it from the radius alone would leave the denominator
+        ball with exactly M+1 points and attenuate the in-sample estimate by a
+        factor of about M/(M+1). This is mostly relevant for in-sample
+        evaluation. Only a single coincident point (the nearest, at distance
+        ~0) is dropped per sample; if the same point occurs several times among
+        the neighbors, the exclusion is incomplete. "Coincident" is a heuristic
+        -- a nearest neighbor within 1e-12 of the eval point -- so an
+        out-of-sample eval point that merely lies that close to a sample point
+        is also treated as a self match. The alternative (tracking identity by
+        index) is not available here: the eval points arrive as coordinates.
     ridge:
         A small ridge term added to H_hat(x) for numerical stability.
     metric, n_jobs:
@@ -440,6 +463,19 @@ def local_polynomial_nn_lsif_density_ratio(
         # Numerator points within radius rho.
         num_idx = tree_num.query_ball_point(x0, r=rho, workers=workers)
         Z_loc = Z[num_idx]
+
+        # With exclude_self, the eval point itself must leave the ball *counts*
+        # too, on both sides, not only the radius definition. Keeping it makes
+        # the denominator ball hold exactly M+1 points (the M usable neighbors
+        # plus self) and adds a spurious +1 to the numerator count whenever the
+        # eval point is also a numerator sample, which attenuates the in-sample
+        # estimate by a factor ~ M/(M+1) (audit N-01). The same coincidence
+        # heuristic as the radius rule applies: exactly one point within 1e-12
+        # is treated as self; further duplicates are distinct observations and
+        # stay.
+        if exclude_self:
+            X_loc = _drop_one_coincident_row(X_loc, x0)
+            Z_loc = _drop_one_coincident_row(Z_loc, x0)
 
         # Feature maps at scaled coordinates.
         Psi_X = _poly_features((X_loc - x0) / rho, degree=degree)

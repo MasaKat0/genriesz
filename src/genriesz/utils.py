@@ -471,8 +471,8 @@ def kfold_splits(
         Whether to shuffle indices before splitting.
     """
 
-    n = int(n)
-    folds = int(folds)
+    n = _as_integral_count("n", n)
+    folds = _as_integral_count("folds", folds)
     if n < 2:
         raise ValueError("n must be >= 2 for cross-fitting")
     if folds <= 1:
@@ -489,6 +489,99 @@ def kfold_splits(
     for k in range(folds):
         test = parts[k]
         train = np.concatenate([parts[j] for j in range(folds) if j != k])
+        yield Fold(train=train.astype(int), test=test.astype(int))
+
+
+def _as_integral_count(name: str, value: object) -> int:
+    """Coerce a count argument to ``int``, rejecting non-integral values.
+
+    ``int(10.9)`` truncates to 10, so a float ``n`` would silently drop the
+    last observation from every fold; a float ``folds`` would silently run
+    fewer folds than requested.
+    """
+
+    out = int(value)  # type: ignore[call-overload]
+    if out != value:
+        raise ValueError(f"{name} must be an integer. Got {value!r}.")
+    return out
+
+
+def stratified_kfold_splits(
+    labels: ArrayLike,
+    *,
+    folds: int,
+    random_state: int | None = None,
+    shuffle: bool = True,
+) -> Iterator[Fold]:
+    """Yield K-fold train/test splits stratified by a discrete label.
+
+    Each stratum's indices are partitioned across the ``folds`` test folds
+    separately (shuffled within the stratum when ``shuffle=True``), so every
+    fold's train and test shares keep the label proportions as balanced as the
+    integer counts allow. With a binary treatment this prevents plain K-fold
+    from producing a training fold with zero treated (or zero control) units,
+    which a treatment-type Riesz fit cannot survive (audit EST-07). Every index
+    appears in exactly one test fold.
+
+    Parameters
+    ----------
+    labels:
+        1-d array of length ``n`` with the stratification label per observation
+        (e.g. the binary treatment indicator).
+    folds:
+        Number of folds (K).
+    random_state:
+        Random seed used when ``shuffle=True``.
+    shuffle:
+        Whether to shuffle indices within each stratum before splitting.
+    """
+
+    labels_ = np.asarray(labels)
+    if labels_.ndim != 1:
+        raise ValueError(f"labels must be a 1-d array. Got shape {labels_.shape}.")
+    # NaN compares unequal to everything, including itself: a NaN label would
+    # match no stratum and its index would silently drop out of every test
+    # fold, breaking the exactly-once partition contract.
+    if np.issubdtype(labels_.dtype, np.floating) and not np.isfinite(labels_).all():
+        raise ValueError("labels must be finite (no NaN/inf).")
+    n = labels_.shape[0]
+    folds = _as_integral_count("folds", folds)
+    if n < 2:
+        raise ValueError("n must be >= 2 for cross-fitting")
+    if folds <= 1:
+        raise ValueError("folds must be >= 2 for cross-fitting")
+    if folds > n:
+        raise ValueError("folds must be <= n for cross-fitting")
+
+    # Assign each stratum's (shuffled) members to test folds round-robin,
+    # continuing the fold cursor across strata. Within every stratum the fold
+    # counts differ by at most one, and because the cursor carries over, the
+    # global test-fold sizes also differ by at most one -- no fold can end up
+    # empty when n >= folds.
+    rng = np.random.default_rng(random_state)
+    assignments = np.full(n, -1, dtype=int)
+    cursor = 0
+    for value in np.unique(labels_):
+        stratum = np.flatnonzero(labels_ == value)
+        if shuffle:
+            rng.shuffle(stratum)
+        assignments[stratum] = (cursor + np.arange(stratum.size)) % folds
+        cursor = (cursor + stratum.size) % folds
+    # Belt and braces for dtypes the float check above cannot cover (object or
+    # complex arrays holding NaN): a label that matched no stratum would leave
+    # its index out of every test fold, silently breaking the exactly-once
+    # partition contract.
+    if np.any(assignments < 0):
+        raise ValueError(
+            "labels contain values that match no stratum (e.g. NaN in an "
+            "object or complex array); every label must equal one of its "
+            "unique values."
+        )
+
+    all_idx = np.arange(n, dtype=int)
+    for k in range(folds):
+        test = np.flatnonzero(assignments == k)
+        train = np.setdiff1d(all_idx, test, assume_unique=True)
         yield Fold(train=train.astype(int), test=test.astype(int))
 
 

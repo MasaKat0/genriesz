@@ -102,14 +102,18 @@ def test_exclude_self_uses_the_Mth_neighbor_radius_at_out_of_sample_points():
     # With no self match, excluding it changes nothing.
     assert r_excl[0] == pytest.approx(r_keep[0])
 
-    # x = 0.0 *is* a denominator point: the coincident neighbor is dropped, so
-    # the radius steps out to the 3rd queried distance (2.0), holding X = {0, 1, 2}
-    # and Z = {0.4, 1.8}: r = 1 / (3/5) = 1.667. Without exclusion the radius is
-    # the 2nd distance (1.0), holding X = {0, 1} and Z = {0.4}: r = 1.25.
+    # x = 0.0 *is* a denominator point: the coincident neighbor is dropped from
+    # the radius definition *and* from the ball count, so the radius steps out
+    # to the 3rd queried distance (2.0) and the ball holds X = {1, 2} (self
+    # excluded) and Z = {0.4, 1.8}: r = (2/2) / (2/5) = 2.5. Keeping self in
+    # the count would leave M+1 = 3 denominator points in every in-sample ball
+    # and attenuate the estimate by ~ M/(M+1) (audit N-01). Without exclusion
+    # the radius is the 2nd distance (1.0), holding X = {0, 1} and Z = {0.4}:
+    # r = 1.25.
     ins = np.array([[0.0]])
     r_excl_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=True, **kw)
     r_keep_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=False, **kw)
-    assert r_excl_in[0] == pytest.approx(5.0 / 3.0)
+    assert r_excl_in[0] == pytest.approx(2.5)
     assert r_keep_in[0] == pytest.approx(1.25)
 
 
@@ -154,3 +158,25 @@ def test_algorithm_default_does_not_warn(call, recwarn):
     # The default "auto" must stay quiet, so ordinary callers see no warning.
     call("auto")
     assert not [w for w in recwarn.list if issubclass(w.category, DeprecationWarning)]
+
+
+def test_exclude_self_drops_one_self_per_side_and_keeps_duplicates():
+    # The eval point x=2 occurs twice in the denominator and once in the
+    # numerator. Exactly one coincident row is dropped from each side; the
+    # remaining duplicate is a distinct observation and stays. Radius: the
+    # 6 denominator distances are [0, 0, 1, 1, 2, 2] and with a self match the
+    # M-th usable neighbor is entry M -> rho = 1. Denominator ball {1, 2, 2, 3}
+    # loses one coincident row -> H00 = 3/6; numerator ball {2.0, 1.5} loses
+    # the coincident 2.0 -> h = 1/3. r = (1/3) / (3/6) = 2/3.
+    X = np.array([[0.0], [1.0], [2.0], [2.0], [3.0], [4.0]])
+    Z = np.array([[2.0], [1.5], [10.0]])
+    r = local_polynomial_nn_lsif_density_ratio(
+        numerator=Z,
+        denominator=X,
+        eval_points=np.array([[2.0]]),
+        M=2,
+        degree=0,
+        ridge=0.0,
+        exclude_self=True,
+    )
+    assert r[0] == pytest.approx(2.0 / 3.0)

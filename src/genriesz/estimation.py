@@ -69,6 +69,7 @@ from .utils import (
     kfold_splits,
     se_ci_pvalue,
     sigmoid,
+    stratified_kfold_splits,
 )
 
 EstimatorName = Literal["ra", "rw", "arw", "tmle"]
@@ -338,6 +339,7 @@ def grr_functional(
     # Cross-fitting
     cross_fit: bool = True,
     folds: int = 5,
+    stratify_folds: bool | None = None,
     random_state: int | None = 0,
     # Output and inference
     estimators: Sequence[str] = ("ra", "rw", "arw", "tmle"),
@@ -396,7 +398,18 @@ def grr_functional(
         scoring feature map.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
-        TMLE likelihood is inferred from this link.
+        TMLE likelihood is inferred from this link. An explicit ``'logit'``
+        requires Y bounded in [0, 1] whenever an outcome model is fitted.
+    stratify_folds:
+        If None (default), cross-fitting folds are stratified on the treatment
+        indicator for the treatment-type functionals (ATE/ATT/DID) and are
+        plain K-fold otherwise. Stratification keeps each fold's treated and
+        control shares as balanced as the counts allow; a training fold that
+        still ends up missing one group raises instead of fitting a degenerate
+        Riesz representer. Pass False to force plain (unstratified) K-fold.
+        Note that stratified and plain folds partition the sample differently,
+        so estimates change (in distribution, not in validity) relative to
+        releases before stratification was the default.
     """
 
     X_ = as_2d(X)
@@ -429,6 +442,22 @@ def grr_functional(
         uniq = np.unique(D)
         if not np.all(np.isin(uniq, [0.0, 1.0])):
             raise ValueError("Treatment indicator must be binary (0/1).")
+        # Fail before any nuisance is fitted: a single-group sample cannot
+        # identify ATE/ATT/DID. The balance-diagnostics block used to be the
+        # only place this surfaced, and it is skipped entirely when X has no
+        # covariate columns besides the treatment (audit N-24).
+        if not (np.any(D == 1.0) and np.any(D == 0.0)):
+            raise ValueError(
+                "Both treatment groups must be nonempty for ATE/ATT/DID "
+                f"estimation. Got {int(np.sum(D == 1.0))} treated and "
+                f"{int(np.sum(D == 0.0))} control unit(s)."
+            )
+
+    if isinstance(m, AMEFunctional) and m.coordinate >= X_.shape[1]:
+        raise ValueError(
+            f"AME coordinate {m.coordinate} is out of range for X with "
+            f"{X_.shape[1]} column(s)."
+        )
 
     # Guard rails: matching-based Riesz methods are currently implemented only
     # for the ATE and only without cross-fitting.
@@ -504,6 +533,19 @@ def grr_functional(
 
     need_outcome = any(e in {"ra", "arw", "tmle"} for e in ests)
 
+    # A logit outcome model can only produce mu in (0, 1); fitting it to an
+    # unbounded Y silently breaks RA (and the outcome diagnostics) long before
+    # the TMLE branch would reject the same mismatch (audit N-04). The inferred
+    # link already satisfies this bound by construction; this guards the
+    # explicitly requested one.
+    if outcome_link_ == "logit" and need_outcome:
+        if not (np.nanmin(y_) >= 0.0 and np.nanmax(y_) <= 1.0):
+            raise ValueError(
+                "outcome_link='logit' requires Y bounded in [0, 1] "
+                "(a Bernoulli-style outcome model cannot track an unbounded "
+                "outcome). Use outcome_link='identity' for continuous Y."
+            )
+
     if outcome_models in {None, "auto"}:
         outcome_models_ = "shared" if need_outcome else "none"
     else:
@@ -515,11 +557,55 @@ def grr_functional(
     # ------------------------------------------------------------------
     # Cross-fitting splits
     # ------------------------------------------------------------------
+    is_treatment_functional = isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional))
     if cross_fit:
-        splits = list(kfold_splits(n, folds=folds, random_state=random_state))
+        # Plain K-fold can hand a rare-treatment fold zero treated units, and
+        # the resulting degenerate Riesz fit used to sail through as a
+        # "success" (audit EST-07 / K-01). Stratifying on the treatment keeps
+        # every fold's group shares as balanced as the counts allow, so this
+        # is the default for the treatment-type functionals.
+        stratify = is_treatment_functional if stratify_folds is None else bool(stratify_folds)
+        if stratify and not is_treatment_functional:
+            raise ValueError(
+                "stratify_folds=True requires a treatment-type functional "
+                "(ATE/ATT/DID); there is no treatment column to stratify on."
+            )
+        if stratify:
+            D_all = X_[:, getattr(m, "treatment_index", 0)]
+            splits = list(
+                stratified_kfold_splits(D_all, folds=folds, random_state=random_state)
+            )
+        else:
+            splits = list(kfold_splits(n, folds=folds, random_state=random_state))
     else:
         all_idx = np.arange(n)
         splits = [Fold(train=all_idx, test=all_idx)]
+
+    # A training fold without both groups cannot fit a treatment-type Riesz
+    # representer: the closed form would return beta = 0 as a "successful" fit
+    # and the fold's scores would silently die (audit EST-07 / K-01).
+    # Stratified folds avoid this whenever the counts allow -- a group of >= 2
+    # units always leaves at least one in every training fold -- so under the
+    # default it fires only for a single-unit group. Fail loud, and before any
+    # fold is fitted, since the splits are already fixed here.
+    if is_treatment_functional:
+        t_idx_m = getattr(m, "treatment_index", 0)
+        for fold_id_, fold_ in enumerate(splits):
+            D_tr_ = X_[fold_.train, t_idx_m]
+            n_tr_treated = int(np.sum(D_tr_ == 1.0))
+            n_tr_control = int(np.sum(D_tr_ == 0.0))
+            if n_tr_treated == 0 or n_tr_control == 0:
+                raise ValueError(
+                    f"Cross-fitting fold {fold_id_}: the training fold contains "
+                    f"{n_tr_treated} treated and {n_tr_control} control "
+                    "unit(s). A treatment-type Riesz representer cannot be "
+                    "fitted without both groups. With stratified folds (the "
+                    "default) this only happens when a group has a single "
+                    "unit, so no fold count avoids it: collect more units of "
+                    "that group or set cross_fit=False. With "
+                    "stratify_folds=False, prefer the stratified default (or "
+                    "fewer folds)."
+                )
 
     # Storage for nuisances (cross-fit predictions)
     alpha_obs = np.zeros(n, dtype=float)

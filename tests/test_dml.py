@@ -156,3 +156,135 @@ def test_outcome_link_inference_warns_for_continuous_unit_interval_y():
             random_state=0,
             estimators=("arw",),
         )
+
+
+def _make_rare_treatment(n: int = 40, n_treated: int = 3, seed: int = 0):
+    rng = np.random.default_rng(seed)
+    Z = rng.normal(size=(n, 2))
+    D = np.zeros(n)
+    D[:n_treated] = 1.0
+    rng.shuffle(D)
+    Y = 2.0 * D + Z[:, 0] + 0.1 * rng.normal(size=n)
+    return np.column_stack([D, Z]), Y
+
+
+def test_cross_fitting_is_stratified_for_treatment_functionals():
+    """3 treated / 40 units / 5 folds (audit EST-07 / K-01).
+
+    Plain K-fold can put every treated unit into a single test fold; the
+    training folds then hold no treated unit, the ATT M-matrix is identically
+    zero, and the run used to *succeed* with alpha == 0 out of fold and a
+    deceptively tight CI. Stratified folds keep >= 2 treated units in every
+    training fold, so the same call must now go through cleanly.
+    """
+    from genriesz import grr_att
+
+    X, Y = _make_rare_treatment()
+    res = grr_att(
+        X=X,
+        Y=Y,
+        treatment_index=0,
+        basis=phi,
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("arw",),
+        riesz_lam=1e-3,
+    )
+    assert np.isfinite(res.arw.estimate)
+    assert np.isfinite(res.arw.se) and res.arw.se > 0
+
+
+def test_training_fold_without_both_groups_fails_loudly():
+    # A single treated unit cannot be in every training fold: whichever test
+    # fold receives it leaves its training fold all-control, and no split can
+    # avoid that. The failure must be an explicit error before any fold is
+    # fitted, not a silent degenerate fit.
+    from genriesz import grr_att
+
+    X, Y = _make_rare_treatment(n_treated=1)
+    with pytest.raises(ValueError, match="training fold contains"):
+        grr_att(
+            X=X,
+            Y=Y,
+            treatment_index=0,
+            basis=phi,
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            cross_fit=True,
+            folds=5,
+            random_state=0,
+            estimators=("arw",),
+        )
+
+
+def test_stratify_folds_true_requires_a_treatment_functional():
+    from genriesz import AMEFunctional
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(60, 2))
+    Y = X[:, 0] + rng.normal(size=60)
+    with pytest.raises(ValueError, match="stratify_folds"):
+        grr_functional(
+            X=X,
+            Y=Y,
+            m=AMEFunctional(coordinate=0),
+            basis=lambda A: np.c_[np.ones(len(A)), np.asarray(A, dtype=float)],
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            estimators=("rw",),
+            cross_fit=True,
+            folds=3,
+            stratify_folds=True,
+        )
+
+
+def test_explicit_logit_link_rejects_unbounded_y_before_fitting():
+    # The logit outcome model can only produce mu in (0, 1). With an unbounded
+    # Y it used to run anyway for RA/RW/ARW -- only the TMLE branch checked --
+    # and RA came back wildly wrong with a tiny SE (audit N-04).
+    X, Y, _ = _make_synthetic_ate(n=120, d=2, seed=3)
+    with pytest.raises(ValueError, match=r"bounded in \[0, 1\]"):
+        grr_functional(
+            X=X,
+            Y=10.0 * Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=phi,
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            outcome_link="logit",
+            estimators=("ra",),
+            cross_fit=False,
+        )
+
+
+def test_single_group_sample_fails_at_the_entry_check():
+    # With a treatment-only X (no covariate columns) the balance-diagnostics
+    # block is skipped entirely, so an all-treated sample used to return
+    # without any error at all (audit N-24).
+    n = 30
+    X = np.ones((n, 1))
+    Y = np.ones(n)
+    with pytest.raises(ValueError, match="Both treatment groups"):
+        grr_functional(
+            X=X,
+            Y=Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=phi,
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            estimators=("rw",),
+            cross_fit=False,
+        )
+
+
+def test_non_integral_folds_are_rejected():
+    X, Y, _ = _make_synthetic_ate(n=60, d=2, seed=5)
+    with pytest.raises(ValueError, match="folds must be an integer"):
+        grr_functional(
+            X=X,
+            Y=Y,
+            m=ATEFunctional(treatment_index=0),
+            basis=phi,
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            estimators=("rw",),
+            cross_fit=True,
+            folds=2.7,
+        )
