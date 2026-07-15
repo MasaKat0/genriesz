@@ -54,6 +54,29 @@ def _validate_treatment_index_arg(treatment_index: object) -> int:
     return idx
 
 
+def _validate_coordinate_arg(coordinate: object) -> int:
+    """Coerce an AME ``coordinate`` to a non-negative integer column index.
+
+    Same bug class as ``treatment_index`` (audit FUN-04): ``int(0.9)``
+    truncates to 0 and ``int(True)`` is 1, so a non-integral or boolean
+    ``coordinate`` would silently differentiate along the wrong column --
+    the estimand itself would change without any warning.
+    """
+
+    if isinstance(coordinate, (bool, np.bool_)):
+        raise ValueError(
+            "coordinate must be a non-negative integer column index, "
+            f"not a boolean. Got {coordinate!r}."
+        )
+    idx = int(coordinate)  # type: ignore[call-overload]
+    if idx != coordinate or idx < 0:
+        raise ValueError(
+            "coordinate must be a non-negative integer column index. "
+            f"Got {coordinate!r}."
+        )
+    return idx
+
+
 def _check_treatment_index(X: NDArray[np.float64], treatment_index: int) -> None:
     """Require ``0 <= treatment_index < X.shape[1]``.
 
@@ -325,8 +348,9 @@ class AMEFunctional(LinearFunctional):
     coordinate: int = 0
 
     def __init__(self, coordinate: int = 0):
-        super().__init__(name=f"AME(coord={int(coordinate)})")
-        object.__setattr__(self, "coordinate", int(coordinate))
+        idx = _validate_coordinate_arg(coordinate)
+        super().__init__(name=f"AME(coord={idx})")
+        object.__setattr__(self, "coordinate", idx)
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         return np.asarray(basis.derivative(X, self.coordinate), dtype=float)

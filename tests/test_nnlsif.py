@@ -102,14 +102,18 @@ def test_exclude_self_uses_the_Mth_neighbor_radius_at_out_of_sample_points():
     # With no self match, excluding it changes nothing.
     assert r_excl[0] == pytest.approx(r_keep[0])
 
-    # x = 0.0 *is* a denominator point: the coincident neighbor is dropped, so
-    # the radius steps out to the 3rd queried distance (2.0), holding X = {0, 1, 2}
-    # and Z = {0.4, 1.8}: r = 1 / (3/5) = 1.667. Without exclusion the radius is
-    # the 2nd distance (1.0), holding X = {0, 1} and Z = {0.4}: r = 1.25.
+    # x = 0.0 *is* a denominator point: the coincident neighbor is dropped from
+    # the radius definition *and* from the ball count, so the radius steps out
+    # to the 3rd queried distance (2.0) and the ball holds X = {1, 2} (self
+    # excluded) and Z = {0.4, 1.8}: r = (2/2) / (2/5) = 2.5. Keeping self in
+    # the count would leave M+1 = 3 denominator points in every in-sample ball
+    # and attenuate the estimate by ~ M/(M+1) (audit N-01). Without exclusion
+    # the radius is the 2nd distance (1.0), holding X = {0, 1} and Z = {0.4}:
+    # r = 1.25.
     ins = np.array([[0.0]])
     r_excl_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=True, **kw)
     r_keep_in = local_polynomial_nn_lsif_density_ratio(eval_points=ins, exclude_self=False, **kw)
-    assert r_excl_in[0] == pytest.approx(5.0 / 3.0)
+    assert r_excl_in[0] == pytest.approx(2.5)
     assert r_keep_in[0] == pytest.approx(1.25)
 
 

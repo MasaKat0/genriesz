@@ -404,6 +404,18 @@ With cross fitting:
 This removes the overfitting bias that would arise if the nuisance models were
 evaluated on the same data used to fit them.
 
+For the treatment-type functionals (ATE, ATT, and panel DID) the folds are
+**stratified on the treatment indicator** by default (``stratify_folds=None``),
+so each fold keeps the treated and control shares as balanced as the counts
+allow.  With a rare treatment, plain K-fold can hand a training fold zero
+treated units — the Riesz fit then degenerates silently.  If a training fold
+still ends up with only one group (fewer treated units than folds), the call
+raises instead of returning a degenerate estimate.  Pass
+``stratify_folds=False`` to force plain K-fold; note that the two schemes
+partition the sample differently, so estimates differ (in randomness, not in
+validity) from releases where plain K-fold was the default.  The same
+stratification policy applies to the inner Riesz CV splits.
+
 Outcome models
 ^^^^^^^^^^^^^^
 

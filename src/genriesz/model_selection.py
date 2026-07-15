@@ -45,7 +45,7 @@ from .basis import Basis, _median_pairwise_distance
 from .functionals import AMEFunctional, LinearFunctional
 from .generators import BregmanGenerator
 from .glm import GRRGLM, OutcomeGLM
-from .utils import Fold, kfold_splits
+from .utils import Fold, is_binary_y, kfold_splits, stratified_kfold_splits
 
 # Default candidate grids (design section 3.4 / coverage design "Candidate 集合").
 DEFAULT_SIGMA_MULTIPLIERS: tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0)
@@ -697,7 +697,10 @@ def select_grr_hyperparams(
     """Select Riesz hyper-parameters on the outer *training* sample only.
 
     The outer evaluation fold must not be passed here. Centers, standardization
-    and the inner split are all derived from ``X_train`` alone.
+    and the inner split are all derived from ``X_train`` alone. When ``m``
+    carries a binary ``treatment_index`` column, the inner split is stratified
+    on it -- the same policy as the outer cross-fitting (audit CV-13) -- and an
+    inner-training fold that still misses one group raises.
 
     With ``config.strict_nested=True`` (the default) the inner CV is a *strict*
     nested CV: within each inner fold the standardization, the ``"auto"`` sigma
@@ -750,7 +753,36 @@ def select_grr_hyperparams(
     if config.admissibility_thresholds:
         thr.update(config.admissibility_thresholds)
 
-    inner_folds = list(kfold_splits(n, folds=config.cv_folds, random_state=config.random_state))
+    # Inner splits follow the same stratification policy as the outer
+    # cross-fitting (audit CV-13): with a binary treatment column, plain
+    # K-fold can hand an inner fold zero treated units and the fold's metrics
+    # silently stop being comparable across candidates.
+    strat_labels: NDArray[np.float64] | None = None
+    t_idx = getattr(m, "treatment_index", None)
+    if isinstance(t_idx, (int, np.integer)) and 0 <= int(t_idx) < X_tr.shape[1]:
+        col = X_tr[:, int(t_idx)]
+        if is_binary_y(col) and np.any(col == 1.0) and np.any(col == 0.0):
+            strat_labels = col
+    if strat_labels is not None:
+        inner_folds = list(
+            stratified_kfold_splits(
+                strat_labels, folds=config.cv_folds, random_state=config.random_state
+            )
+        )
+        for fi, fold in enumerate(inner_folds):
+            d_itr = strat_labels[fold.train]
+            if not (np.any(d_itr == 1.0) and np.any(d_itr == 0.0)):
+                raise ValueError(
+                    f"Inner CV fold {fi}: the inner-training rows contain only "
+                    "one treatment group even after stratification (fewer "
+                    "units of one group than cv_folds). Reduce "
+                    f"cv_folds={config.cv_folds} or skip the Riesz inner CV "
+                    "for this sample."
+                )
+    else:
+        inner_folds = list(
+            kfold_splits(n, folds=config.cv_folds, random_state=config.random_state)
+        )
     n_folds = len(inner_folds)
     # Always probe kernel health when the basis supports it: it powers both the
     # degeneracy penalty (K) and the kernel-health admissibility band.

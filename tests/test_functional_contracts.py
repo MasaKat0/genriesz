@@ -205,3 +205,44 @@ def test_non_finite_null_fails_before_fitting():
     X, Y = _small_ate_data()
     with pytest.raises(ValueError, match="null must be finite"):
         grr_ate(X=X, Y=Y, basis=PolynomialBasis(degree=2), generator="sq", null=float("nan"))
+
+
+# ---------------------------------------------------------------------------
+# AME coordinate validation (audit N-05)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [0.9, -0.5, 1.0000001, -1])
+def test_non_integral_or_negative_ame_coordinate_is_rejected(bad):
+    # int(0.9) truncates to 0: the AME would be taken along the wrong column
+    # and the estimand itself would silently change.
+    from genriesz.functionals import AMEFunctional
+
+    with pytest.raises(ValueError, match="coordinate"):
+        AMEFunctional(coordinate=bad)
+
+
+def test_boolean_ame_coordinate_is_rejected():
+    # int(True) is 1 -- almost certainly a flag, not a column index.
+    from genriesz.functionals import AMEFunctional
+
+    with pytest.raises(ValueError, match="boolean"):
+        AMEFunctional(coordinate=True)
+
+
+def test_out_of_range_ame_coordinate_fails_before_fitting():
+    from genriesz import SquaredGenerator, grr_ame
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(50, 2))
+    Y = X[:, 0] + rng.normal(size=50)
+    with pytest.raises(ValueError, match="out of range"):
+        grr_ame(
+            X=X,
+            Y=Y,
+            coordinate=7,
+            basis=PolynomialBasis(degree=1, auto_fit=True),
+            generator=SquaredGenerator(C=0.0).as_generator(),
+            estimators=("rw",),
+            cross_fit=False,
+        )

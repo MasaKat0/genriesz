@@ -22,6 +22,7 @@ from genriesz.utils import (
     sigmoid,
     solve_stationarity,
     standardize_columns,
+    stratified_kfold_splits,
 )
 
 # Modules that used to carry private copies of the shared helpers, mapped to the
@@ -680,3 +681,66 @@ def test_solve_stationarity_solves_a_subnormal_system():
     np.testing.assert_allclose(
         solve_stationarity(np.array([[tiny]]), np.array([tiny])), [1.0]
     )
+
+
+# ---------------------------------------------------------------------------
+# Stratified cross-fitting splits (audit EST-07 / CV-13)
+# ---------------------------------------------------------------------------
+
+
+def test_stratified_kfold_splits_cover_and_balance_a_rare_treatment():
+    labels = np.array([1.0] * 3 + [0.0] * 37)
+    folds = list(stratified_kfold_splits(labels, folds=5, random_state=0))
+
+    # Partition property: every index appears in exactly one test fold.
+    all_test = np.sort(np.concatenate([f.test for f in folds]))
+    assert all_test.tolist() == list(range(40))
+    for f in folds:
+        assert np.intersect1d(f.train, f.test).size == 0
+
+    # Global fold sizes and per-stratum test counts differ by at most one.
+    sizes = [len(f.test) for f in folds]
+    assert max(sizes) - min(sizes) <= 1
+    treated_in_test = [int(np.sum(labels[f.test])) for f in folds]
+    assert max(treated_in_test) - min(treated_in_test) <= 1
+
+    # The point of stratification: with 3 treated units and 5 folds, plain
+    # K-fold can hand a training fold zero treated units; stratified folds
+    # keep both groups in every training fold.
+    for f in folds:
+        assert set(np.unique(labels[f.train])) == {0.0, 1.0}
+
+
+def test_stratified_kfold_splits_are_deterministic_and_validated():
+    labels = (np.arange(10) % 2).astype(float)
+    a = [
+        (f.train.tolist(), f.test.tolist())
+        for f in stratified_kfold_splits(labels, folds=3, random_state=1)
+    ]
+    b = [
+        (f.train.tolist(), f.test.tolist())
+        for f in stratified_kfold_splits(labels, folds=3, random_state=1)
+    ]
+    assert a == b
+
+    with pytest.raises(ValueError, match="folds must be <= n"):
+        list(stratified_kfold_splits(np.zeros(3), folds=4))
+    with pytest.raises(ValueError, match="folds must be an integer"):
+        list(stratified_kfold_splits(labels, folds=2.5))
+
+
+def test_stratified_kfold_splits_never_yield_an_empty_test_fold():
+    # Two strata of two units each with folds=4: a per-stratum array_split
+    # would leave two folds empty; the round-robin cursor may not.
+    labels = np.array([0.0, 0.0, 1.0, 1.0])
+    folds = list(stratified_kfold_splits(labels, folds=4, random_state=0))
+    assert [len(f.test) for f in folds] == [1, 1, 1, 1]
+
+
+def test_kfold_splits_reject_non_integral_counts():
+    # int(10.9) truncates to 10 and would silently drop the last observation
+    # from every fold (audit N-26).
+    with pytest.raises(ValueError, match="n must be an integer"):
+        list(kfold_splits(10.9, folds=3))
+    with pytest.raises(ValueError, match="folds must be an integer"):
+        list(kfold_splits(10, folds=3.9))
