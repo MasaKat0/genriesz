@@ -20,11 +20,13 @@ from genriesz import (
     grr_ate,
     select_grr_hyperparams,
 )
+from genriesz.basis import _median_pairwise_distance
 from genriesz.functionals import AMEFunctional, ATTFunctional
 from genriesz.glm import GRRGLM
 from genriesz.model_selection import (
     DEFAULT_LAM_GRID,
     DEFAULT_SIGMA_MULTIPLIERS,
+    _standardized,
     make_candidate_basis,
     normalize_grid,
     score_grr_candidate,
@@ -104,6 +106,178 @@ def test_selection_is_deterministic_function_of_training():
     r1 = select_grr_hyperparams(X_train=X, y_train=Y, **common)
     r2 = select_grr_hyperparams(X_train=X, y_train=Y, **common)
     assert (r1.sigma, r1.lam, r1.n_centers) == (r2.sigma, r2.lam, r2.n_centers)
+
+
+# ---------------------------------------------------------------------------
+# Strict nested CV (audit P0-05): no inner-validation row enters the feature map
+# that scores it -- centers and the median heuristic come from inner-training only
+# ---------------------------------------------------------------------------
+
+def _nested_common(**over):
+    base = dict(
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=60, sigma=1.0, random_state=0),
+        generator=SquaredGenerator(),
+        outcome_link="identity",
+    )
+    base.update(over)
+    return base
+
+
+def test_strict_nested_center_and_preprocess_disjoint_from_validation():
+    X, Y, _ = _make_ate(n=240, seed=3)
+    cfg = GRRCVConfig(
+        sigma_grid="auto", lam_grid=[1e-2], n_centers_grid=[40, 60], random_state=0
+    )
+    res = select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+
+    assert res.strict_nested is True
+    assert len(res.fold_provenance) == cfg.cv_folds
+    n = X.shape[0]
+    for prov in res.fold_provenance:
+        val = set(prov["validation_index"].tolist())
+        train = set(prov["preprocess_fit_index"].tolist())
+        centers = set(prov["center_index"].tolist())
+        # Centers are drawn from inner-training rows only.
+        assert centers  # a positive n_centers pool was selected
+        assert centers <= train
+        assert centers.isdisjoint(val)
+        # Preprocessing (standardization / median heuristic) is fit on the
+        # inner-training rows, which partition the training sample with the
+        # validation rows -- no overlap, and together they cover everything.
+        assert train.isdisjoint(val)
+        assert train | val == set(range(n))
+
+
+def test_strict_nested_training_feature_map_ignores_validation_rows():
+    # Perturbing an inner-validation row of a fold must not change that fold's
+    # inner-training feature map: its centers, their coordinates, and its "auto"
+    # bandwidth anchor are all functions of the inner-training rows alone.
+    X, Y, _ = _make_ate(n=240, seed=5)
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], n_centers_grid=[50], random_state=0)
+    res = select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+    prov0 = res.fold_provenance[0]
+    train0 = prov0["preprocess_fit_index"]
+    val0 = prov0["validation_index"]
+    centers0 = prov0["center_index"]
+
+    med0 = _median_pairwise_distance(_standardized(X[train0]), random_state=0)
+
+    X2 = X.copy()
+    X2[val0] += 1000.0  # blow up every fold-0 validation row
+
+    res2 = select_grr_hyperparams(X_train=X2, y_train=Y, config=cfg, **_nested_common())
+    prov0b = res2.fold_provenance[0]
+
+    # Same fold-0 center indices, and their coordinates are untouched (the
+    # perturbed rows are validation rows, never centers of their own fold).
+    assert np.array_equal(prov0b["center_index"], centers0)
+    assert np.array_equal(X2[centers0], X[centers0])
+    # The fold-0 bandwidth anchor (median over standardized inner-training) is
+    # unchanged, because it never reads the validation rows.
+    med0b = _median_pairwise_distance(_standardized(X2[train0]), random_state=0)
+    assert med0b == pytest.approx(med0)
+
+
+class _RecordingBasis:
+    """Wraps a basis and records the (X, y) every ``fit`` saw, for leakage tests.
+
+    Records live at class level so the copies ``make_candidate_basis`` produces
+    still report to the same list. Delegates everything else to the inner basis,
+    so a genuinely *supervised* fit (one that reads ``y``) is exercised too.
+    """
+
+    fits: list = []
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def fit(self, X, y=None):
+        Xa = np.asarray(X, dtype=float).copy()
+        ya = None if y is None else np.asarray(y, dtype=float).copy()
+        _RecordingBasis.fits.append((Xa, ya))
+        self._inner.fit(X, y)
+        return self
+
+    def __call__(self, X):
+        return self._inner(X)
+
+    def copy(self):
+        return _RecordingBasis(self._inner.copy())
+
+    def __getattr__(self, name):
+        inner = self.__dict__.get("_inner")
+        if inner is None:
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
+def test_strict_nested_supervised_basis_fits_on_inner_training_only():
+    # A supervised basis (whose fit reads y) must never see an inner-validation
+    # row -- not in X and not in y. score_grr_candidate always fits on the fold's
+    # inner-training slice, so the recorded fit rows equal X[train]/y[train].
+    X, Y, _ = _make_ate(n=200, seed=7)
+    n = X.shape[0]
+    idx = np.arange(n)
+    fold = Fold(train=idx[: 3 * n // 4], test=idx[3 * n // 4 :])
+
+    _RecordingBasis.fits = []
+    template = _RecordingBasis(PolynomialBasis(degree=2))
+    row = score_grr_candidate(
+        X_train=X,
+        y_train=Y,
+        m=ATEFunctional(0),
+        template_basis=template,  # lambda-only CV -> make_candidate_basis uses copy()
+        generator=SquaredGenerator(),
+        sigma=None,
+        lam=1e-2,
+        centers=None,
+        inner_folds=[fold],
+        riesz_penalty="l2",
+        riesz_p_norm=None,
+        outcome_link="identity",
+        outcome_penalty="l2",
+        outcome_lam=1e-3,
+        max_iter=500,
+        tol=1e-8,
+        want_kernel=False,
+    )
+    assert row["success"]
+    assert _RecordingBasis.fits  # the basis was fit at least once
+    for Xf, yf in _RecordingBasis.fits:
+        assert np.array_equal(Xf, X[fold.train])  # never the validation rows
+        assert yf is not None and np.array_equal(yf, Y[fold.train])
+
+
+def test_outer_fixed_feature_map_leaks_and_is_recorded():
+    # strict_nested=False restores the older shared feature map: centers are drawn
+    # from the whole outer-training fold, so they land in inner-validation folds
+    # (the leak), and the preprocessing is fit on all rows. The result records the
+    # non-strict choice, and selection still works.
+    X, Y, _ = _make_ate(n=240, seed=9)
+    n = X.shape[0]
+    cfg = GRRCVConfig(
+        sigma_grid="auto",
+        lam_grid=[1e-2],
+        n_centers_grid=[60],
+        strict_nested=False,
+        random_state=0,
+    )
+    res = select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+
+    assert res.strict_nested is False
+    assert np.isfinite(res.best_score)
+    # The single global center pool is shared across folds; summed over the folds
+    # (whose validation sets partition the sample) it lands entirely inside some
+    # validation fold -- the leak the strict path removes.
+    total_leaked = 0
+    for prov in res.fold_provenance:
+        val = set(prov["validation_index"].tolist())
+        centers = set(prov["center_index"].tolist())
+        total_leaked += len(centers & val)
+        # Preprocessing is fit on the whole outer-training fold, incl. validation.
+        assert set(prov["preprocess_fit_index"].tolist()) == set(range(n))
+    assert total_leaked == 60  # every center falls in exactly one fold's val set
 
 
 # ---------------------------------------------------------------------------

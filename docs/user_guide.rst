@@ -448,6 +448,18 @@ behaviour:
    )
    print(res.diagnostics["riesz_cv"]["selected"])   # per-fold sigma/lambda/centers
 
+The inner CV is a **strict nested** CV by default (``riesz_strict_nested=True``):
+inside each inner fold the standardization, the ``"auto"`` bandwidth median
+heuristic and the kernel-center pool are all fit on that fold's *inner-training*
+rows only, so no inner-validation observation ever enters the feature map that
+scores it.  The selected candidate is then refit on the whole outer-training fold
+(its bandwidth reported at the outer-training median, its centers reselected from
+the outer-training rows).  Set ``riesz_strict_nested=False`` for the cheaper
+*outer-fixed feature map*, which fits the centers and median heuristic once on the
+whole outer-training fold and shares them across the inner folds — faster, but it
+leaks each inner fold's validation rows into its own scoring feature map; the
+choice is recorded on :attr:`genriesz.GRRCVResult.strict_nested`.
+
 Selection is two-stage.  A candidate must first pass an **admissibility screen**
 (optimizer success, an effective-sample-size floor, a scale-free *kernel-health
 band* that rejects both collapsed and saturated bandwidths, and any thresholds
