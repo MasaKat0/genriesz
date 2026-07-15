@@ -31,6 +31,22 @@ from .basis import Basis
 from .utils import as_2d
 
 
+def _validate_treatment_index_arg(treatment_index: object) -> int:
+    """Coerce ``treatment_index`` to a non-negative integer column index.
+
+    ``int(-0.5)`` truncates to 0 and would silently point at the first column,
+    so non-integral values are rejected rather than rounded.
+    """
+
+    idx = int(treatment_index)  # type: ignore[call-overload]
+    if idx != treatment_index or idx < 0:
+        raise ValueError(
+            "treatment_index must be a non-negative integer column index. "
+            f"Got {treatment_index!r}."
+        )
+    return idx
+
+
 def _check_treatment_index(X: NDArray[np.float64], treatment_index: int) -> None:
     """Require ``0 <= treatment_index < X.shape[1]``.
 
@@ -212,12 +228,9 @@ class ATEFunctional(LinearFunctional):
     treatment_index: int = 0
 
     def __init__(self, treatment_index: int = 0):
-        if int(treatment_index) < 0:
-            raise ValueError(
-                f"treatment_index must be a non-negative column index. Got {treatment_index!r}."
-            )
+        idx = _validate_treatment_index_arg(treatment_index)
         super().__init__(name="ATE")
-        object.__setattr__(self, "treatment_index", int(treatment_index))
+        object.__setattr__(self, "treatment_index", idx)
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -262,10 +275,7 @@ class ATTFunctional(LinearFunctional):
     pi_is_estimated: bool = False
 
     def __init__(self, *, treatment_index: int = 0, pi: float, pi_is_estimated: bool = False):
-        if int(treatment_index) < 0:
-            raise ValueError(
-                f"treatment_index must be a non-negative column index. Got {treatment_index!r}."
-            )
+        idx = _validate_treatment_index_arg(treatment_index)
         if not np.isfinite(pi) or not 0.0 < pi <= 1.0:
             # pi is a probability E[D]; a value above 1 would silently rescale
             # the functional rather than fail.
@@ -277,7 +287,7 @@ class ATTFunctional(LinearFunctional):
                 "identified."
             )
         super().__init__(name="ATT")
-        object.__setattr__(self, "treatment_index", int(treatment_index))
+        object.__setattr__(self, "treatment_index", idx)
         object.__setattr__(self, "pi", float(pi))
         object.__setattr__(self, "pi_is_estimated", bool(pi_is_estimated))
 

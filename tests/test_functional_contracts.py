@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from genriesz import PolynomialBasis, grr_ate
+from genriesz import PolynomialBasis, grr_ate, grr_att
 from genriesz.functionals import ATEFunctional, ATTFunctional, DIDFunctional
 
 
@@ -75,6 +75,36 @@ def test_m_from_predictor_rejects_ambiguous_prediction_shapes(bad_shape):
             m.m_from_predictor(X, lambda Z: bad_shape(Z[:, 1] * 1.0))
 
 
+def test_did_m_from_predictor_accepts_column_predictions():
+    X = _make_x()
+    m = DIDFunctional(treatment_index=0, pi=0.5)
+
+    def gamma(Z: np.ndarray) -> np.ndarray:
+        return Z[:, 0] * 3.0 + Z[:, 1]
+
+    flat = m.m_from_predictor(X, gamma)
+    col = m.m_from_predictor(X, lambda Z: gamma(Z).reshape(-1, 1))
+    assert col.shape == (X.shape[0],)
+    np.testing.assert_allclose(col, flat)
+
+
+def test_m_from_predictor_handles_a_single_observation():
+    # With n = 1 the column form (1, 1) is still unambiguous; a scalar is not.
+    X = np.array([[1.0, 0.3]])
+    functionals = (
+        ATEFunctional(treatment_index=0),
+        ATTFunctional(treatment_index=0, pi=0.5),
+        DIDFunctional(treatment_index=0, pi=0.5),
+    )
+    for m in functionals:
+        flat = m.m_from_predictor(X, lambda Z: Z[:, 1] * 2.0)
+        col = m.m_from_predictor(X, lambda Z: (Z[:, 1] * 2.0).reshape(-1, 1))
+        assert flat.shape == (1,) and col.shape == (1,)
+        np.testing.assert_allclose(col, flat)
+        with pytest.raises(ValueError, match="must return an array of shape"):
+            m.m_from_predictor(X, lambda Z: np.float64(2.0))
+
+
 # ---------------------------------------------------------------------------
 # treatment_index / pi validation
 # ---------------------------------------------------------------------------
@@ -85,6 +115,16 @@ def test_negative_treatment_index_is_rejected(cls):
     kwargs = {} if cls is ATEFunctional else {"pi": 0.5}
     with pytest.raises(ValueError, match="non-negative"):
         cls(treatment_index=-1, **kwargs)
+
+
+@pytest.mark.parametrize("cls", [ATEFunctional, ATTFunctional, DIDFunctional])
+@pytest.mark.parametrize("bad_index", [-0.5, 0.5])
+def test_non_integral_treatment_index_is_rejected(cls, bad_index):
+    # int(-0.5) truncates to 0, so a sign check alone would accept it and
+    # silently point at the first column.
+    kwargs = {} if cls is ATEFunctional else {"pi": 0.5}
+    with pytest.raises(ValueError, match="integer"):
+        cls(treatment_index=bad_index, **kwargs)
 
 
 def test_out_of_range_treatment_index_is_a_clear_error():
@@ -123,6 +163,16 @@ def _small_ate_data(n: int = 60, seed: int = 0):
     X = np.column_stack([D, Z])
     Y = D + Z + rng.normal(size=n)
     return X, Y
+
+
+def test_wrappers_reject_out_of_range_treatment_index():
+    # The public wrappers index into X before the functional is ever applied,
+    # so they need the same range check (a bare IndexError otherwise).
+    X, Y = _small_ate_data()  # 2 columns
+    with pytest.raises(ValueError, match="out of range"):
+        grr_ate(X=X, Y=Y, basis=PolynomialBasis(degree=2), generator="sq", treatment_index=5)
+    with pytest.raises(ValueError, match="out of range"):
+        grr_att(X=X, Y=Y, basis=PolynomialBasis(degree=2), generator="sq", treatment_index=5)
 
 
 def test_empty_estimators_tuple_is_rejected():

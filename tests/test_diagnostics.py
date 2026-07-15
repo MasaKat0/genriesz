@@ -16,6 +16,7 @@ import pytest
 from genriesz import (
     ATEFunctional,
     GaussianRKHSBasis,
+    PolynomialBasis,
     SquaredGenerator,
     bias_proxy,
     coverage_decomposition,
@@ -130,6 +131,50 @@ def test_grr_reports_held_out_imbalance_and_bias_diagnostics():
     assert b["outcome_tag"] == "shared"
     # std_bias = b_hat / se of the primary (ARW) estimate.
     assert b["std_bias"] == pytest.approx(b["b_hat"] / res.arw.se)
+
+
+def test_bias_diagnostics_with_separate_outcome_basis_depend_on_predictions_only():
+    """P0-04: the directional term must not pair coordinates across bases.
+
+    With ``outcome_models='separate'`` and an outcome basis of coincidentally
+    equal column count, the Riesz-span ``Delta`` used to be dotted with the
+    separate-basis ``theta``. Rescaling the outcome basis columns leaves the
+    predictions (hence the true second-order term) unchanged while rescaling
+    ``theta`` inversely -- so any coordinate-pairing implementation moves with
+    the scale, and the prediction-based one does not. The cross-basis
+    Cauchy-Schwarz bound has no meaning at all, so it must be NaN.
+    """
+
+    X, Y, _ = _make_synthetic_ate(n=300, d=3, seed=4)
+
+    def feats(Z):
+        Z = np.asarray(Z, dtype=float)
+        return np.column_stack([np.ones(len(Z)), Z])
+
+    def feats_scaled(Z):
+        return 1000.0 * feats(Z)
+
+    common = dict(
+        X=X,
+        Y=Y,
+        m=ATEFunctional(treatment_index=0),
+        basis=PolynomialBasis(degree=1, include_bias=True),  # same column count as feats
+        generator=SquaredGenerator(),
+        riesz_lam=1e-3,
+        outcome_models="separate",
+        outcome_lam=1e-10,
+        estimators=("arw",),
+        folds=3,
+        random_state=0,
+    )
+    b_plain = grr_functional(outcome_basis=feats, **common).diagnostics["bias"]
+    b_scaled = grr_functional(outcome_basis=feats_scaled, **common).diagnostics["bias"]
+
+    assert b_plain["outcome_tag"] == "separate"
+    assert np.isfinite(b_plain["b_hat"]) and b_plain["b_hat"] >= 0
+    assert b_plain["b_hat"] == pytest.approx(b_scaled["b_hat"], rel=1e-6)
+    assert np.isnan(b_plain["b_bound"])
+    assert "b_bound_unavailable_reason" in b_plain
 
 
 def test_tiny_bandwidth_underfitting_is_visible():
