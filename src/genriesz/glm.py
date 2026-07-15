@@ -69,6 +69,10 @@ class FitResult:
     ----------
     beta, success, message, n_iter:
         Solution, optimizer success flag, optimizer message, iteration count.
+        On the ``"singular"`` and ``"domain_error"`` failure paths no solution
+        was ever computed: ``beta`` then holds the initial point (for shape
+        introspection only) and the model itself stays unpredictable
+        (``beta_ is None``).
     status:
         One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
         ``"domain_error"``, ``"domain_error_at_solution"``, ``"singular"``

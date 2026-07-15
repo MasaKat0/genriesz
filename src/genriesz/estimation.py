@@ -873,6 +873,17 @@ def grr_functional(
             mu = mu_obs[tag]
             m_mu_tag = m_mu[tag]
 
+            # m(gamma_hat) is NaN when the functional could not be applied to the
+            # outcome model (m_from_function raised NotImplementedError above).
+            # RA/ARW would then propagate NaN into se_ci_pvalue, which rejects a
+            # non-finite estimate with a message that does not name the cause.
+            if any(e in ests for e in ("ra", "arw")) and not np.all(np.isfinite(m_mu_tag)):
+                raise RuntimeError(
+                    "RA/ARW require applying the functional m to the outcome "
+                    "regression, and m(gamma_hat) is not finite for this "
+                    "functional / outcome-model combination."
+                )
+
             if "ra" in ests:
                 theta_ra = float(np.mean(m_mu_tag))
                 psi_ra = m_mu_tag - theta_ra
