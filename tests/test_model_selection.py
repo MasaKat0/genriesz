@@ -1047,5 +1047,19 @@ def test_inner_cv_with_a_single_treated_unit_raises():
     # fail loudly rather than run through.
     X, Y = _make_rare_ate(n_treated=1)
     cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=3, random_state=0)
-    with pytest.raises(ValueError, match="cv_folds"):
+    with pytest.raises(ValueError, match="single unit"):
         select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())
+
+
+def test_inner_cv_rejects_a_single_group_binary_sample():
+    # A binary treatment column with only one group must not silently fall
+    # back to a plain, unchecked K-fold: every inner-training fold would be
+    # single-group, which is exactly what the stratified guard rejects.
+    rng = np.random.default_rng(0)
+    Z = rng.normal(size=(40, 3))
+    Y = Z[:, 0] + rng.normal(size=40)
+    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=3, random_state=0)
+    for d_value in (1.0, 0.0):
+        X = np.column_stack([np.full(40, d_value), Z])
+        with pytest.raises(ValueError, match="single-group"):
+            select_grr_hyperparams(X_train=X, y_train=Y, config=cfg, **_nested_common())

@@ -536,7 +536,14 @@ def stratified_kfold_splits(
         Whether to shuffle indices within each stratum before splitting.
     """
 
-    labels_ = np.asarray(labels).reshape(-1)
+    labels_ = np.asarray(labels)
+    if labels_.ndim != 1:
+        raise ValueError(f"labels must be a 1-d array. Got shape {labels_.shape}.")
+    # NaN compares unequal to everything, including itself: a NaN label would
+    # match no stratum and its index would silently drop out of every test
+    # fold, breaking the exactly-once partition contract.
+    if np.issubdtype(labels_.dtype, np.floating) and not np.isfinite(labels_).all():
+        raise ValueError("labels must be finite (no NaN/inf).")
     n = labels_.shape[0]
     folds = _as_integral_count("folds", folds)
     if n < 2:

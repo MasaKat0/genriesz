@@ -744,3 +744,13 @@ def test_kfold_splits_reject_non_integral_counts():
         list(kfold_splits(10.9, folds=3))
     with pytest.raises(ValueError, match="folds must be an integer"):
         list(kfold_splits(10, folds=3.9))
+
+
+def test_stratified_kfold_splits_reject_nan_labels_and_2d_labels():
+    # NaN compares unequal to every stratum value, so a NaN label's index
+    # would silently drop out of every test fold.
+    labels = np.array([0.0, 1.0, np.nan, 0.0])
+    with pytest.raises(ValueError, match="finite"):
+        list(stratified_kfold_splits(labels, folds=2))
+    with pytest.raises(ValueError, match="1-d"):
+        list(stratified_kfold_splits(np.zeros((4, 2)), folds=2))

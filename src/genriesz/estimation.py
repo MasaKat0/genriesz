@@ -584,9 +584,10 @@ def grr_functional(
     # A training fold without both groups cannot fit a treatment-type Riesz
     # representer: the closed form would return beta = 0 as a "successful" fit
     # and the fold's scores would silently die (audit EST-07 / K-01).
-    # Stratified folds avoid this whenever the counts allow; when they cannot
-    # (fewer treated units than folds), fail loud -- and before any fold is
-    # fitted, since the splits are already fixed here.
+    # Stratified folds avoid this whenever the counts allow -- a group of >= 2
+    # units always leaves at least one in every training fold -- so under the
+    # default it fires only for a single-unit group. Fail loud, and before any
+    # fold is fitted, since the splits are already fixed here.
     if is_treatment_functional:
         t_idx_m = getattr(m, "treatment_index", 0)
         for fold_id_, fold_ in enumerate(splits):
@@ -598,8 +599,12 @@ def grr_functional(
                     f"Cross-fitting fold {fold_id_}: the training fold contains "
                     f"{n_tr_treated} treated and {n_tr_control} control "
                     "unit(s). A treatment-type Riesz representer cannot be "
-                    "fitted without both groups; reduce `folds` or collect "
-                    "more units of the missing group."
+                    "fitted without both groups. With stratified folds (the "
+                    "default) this only happens when a group has a single "
+                    "unit, so no fold count avoids it: collect more units of "
+                    "that group or set cross_fit=False. With "
+                    "stratify_folds=False, prefer the stratified default (or "
+                    "fewer folds)."
                 )
 
     # Storage for nuisances (cross-fit predictions)

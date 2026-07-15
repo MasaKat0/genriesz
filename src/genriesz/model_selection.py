@@ -761,7 +761,18 @@ def select_grr_hyperparams(
     t_idx = getattr(m, "treatment_index", None)
     if isinstance(t_idx, (int, np.integer)) and 0 <= int(t_idx) < X_tr.shape[1]:
         col = X_tr[:, int(t_idx)]
-        if is_binary_y(col) and np.any(col == 1.0) and np.any(col == 0.0):
+        if is_binary_y(col):
+            # A single-group binary sample must not silently fall back to a
+            # plain (unchecked) K-fold: every inner-training fold would be
+            # single-group too, exactly what this guard exists to reject.
+            if not (np.any(col == 1.0) and np.any(col == 0.0)):
+                raise ValueError(
+                    "The treatment column is binary but contains only one "
+                    f"group ({int(np.sum(col == 1.0))} treated, "
+                    f"{int(np.sum(col == 0.0))} control): a treatment-type "
+                    "Riesz representer cannot be cross-validated on a "
+                    "single-group sample."
+                )
             strat_labels = col
     if strat_labels is not None:
         inner_folds = list(
@@ -774,10 +785,10 @@ def select_grr_hyperparams(
             if not (np.any(d_itr == 1.0) and np.any(d_itr == 0.0)):
                 raise ValueError(
                     f"Inner CV fold {fi}: the inner-training rows contain only "
-                    "one treatment group even after stratification (fewer "
-                    "units of one group than cv_folds). Reduce "
-                    f"cv_folds={config.cv_folds} or skip the Riesz inner CV "
-                    "for this sample."
+                    "one treatment group. With the stratified inner split this "
+                    "only happens when a group has a single unit, so no fold "
+                    "count avoids it: collect more units of that group or "
+                    "skip the Riesz inner CV for this sample."
                 )
     else:
         inner_folds = list(
