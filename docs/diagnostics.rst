@@ -308,8 +308,10 @@ is supplied, the per-outer-fold selection is recorded:
      - Description
    * - ``"riesz_cv"``
      - Dict with ``selected`` (per-fold ``sigma``/``lam``/``n_centers``,
-       ``n_admissible``, ``best_score``) and, when
-       ``return_riesz_cv_path=True``, the full candidate ``path`` per fold.
+       ``n_admissible``, ``best_score``), ``strict_nested`` (whether the inner CV
+       fit its preprocessing per inner fold — the leakage-free default — or shared
+       an outer-fixed feature map), and, when ``return_riesz_cv_path=True``, the
+       full candidate ``path`` per fold.
    * - ``"riesz_cv_selection_score"``
      - The selection criterion used (default ``"bias_variance"``; also
        ``"bregman_validation"``, ``"squared_loss_validation"``, and

@@ -320,6 +320,7 @@ def grr_functional(
     riesz_sigma_grid: object | None = None,
     riesz_n_centers_grid: object | None = None,
     riesz_cv_folds: int = 3,
+    riesz_strict_nested: bool = True,
     riesz_selection_score: str = "bias_variance",
     riesz_admissibility_thresholds: dict | None = None,
     return_riesz_cv_path: bool = False,
@@ -385,6 +386,14 @@ def grr_functional(
         and the number of centers stay at the basis' own values. The inner CV
         runs only when at least one grid is supplied, and only on the outer
         training fold.
+    riesz_strict_nested:
+        If True (default), the inner Riesz CV standardizes, resolves the
+        ``"auto"`` bandwidth and picks kernel centers on each inner fold's
+        inner-training rows only, so no inner-validation observation enters the
+        feature map that scores it (audit P0-05). If False, use the older
+        outer-fixed feature map (centers and median heuristic shared across inner
+        folds): cheaper, but it leaks each fold's validation rows into its own
+        scoring feature map.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link.
@@ -558,6 +567,7 @@ def grr_functional(
         lam_grid=riesz_lam_grid,
         n_centers_grid=riesz_n_centers_grid,
         cv_folds=riesz_cv_folds,
+        strict_nested=riesz_strict_nested,
         selection_score=riesz_selection_score,
         admissibility_thresholds=riesz_admissibility_thresholds,
         return_path=return_riesz_cv_path,
@@ -606,6 +616,12 @@ def grr_functional(
                     overrides["sigma"] = sel.sigma
                 if sel.n_centers is not None:
                     overrides["n_centers"] = sel.n_centers
+                    # Drop any fixed centers the basis was built with so the outer
+                    # refit reselects ``n_centers`` from this outer-training fold.
+                    # Otherwise ``copy_with_params`` keeps the original centers and
+                    # silently ignores the selected count (the refit feature map
+                    # would not match the ``n_centers`` the CV scored).
+                    overrides["centers"] = None
                 if overrides:
                     basis_r = basis.copy_with_params(**overrides).fit(X_tr, y_tr)
                 else:
@@ -995,7 +1011,10 @@ def grr_functional(
 
     # Inner Riesz CV selections (item C), per outer fold.
     if riesz_cv_selected:
-        cv_diag: dict[str, object] = {"selected": riesz_cv_selected}
+        cv_diag: dict[str, object] = {
+            "selected": riesz_cv_selected,
+            "strict_nested": bool(riesz_cv_config.strict_nested),
+        }
         if return_riesz_cv_path and riesz_cv_paths:
             cv_diag["path"] = riesz_cv_paths
         diagnostics["riesz_cv"] = cv_diag

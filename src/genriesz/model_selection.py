@@ -9,8 +9,19 @@ Design principles (see ``doc/coverage_failure_improvement_design_revised.md``):
 - ``select_grr_hyperparams`` receives the outer *training* sample only. It never
   sees the outer evaluation fold (no leakage of centers, standardization, or
   selection).
-- Kernel centers are chosen from the outer training fold and shared across
-  candidates that differ only in ``sigma`` (fair comparison).
+- Strict nested CV (``GRRCVConfig.strict_nested=True``, the default): inside each
+  *inner* fold every preprocessing step -- standardization, the ``"auto"`` sigma
+  median heuristic, kernel-center selection, and the supervised basis fit -- is
+  derived from that fold's *inner-training* rows alone. The inner-validation rows
+  only ever *evaluate* the already-fitted feature map, so no inner-validation
+  observation enters the feature map that scores it. The selected candidate is
+  then refit on the whole outer-training fold (bandwidth reported at the
+  outer-training median; ``n_centers`` reselected from the outer-training rows).
+- ``strict_nested=False`` restores the older *outer-fixed feature map*: centers
+  and the sigma median heuristic are computed once on the whole outer-training
+  fold and shared across the inner folds. This is cheaper but leaks each inner
+  fold's validation rows into the feature map that scores them; it is recorded on
+  the result (``GRRCVResult.strict_nested``) and is not the default.
 - Selection is two-stage: an *admissibility* screen (optimizer success, effective
   sample size, cap binding, ...) followed by a *criterion* minimization
   (default ``bias_variance``: ``B^2 + V/n + tau_R R + tau_K K``).
@@ -92,6 +103,21 @@ class GRRCVConfig:
         penalty at the value the estimator was given.
     cv_folds:
         Number of inner folds.
+    strict_nested:
+        If True (default), run *strict* nested CV: within each inner fold the
+        standardization, the ``"auto"`` sigma median heuristic, the kernel-center
+        pool, and the supervised basis fit are all derived from that fold's
+        inner-training rows only, so no inner-validation observation enters the
+        feature map that scores it (design section 3.4, audit P0-05). If False,
+        use the older *outer-fixed feature map*: centers and the median heuristic
+        are computed once on the whole outer-training fold and shared across inner
+        folds -- cheaper, but the inner-validation rows leak into their own
+        scoring feature map. The choice is recorded on
+        :class:`GRRCVResult.strict_nested`. The guarantee covers the CV-selected
+        centers and the standardization / median heuristic; *fixed* centers passed
+        explicitly on the basis (``GaussianRKHSBasis(centers=...)``) are the
+        caller's own choice and are used as given when ``n_centers_grid`` is not
+        cross-validated.
     selection_score:
         One of ``"bias_variance"`` (default), ``"bregman_validation"``,
         ``"squared_loss_validation"``, ``"imbalance_validation"``.
@@ -133,6 +159,10 @@ class GRRCVConfig:
     tau_K: float = 1e-3
     return_path: bool = False
     random_state: int | None = 0
+    # Keyword-only so adding it leaves the positional signature and
+    # ``__match_args__`` of the previous release intact (a 5th positional still
+    # means ``selection_score``, not ``strict_nested``).
+    strict_nested: bool = field(default=True, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.selection_score not in SELECTION_SCORES:
@@ -158,6 +188,19 @@ class GRRCVResult:
     then a target-sensitivity analysis over the bounded target, not a selection
     over the original one. It is keyword-only so that adding it leaves the
     positional signature and ``__match_args__`` of the previous release intact.
+
+    ``strict_nested`` records whether the inner CV used strict nested
+    preprocessing (per-fold centers and median heuristic; the default) or the
+    older outer-fixed feature map (audit P0-05). ``fold_provenance`` holds, per
+    inner fold, the ``validation_index`` (inner-validation rows), the
+    ``preprocess_fit_index`` (rows the standardization / median / center pool were
+    fit on) and the ``center_index`` (global rows in the ``max(n_centers_grid)``
+    center pool; a candidate with a smaller ``n_centers`` uses a prefix of it, and
+    it is empty when the basis selects its own centers). Under strict nested CV the
+    center and preprocess indices are disjoint from the validation index (so is any
+    prefix); under the outer-fixed feature map they overlap it (the honest record
+    of the leak). Both fields are keyword-only to keep the
+    positional signature and ``__match_args__`` intact.
     """
 
     sigma: float | None
@@ -169,6 +212,12 @@ class GRRCVResult:
     n_candidates: int
     path: list[dict] = field(default_factory=list)
     modifies_estimand: bool = field(default=False, kw_only=True)
+    strict_nested: bool = field(default=True, kw_only=True)
+    # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
+    # would make dataclass equality raise a truth-value ``ValueError``. Provenance
+    # is diagnostic metadata, not identity, so two results with equal scalar
+    # fields still compare equal.
+    fold_provenance: list[dict] = field(default_factory=list, kw_only=True, compare=False)
 
 
 def _effective_sample_size(w: NDArray[np.float64]) -> float:
@@ -235,16 +284,33 @@ def normalize_grid(
     raise ValueError(f"Unknown grid kind: {kind}")
 
 
+def _select_center_indices(
+    index_pool: NDArray[np.int_], *, n_centers: int, random_state: int | None = 0
+) -> NDArray[np.int_]:
+    """Pick up to ``n_centers`` global row indices from ``index_pool``.
+
+    ``index_pool`` holds the *global* row indices a fold is allowed to draw
+    centers from (its inner-training rows under strict nested CV, or all training
+    rows for the outer-fixed feature map). Selecting on the pool -- rather than on
+    the full sample -- is what keeps inner-validation rows out of the feature map.
+    """
+
+    pool = np.asarray(index_pool, dtype=int)
+    n = pool.shape[0]
+    m = min(int(n_centers), n)
+    rng = np.random.default_rng(random_state)
+    return pool[rng.choice(n, size=m, replace=False)]
+
+
 def select_kernel_centers(
     X_train: NDArray[np.float64], *, n_centers: int, random_state: int | None = 0
 ) -> NDArray[np.float64]:
     """Select up to ``n_centers`` center rows from the outer training fold."""
 
     X_train = np.asarray(X_train, dtype=float)
-    n = X_train.shape[0]
-    m = min(int(n_centers), n)
-    rng = np.random.default_rng(random_state)
-    idx = rng.choice(n, size=m, replace=False)
+    idx = _select_center_indices(
+        np.arange(X_train.shape[0]), n_centers=n_centers, random_state=random_state
+    )
     return X_train[idx]
 
 
@@ -282,9 +348,9 @@ def score_grr_candidate(
     m: LinearFunctional,
     template_basis: Basis,
     generator: BregmanGenerator,
-    sigma: float | None,
+    sigma: float | None | list[float | None],
     lam: float,
-    centers: NDArray[np.float64] | None,
+    centers: NDArray[np.float64] | None | list[NDArray[np.float64] | None],
     inner_folds: list[Fold],
     riesz_penalty: str | None,
     riesz_p_norm: float | None,
@@ -297,6 +363,14 @@ def score_grr_candidate(
     want_squared_loss: bool = False,
 ) -> dict:
     """Evaluate one candidate over the inner folds and aggregate diagnostics.
+
+    ``sigma`` and ``centers`` may each be a single value (used for every inner
+    fold -- the outer-fixed feature map) or a *list aligned with* ``inner_folds``
+    (strict nested CV, where the caller resolves a per-fold bandwidth from the
+    inner-training median and a per-fold center pool from the inner-training rows).
+    The returned ``sigma``/``n_centers`` fields are meaningful only for the single
+    value case; for per-fold lists the caller overrides them with the candidate's
+    outer-training resolution.
 
     ``want_squared_loss`` turns on the generator-agnostic squared-loss (LSIF)
     validation risk (only meaningful when it is the selected score). A candidate
@@ -318,12 +392,17 @@ def score_grr_candidate(
     kernel_medians: list[float] = []
     all_success = True
 
-    for fold in inner_folds:
+    for fi, fold in enumerate(inner_folds):
         itr, iva = fold.train, fold.test
         X_itr, y_itr = X_train[itr], y_train[itr]
         X_iva, y_iva = X_train[iva], y_train[iva]
 
-        cb = make_candidate_basis(template_basis, sigma=sigma, centers=centers)
+        # Per-fold bandwidth / centers under strict nested CV (lists aligned with
+        # ``inner_folds``); a single value is the outer-fixed feature map.
+        sigma_f = sigma[fi] if isinstance(sigma, list) else sigma
+        centers_f = centers[fi] if isinstance(centers, list) else centers
+
+        cb = make_candidate_basis(template_basis, sigma=sigma_f, centers=centers_f)
         cb.fit(X_itr, y_itr)
 
         grr = GRRGLM(
@@ -454,10 +533,19 @@ def score_grr_candidate(
         else float("nan")
     )
 
+    # For per-fold (list) sigma/centers the representative value is ambiguous, so
+    # the caller overrides these with the candidate's outer-training resolution.
+    if isinstance(sigma, list):
+        rep_sigma: float | None = float("nan")
+    else:
+        rep_sigma = None if sigma is None else float(sigma)
+    rep_ncenters = (
+        None if isinstance(centers, list) or centers is None else int(centers.shape[0])
+    )
     return {
-        "sigma": None if sigma is None else float(sigma),
+        "sigma": rep_sigma,
         "lam": float(lam),
-        "n_centers": None if centers is None else int(centers.shape[0]),
+        "n_centers": rep_ncenters,
         "success": bool(all_success and imbalances),
         "modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "bregman_validation": _nanmean(risks),
@@ -549,6 +637,46 @@ def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> 
     return float(b * b + v / max(n, 1) + tau_R * r + tau_K * k)
 
 
+def _positive_median(value: float) -> float:
+    """Return ``value`` if it is a usable bandwidth anchor, else ``1.0``.
+
+    A degenerate inner fold (identical inner-training rows) yields a zero or NaN
+    median; ``value * multiplier`` would then be ``0`` and make the Gaussian basis
+    raise. The fallback is a fixed ``1.0`` -- the same degenerate fallback
+    ``GaussianRKHSBasis(sigma="auto")`` uses -- and crucially *not* the
+    outer-training median, which would read that fold's validation rows and
+    reintroduce the leakage strict nested CV removes.
+    """
+
+    return float(value) if np.isfinite(value) and value > 0 else 1.0
+
+
+def _sigma_candidate_specs(
+    spec: object, *, global_median: float
+) -> list[tuple[str, float | None]]:
+    """Sigma candidates as ``(mode, value)`` pairs.
+
+    ``mode`` is ``"none"`` (keep the basis' own bandwidth), ``"abs"`` (an explicit
+    value used verbatim in every inner fold) or ``"mult"`` (a multiplier of the
+    median heuristic, from the ``"auto"`` grid). Unlike :func:`normalize_grid`,
+    which freezes ``"auto"`` into ``median * multiplier`` values up front, the
+    multiplier is kept symbolic so strict nested CV can re-anchor it on each inner
+    fold's own inner-training median (audit P0-05).
+    """
+
+    if spec is None:
+        return [("none", None)]
+    if isinstance(spec, str):
+        if spec.lower() != "auto":
+            raise ValueError("sigma_grid string must be 'auto'")
+        if not np.isfinite(global_median) or global_median <= 0:
+            raise ValueError("sigma_grid='auto' needs a positive median distance")
+        return [("mult", float(mult)) for mult in DEFAULT_SIGMA_MULTIPLIERS]
+    if np.isscalar(spec):
+        return [("abs", float(spec))]  # type: ignore[arg-type]
+    return [("abs", float(s)) for s in spec]  # type: ignore[union-attr]
+
+
 def select_grr_hyperparams(
     *,
     X_train: ArrayLike,
@@ -571,6 +699,16 @@ def select_grr_hyperparams(
     The outer evaluation fold must not be passed here. Centers, standardization
     and the inner split are all derived from ``X_train`` alone.
 
+    With ``config.strict_nested=True`` (the default) the inner CV is a *strict*
+    nested CV: within each inner fold the standardization, the ``"auto"`` sigma
+    median heuristic and the kernel-center pool are all fit on that fold's
+    inner-training rows, so an inner-validation observation never enters the
+    feature map that scores it (audit P0-05). The returned ``sigma``/``n_centers``
+    describe the selected candidate at the *outer-training* resolution -- the
+    values it is refit with on the whole ``X_train`` -- and ``fold_provenance``
+    records the per-fold indices for leakage tests. ``config.strict_nested=False``
+    keeps the older outer-fixed feature map.
+
     ``riesz_lam`` is the penalty used to fit each scored candidate and, when
     ``config.lam_grid is None``, the sole lambda candidate -- so the returned
     ``lam`` is then ``riesz_lam`` itself.
@@ -588,14 +726,14 @@ def select_grr_hyperparams(
     y_tr = np.asarray(y_train, dtype=float).reshape(-1)
     n = X_tr.shape[0]
 
-    # Median pairwise distance (standardized) drives the "auto" sigma grid.
-    median = _median_pairwise_distance(_standardized(X_tr), random_state=config.random_state)
+    # Global median (full outer-training). It is the reported bandwidth anchor for
+    # "auto" candidates and, under the outer-fixed feature map, the anchor shared
+    # across inner folds.
+    global_median = _median_pairwise_distance(
+        _standardized(X_tr), random_state=config.random_state
+    )
 
-    sigma_list: list[float | None]
-    if config.sigma_grid is None:
-        sigma_list = [None]  # keep the basis' own bandwidth
-    else:
-        sigma_list = list(normalize_grid(config.sigma_grid, kind="sigma", median=median))
+    sigma_specs = _sigma_candidate_specs(config.sigma_grid, global_median=global_median)
 
     lam_list: list[float]
     if config.lam_grid is None:
@@ -613,23 +751,83 @@ def select_grr_hyperparams(
         thr.update(config.admissibility_thresholds)
 
     inner_folds = list(kfold_splits(n, folds=config.cv_folds, random_state=config.random_state))
+    n_folds = len(inner_folds)
     # Always probe kernel health when the basis supports it: it powers both the
     # degeneracy penalty (K) and the kernel-health admissibility band.
     want_kernel = True
 
-    # Pre-select shared center pools per n_centers value (from X_train only), so
-    # that sigma candidates with the same n_centers use identical centers.
     max_nc = max((c for c in n_centers_list if c is not None), default=None)
-    center_pool = (
-        select_kernel_centers(X_tr, n_centers=max_nc, random_state=config.random_state)
-        if max_nc is not None
-        else None
-    )
+
+    # Per-fold preprocessing anchors and provenance. Strict nested CV keeps the
+    # standardization / median heuristic and the kernel-center pool inside each
+    # fold's inner-training rows; the outer-fixed feature map fits them once on
+    # the whole outer-training fold and shares them (leaking each fold's own
+    # validation rows into the map that scores them).
+    # A degenerate fold (identical inner-training rows) has a zero/NaN median; a
+    # 0 bandwidth would make ``GaussianRKHSBasis`` raise and halt the whole
+    # selection. ``_positive_median`` falls back to a fixed 1.0 -- validation-
+    # independent, so the degenerate fold's bandwidth still never reads its own
+    # validation rows (using the outer-training median here would leak).
+    if config.strict_nested:
+        fold_medians = [
+            _positive_median(
+                _median_pairwise_distance(
+                    _standardized(X_tr[fold.train]), random_state=config.random_state
+                )
+            )
+            for fold in inner_folds
+        ]
+        fold_center_index = [
+            _select_center_indices(
+                np.asarray(fold.train, dtype=int),
+                n_centers=max_nc,
+                random_state=config.random_state,
+            )
+            if max_nc is not None
+            else np.asarray([], dtype=int)
+            for fold in inner_folds
+        ]
+        preprocess_fit_index = [np.asarray(fold.train, dtype=int) for fold in inner_folds]
+    else:
+        fold_medians = [global_median] * n_folds
+        global_center_index = (
+            _select_center_indices(np.arange(n), n_centers=max_nc, random_state=config.random_state)
+            if max_nc is not None
+            else np.asarray([], dtype=int)
+        )
+        fold_center_index = [global_center_index for _ in inner_folds]
+        preprocess_fit_index = [np.arange(n, dtype=int) for _ in inner_folds]
+
+    fold_provenance = [
+        {
+            "validation_index": np.asarray(fold.test, dtype=int),
+            "preprocess_fit_index": preprocess_fit_index[fi],
+            "center_index": np.asarray(fold_center_index[fi], dtype=int),
+        }
+        for fi, fold in enumerate(inner_folds)
+    ]
 
     path: list[dict] = []
     for nc in n_centers_list:
-        centers = None if nc is None else center_pool[:nc]
-        for sigma in sigma_list:
+        # Per-fold center rows (identical across folds under the outer-fixed map).
+        # Under strict nested CV the pool is capped at the inner-training fold size,
+        # so a candidate ``nc`` larger than a fold has fewer centers *while scoring*
+        # -- an inherent nested-CV limit -- but the reported ``n_centers`` is ``nc``
+        # because the selected candidate is refit on the larger outer-training fold.
+        if nc is None:
+            centers_arg: object = None
+        else:
+            centers_arg = [X_tr[fold_center_index[fi][:nc]] for fi in range(n_folds)]
+        for mode, val in sigma_specs:
+            if mode == "none":
+                sigma_arg: object = None
+                report_sigma: float | None = None
+            elif mode == "abs":
+                sigma_arg = float(val)  # type: ignore[arg-type]
+                report_sigma = float(val)  # type: ignore[arg-type]
+            else:  # "mult": re-anchor per fold, report at the outer-training median
+                sigma_arg = [float(val) * fold_medians[fi] for fi in range(n_folds)]  # type: ignore[arg-type]
+                report_sigma = float(val) * float(global_median)  # type: ignore[arg-type]
             for lam in lam_list:
                 row = score_grr_candidate(
                     X_train=X_tr,
@@ -637,9 +835,9 @@ def select_grr_hyperparams(
                     m=m,
                     template_basis=basis,
                     generator=generator,
-                    sigma=sigma,
+                    sigma=sigma_arg,
                     lam=lam,
-                    centers=centers,
+                    centers=centers_arg,
                     inner_folds=inner_folds,
                     riesz_penalty=riesz_penalty,
                     riesz_p_norm=riesz_p_norm,
@@ -651,6 +849,10 @@ def select_grr_hyperparams(
                     want_kernel=want_kernel,
                     want_squared_loss=config.selection_score == "squared_loss_validation",
                 )
+                # Report the candidate at its outer-training resolution -- the
+                # values it is refit with -- not the per-fold ones.
+                row["sigma"] = report_sigma
+                row["n_centers"] = None if nc is None else int(nc)
                 row["admissible"] = _is_admissible(row, thr)
                 row["criterion"] = _criterion(
                     row, score=config.selection_score, n=n, tau_R=config.tau_R, tau_K=config.tau_K
@@ -707,4 +909,6 @@ def select_grr_hyperparams(
         n_candidates=len(path),
         path=path if config.return_path else [],
         modifies_estimand=modifies_estimand,
+        strict_nested=bool(config.strict_nested),
+        fold_provenance=fold_provenance,
     )
