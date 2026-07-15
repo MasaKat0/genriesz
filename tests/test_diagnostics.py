@@ -177,6 +177,37 @@ def test_bias_diagnostics_with_separate_outcome_basis_depend_on_predictions_only
     assert "b_bound_unavailable_reason" in b_plain
 
 
+def test_bias_bound_is_nan_for_logit_link_even_on_the_shared_basis():
+    """||Delta||*||theta|| bounds Delta^T theta, and under a logit link
+    gamma_hat = sigmoid(phi^T theta) is not linear in theta: theta = 0 gives
+    the constant prediction 0.5 with a generally nonzero second-order term
+    while the would-be bound is 0. So b_bound must be NaN for logit."""
+
+    rng = np.random.default_rng(5)
+    n = 300
+    Z = rng.normal(size=(n, 2))
+    D = (rng.uniform(size=n) < 0.5).astype(float)
+    X = np.column_stack([D, Z])
+    Yb = (Z[:, 0] + 0.5 * D + rng.normal(size=n) > 0).astype(float)
+
+    res = grr_ate(
+        X=X,
+        Y=Yb,
+        basis=PolynomialBasis(degree=1, include_bias=True),
+        generator=SquaredGenerator(),
+        riesz_lam=1e-3,
+        outcome_link="logit",
+        estimators=("arw",),
+        folds=3,
+        random_state=0,
+    )
+    b = res.diagnostics["bias"]
+    assert b["outcome_tag"] == "shared"
+    assert np.isfinite(b["b_hat"])
+    assert np.isnan(b["b_bound"])
+    assert "logit" in b["b_bound_unavailable_reason"]
+
+
 def test_tiny_bandwidth_underfitting_is_visible():
     """A too-small bandwidth gives tiny 'balanced' weights but a wrong answer.
 

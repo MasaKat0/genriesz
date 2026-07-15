@@ -1040,25 +1040,29 @@ def grr_functional(
 
     # Bias proxy and standardized bias (item I). The empirical second-order
     # term that the balancing condition is meant to kill is
-    #   E_n[alpha_hat * gamma_hat] - E_n[m(., gamma_hat)],
-    # which for a linear outcome model gamma_hat = psi^T theta equals
-    # Delta_psi^T theta on *whatever* basis psi the outcome model uses. It is
-    # therefore computed directly from the held-out predictions, with no
-    # coordinate matching between the Riesz span and the outcome span (pairing
-    # the Riesz-span Delta with a separate outcome basis of coincidentally
-    # equal column count used to dot unrelated coordinates). The headline
-    # |...| is the realized bias driver (b_hat). The conservative
-    # Cauchy-Schwarz bound ||Delta|| * ||theta|| (b_bound) does need both
-    # vectors in the same coordinates, so it is only defined for the "shared"
-    # variant (outcome model fit on the same fitted basis object as the Riesz
-    # representer) and is NaN otherwise, with the reason recorded. Both are
-    # diagnostics only and never used for selection.
+    #   E[alpha_hat * gamma_hat] - E[m(., gamma_hat)],
+    # evaluated here directly from the held-out predictions, with no coordinate
+    # matching between the Riesz span and the outcome span (pairing the
+    # Riesz-span Delta with a separate outcome basis of coincidentally equal
+    # column count used to dot unrelated coordinates). The headline b_hat is
+    # the unweighted across-fold mean of the per-fold absolute means
+    #   (1/K) sum_k |E_{I_k}[alpha_hat*gamma_hat - m(., gamma_hat)]|
+    # (the same fold aggregation as before, not a pooled |E_n[...]|), and
+    # b_hat_max is the worst fold. The conservative Cauchy-Schwarz bound
+    # ||Delta|| * ||theta|| (b_bound) is only a bound when the outcome model is
+    # *linear in the Riesz basis coordinates*: the outcome must be fit on the
+    # same fitted basis object ("shared") AND use the identity link -- under a
+    # logit link gamma_hat = sigmoid(phi^T theta), so theta = 0 gives a
+    # constant 0.5 prediction with a generally nonzero second-order term while
+    # ||Delta||*||theta|| = 0. Otherwise b_bound is NaN with the reason
+    # recorded. Both are diagnostics only and never used for selection.
     if imbalance_stats["max"] and outcome_coef_norm_stats:
         tag_pref = (
             "shared" if "shared" in outcome_coef_norm_stats else next(iter(outcome_coef_norm_stats))
         )
         cnorms = list(outcome_coef_norm_stats[tag_pref])
         same_span = tag_pref == "shared"
+        bound_defined = same_span and outcome_link_ == "identity"
         mu_pref = mu_obs[tag_pref]
         m_mu_pref = m_mu[tag_pref]
 
@@ -1070,7 +1074,7 @@ def grr_functional(
             b_dir_fold.append(
                 float(abs(float(np.mean(second_order)))) if second_order.size else float("nan")
             )
-            if same_span and k < len(imbalance_delta) and k < len(cnorms):
+            if bound_defined and k < len(imbalance_delta) and k < len(cnorms):
                 b_bound_fold.append(float(np.linalg.norm(imbalance_delta[k]) * cnorms[k]))
             else:
                 b_bound_fold.append(float("nan"))
@@ -1106,10 +1110,15 @@ def grr_functional(
             "outcome_coef_norm_mean": float(np.mean(cnorms)) if cnorms else float("nan"),
             "outcome_tag": tag_pref,
         }
-        if not same_span:
+        if not bound_defined:
+            cause = (
+                "the outcome basis differs from the Riesz basis"
+                if not same_span
+                else "the logit link makes gamma_hat nonlinear in theta"
+            )
             diagnostics["bias"]["b_bound_unavailable_reason"] = (
-                "the outcome basis differs from the Riesz basis, and the "
-                "Cauchy-Schwarz bound needs both vectors in the same coordinates"
+                "the Cauchy-Schwarz bound ||Delta||*||theta|| needs the outcome "
+                f"model to be linear in the Riesz basis coordinates: {cause}"
             )
         diagnostics["bias_proxy"] = b_hat
         diagnostics["std_bias"] = std_bias

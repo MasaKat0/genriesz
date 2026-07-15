@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from genriesz import PolynomialBasis, grr_ate, grr_att
+from genriesz import PolynomialBasis, grr_ate, grr_att, grr_did
 from genriesz.functionals import ATEFunctional, ATTFunctional, DIDFunctional
 
 
@@ -173,6 +173,19 @@ def test_wrappers_reject_out_of_range_treatment_index():
         grr_ate(X=X, Y=Y, basis=PolynomialBasis(degree=2), generator="sq", treatment_index=5)
     with pytest.raises(ValueError, match="out of range"):
         grr_att(X=X, Y=Y, basis=PolynomialBasis(degree=2), generator="sq", treatment_index=5)
+    with pytest.raises(ValueError, match="out of range"):
+        grr_did(
+            X=X, Y0=Y, Y1=Y, basis=PolynomialBasis(degree=2), generator="sq",
+            treatment_index=5,
+        )
+
+
+@pytest.mark.parametrize("cls", [ATEFunctional, ATTFunctional, DIDFunctional])
+def test_boolean_treatment_index_is_rejected(cls):
+    # True is almost certainly a treatment *value*, not a column index.
+    kwargs = {} if cls is ATEFunctional else {"pi": 0.5}
+    with pytest.raises(ValueError, match="boolean"):
+        cls(treatment_index=True, **kwargs)
 
 
 def test_empty_estimators_tuple_is_rejected():

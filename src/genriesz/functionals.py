@@ -35,9 +35,16 @@ def _validate_treatment_index_arg(treatment_index: object) -> int:
     """Coerce ``treatment_index`` to a non-negative integer column index.
 
     ``int(-0.5)`` truncates to 0 and would silently point at the first column,
-    so non-integral values are rejected rather than rounded.
+    so non-integral values are rejected rather than rounded. Booleans are
+    rejected too: ``True`` is almost certainly a treatment *value*, not the
+    index of the treatment column.
     """
 
+    if isinstance(treatment_index, (bool, np.bool_)):
+        raise ValueError(
+            "treatment_index must be a non-negative integer column index, "
+            f"not a boolean. Got {treatment_index!r}."
+        )
     idx = int(treatment_index)  # type: ignore[call-overload]
     if idx != treatment_index or idx < 0:
         raise ValueError(
