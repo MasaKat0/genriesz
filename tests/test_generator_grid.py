@@ -54,6 +54,13 @@ def test_config_rejects_empty_or_non_generator_grid():
         GRRCVConfig(generator_grid=["bp"], selection_score="squared_loss_validation")
 
 
+def test_config_rejects_duplicate_generator_names():
+    g1, g2 = _bp(0.25), _bp(0.75)
+    g2.name = g1.name
+    with pytest.raises(ValueError, match="unique names"):
+        GRRCVConfig(generator_grid=[g1, g2], selection_score="squared_loss_validation")
+
+
 def test_select_grr_hyperparams_picks_a_named_generator():
     X, Y = _make_synthetic_ate()
     grid = [_bp(0.25), _bp(0.75)]

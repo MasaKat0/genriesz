@@ -197,6 +197,19 @@ class GRRCVConfig:
                         "constructed explicitly, exactly as for the fixed "
                         "generator argument."
                     )
+            names = [
+                str(getattr(g, "name", None) or f"generator[{gi}]")
+                for gi, g in enumerate(candidates)
+            ]
+            if len(set(names)) != len(names):
+                # The winner is identified by name in the path table and mapped
+                # back to its object for the outer refit; duplicated names would
+                # make that mapping ambiguous.
+                dupes = sorted({n for n in names if names.count(n) > 1})
+                raise ValueError(
+                    f"generator_grid entries must have unique names; duplicated: {dupes}. "
+                    "Set a distinct .name on each candidate."
+                )
 
     @property
     def is_active(self) -> bool:
