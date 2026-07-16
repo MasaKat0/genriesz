@@ -324,6 +324,7 @@ def grr_functional(
     riesz_strict_nested: bool = True,
     riesz_selection_score: str = "bias_variance",
     riesz_admissibility_thresholds: dict | None = None,
+    riesz_generator_grid: Sequence[BregmanGenerator] | None = None,
     return_riesz_cv_path: bool = False,
     # Matching-only options (ATE only)
     M: int = 1,
@@ -345,6 +346,7 @@ def grr_functional(
     estimators: Sequence[str] = ("ra", "rw", "arw", "tmle"),
     alpha: float = 0.05,
     null: float = 0.0,
+    expose_alpha_values: bool = False,
     # Optimizers
     max_iter: int = 500,
     tol: float = 1e-8,
@@ -396,6 +398,18 @@ def grr_functional(
         outer-fixed feature map (centers and median heuristic shared across inner
         folds): cheaper, but it leaks each fold's validation rows into its own
         scoring feature map.
+    riesz_generator_grid:
+        Candidate generators for the inner Riesz CV, e.g. ``BPGenerator``
+        instances over a grid of ``omega`` values. ``None`` (the default) keeps
+        the fixed ``generator``. When supplied, the generator is selected per
+        outer-training fold together with the other cross-validated dimensions,
+        and the outer refit of that fold uses the selected generator; the
+        per-fold winner is recorded in ``diagnostics['riesz_cv']['selected']``
+        under ``'generator'``. Requires
+        ``riesz_selection_score='squared_loss_validation'``, the only score
+        comparable across generators. The fixed ``generator`` argument is still
+        required; it anchors the validation warnings and is used by folds when
+        the grid is inactive.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link. An explicit ``'logit'``
@@ -410,6 +424,14 @@ def grr_functional(
         Note that stratified and plain folds partition the sample differently,
         so estimates change (in distribution, not in validity) relative to
         releases before stratification was the default.
+    expose_alpha_values:
+        If True, store the out-of-fold representer values in the diagnostics:
+        ``diagnostics['alpha_values']`` holds ``alpha_hat(X_i)`` and
+        ``diagnostics['m_alpha_values']`` holds ``m(W_i, alpha_hat)``, both
+        evaluated on held-out folds and aligned with the input row order.
+        Useful for loss-agnostic model selection via the out-of-fold SQ risk
+        ``mean(alpha_hat(X_i)^2 - 2 m(W_i, alpha_hat))``. Default False, which
+        leaves the diagnostics unchanged.
     """
 
     X_ = as_2d(X)
@@ -658,10 +680,12 @@ def grr_functional(
         admissibility_thresholds=riesz_admissibility_thresholds,
         return_path=return_riesz_cv_path,
         random_state=random_state,
+        generator_grid=riesz_generator_grid,
     )
     riesz_cv_active = riesz_method_ == "grr" and riesz_cv_config.is_active
     riesz_cv_selected: list[dict] = []
     riesz_cv_paths: list[list[dict]] = []
+    riesz_fold_generators: list[BregmanGenerator] = []
 
     # ------------------------------------------------------------------
     # Fit nuisances fold-by-fold
@@ -718,6 +742,7 @@ def grr_functional(
                         "sigma": sel.sigma,
                         "lam": sel.lam,
                         "n_centers": sel.n_centers,
+                        "generator": sel.generator_name,
                         "n_admissible": sel.n_admissible,
                         "n_candidates": sel.n_candidates,
                         "best_score": sel.best_score,
@@ -726,12 +751,18 @@ def grr_functional(
                 )
                 if return_riesz_cv_path:
                     riesz_cv_paths.append(sel.path)
+                if sel.generator is not None:
+                    generator_fold = sel.generator
+                else:
+                    generator_fold = generator
             else:
                 basis_r = basis.copy().fit(X_tr, y_tr)
+                generator_fold = generator
+            riesz_fold_generators.append(generator_fold)
 
             grr = GRRGLM(
                 basis=basis_r,
-                generator=generator,
+                generator=generator_fold,
                 functional=m,
                 penalty=riesz_penalty,
                 lam=lam_fold,
@@ -1062,12 +1093,23 @@ def grr_functional(
     diagnostics["alpha_abs_p95"] = float(np.percentile(alpha_abs, 95))
     diagnostics["alpha_abs_max"] = float(np.max(alpha_abs))
 
+    if expose_alpha_values:
+        # Out-of-fold representer values for loss-agnostic model selection,
+        # e.g. choosing a generator hyperparameter by the out-of-fold SQ risk
+        # mean(alpha^2 - 2 m(W, alpha)), which needs m(W_i, alpha_hat) and not
+        # only alpha_hat(X_i) because m evaluates alpha at counterfactual rows.
+        diagnostics["alpha_values"] = np.asarray(alpha_obs, dtype=float).copy()
+        diagnostics["m_alpha_values"] = np.asarray(m_alpha, dtype=float).copy()
+
     # Design section 9-4: whether the Riesz generator targets a modified estimand.
     # Read together with `riesz_clip_binding_rate_max`: the flag says the target
     # *can* differ, the binding rate says by how much of the sample it does.
+    # With a cross-validated generator grid the flag covers the per-fold selected
+    # generators (any fold fitted with a modifying generator sets it).
     if riesz_method_ == "grr" and generator is not None:
+        gens_used = riesz_fold_generators if riesz_fold_generators else [generator]
         diagnostics["riesz_modifies_estimand"] = bool(
-            getattr(generator, "modifies_estimand", False)
+            any(getattr(g, "modifies_estimand", False) for g in gens_used)
         )
 
     if riesz_fit_stats["success"]:

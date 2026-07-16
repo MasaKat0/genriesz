@@ -163,19 +163,53 @@ class GRRCVConfig:
     # ``__match_args__`` of the previous release intact (a 5th positional still
     # means ``selection_score``, not ``strict_nested``).
     strict_nested: bool = field(default=True, kw_only=True)
+    # Candidate generators (e.g. ``BPGenerator`` over an omega grid). ``None``
+    # keeps the estimator's fixed generator. Because different generators fit
+    # different Bregman risks, a cross-generator selection is only meaningful
+    # under the generator-agnostic ``"squared_loss_validation"`` score; other
+    # scores are rejected in ``__post_init__``. Keyword-only for the same
+    # signature-stability reason as ``strict_nested``.
+    generator_grid: object = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.selection_score not in SELECTION_SCORES:
             raise ValueError(f"selection_score must be one of {SELECTION_SCORES}")
         if int(self.cv_folds) < 2:
             raise ValueError("cv_folds must be >= 2")
+        if self.generator_grid is not None:
+            if self.selection_score != "squared_loss_validation":
+                raise ValueError(
+                    "generator_grid requires selection_score="
+                    "'squared_loss_validation': it is the only score whose value "
+                    "is on the same scale for every generator (the held-out LSIF "
+                    "risk of the fitted representer). 'bregman_validation' scores "
+                    "each candidate by its own Bregman risk and is not comparable "
+                    "across generators."
+                )
+            candidates = list(self.generator_grid)  # type: ignore[arg-type]
+            if not candidates:
+                raise ValueError("generator_grid must contain at least one generator")
+            for g in candidates:
+                if not isinstance(g, BregmanGenerator):
+                    raise TypeError(
+                        "generator_grid entries must be BregmanGenerator instances "
+                        f"(got {type(g).__name__}). Branch-wise generators must be "
+                        "constructed explicitly, exactly as for the fixed "
+                        "generator argument."
+                    )
 
     @property
     def is_active(self) -> bool:
         """Whether any hyper-parameter dimension is being cross-validated."""
 
         return any(
-            g is not None for g in (self.sigma_grid, self.lam_grid, self.n_centers_grid)
+            g is not None
+            for g in (
+                self.sigma_grid,
+                self.lam_grid,
+                self.n_centers_grid,
+                self.generator_grid,
+            )
         )
 
 
@@ -213,6 +247,12 @@ class GRRCVResult:
     path: list[dict] = field(default_factory=list)
     modifies_estimand: bool = field(default=False, kw_only=True)
     strict_nested: bool = field(default=True, kw_only=True)
+    # The winning generator when ``generator_grid`` was cross-validated; None
+    # when the generator dimension was not varied (the caller keeps its fixed
+    # generator). Excluded from ``__eq__`` like ``fold_provenance``: generator
+    # objects do not define value equality.
+    generator: BregmanGenerator | None = field(default=None, kw_only=True, compare=False)
+    generator_name: str | None = field(default=None, kw_only=True)
     # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
     # would make dataclass equality raise a truth-value ``ValueError``. Provenance
     # is diagnostic metadata, not identity, so two results with equal scalar
@@ -850,59 +890,82 @@ def select_grr_hyperparams(
         for fi, fold in enumerate(inner_folds)
     ]
 
-    path: list[dict] = []
-    for nc in n_centers_list:
-        # Per-fold center rows (identical across folds under the outer-fixed map).
-        # Under strict nested CV the pool is capped at the inner-training fold size,
-        # so a candidate ``nc`` larger than a fold has fewer centers *while scoring*
-        # -- an inherent nested-CV limit -- but the reported ``n_centers`` is ``nc``
-        # because the selected candidate is refit on the larger outer-training fold.
-        if nc is None:
-            centers_arg: object = None
-        else:
-            centers_arg = [X_tr[fold_center_index[fi][:nc]] for fi in range(n_folds)]
-        for mode, val in sigma_specs:
-            if mode == "none":
-                sigma_arg: object = None
-                report_sigma: float | None = None
-            elif mode == "abs":
-                sigma_arg = float(val)  # type: ignore[arg-type]
-                report_sigma = float(val)  # type: ignore[arg-type]
-            else:  # "mult": re-anchor per fold, report at the outer-training median
-                sigma_arg = [float(val) * fold_medians[fi] for fi in range(n_folds)]  # type: ignore[arg-type]
-                report_sigma = float(val) * float(global_median)  # type: ignore[arg-type]
-            for lam in lam_list:
-                row = score_grr_candidate(
-                    X_train=X_tr,
-                    y_train=y_tr,
-                    m=m,
-                    template_basis=basis,
-                    generator=generator,
-                    sigma=sigma_arg,
-                    lam=lam,
-                    centers=centers_arg,
-                    inner_folds=inner_folds,
-                    riesz_penalty=riesz_penalty,
-                    riesz_p_norm=riesz_p_norm,
-                    outcome_link=outcome_link,
-                    outcome_penalty=outcome_penalty,
-                    outcome_lam=outcome_lam,
-                    max_iter=max_iter,
-                    tol=tol,
-                    want_kernel=want_kernel,
-                    want_squared_loss=config.selection_score == "squared_loss_validation",
-                )
-                # Report the candidate at its outer-training resolution -- the
-                # values it is refit with -- not the per-fold ones.
-                row["sigma"] = report_sigma
-                row["n_centers"] = None if nc is None else int(nc)
-                row["admissible"] = _is_admissible(row, thr)
-                row["criterion"] = _criterion(
-                    row, score=config.selection_score, n=n, tau_R=config.tau_R, tau_K=config.tau_K
-                )
-                path.append(row)
+    # Generator candidates. Without a grid the single candidate is the caller's
+    # fixed generator and rows carry no generator name, so the path table and
+    # the returned result are unchanged relative to previous releases.
+    if config.generator_grid is None:
+        gen_candidates: list[tuple[str | None, BregmanGenerator]] = [(None, generator)]
+    else:
+        gen_candidates = [
+            (str(getattr(g, "name", None) or f"generator[{gi}]"), g)
+            for gi, g in enumerate(config.generator_grid)  # type: ignore[arg-type]
+        ]
 
-    modifies_estimand = bool(getattr(generator, "modifies_estimand", False))
+    path: list[dict] = []
+    for gen_name, gen_candidate in gen_candidates:
+        for nc in n_centers_list:
+            # Per-fold center rows (identical across folds under the outer-fixed map).
+            # Under strict nested CV the pool is capped at the inner-training fold size,
+            # so a candidate ``nc`` larger than a fold has fewer centers *while scoring*
+            # -- an inherent nested-CV limit -- but the reported ``n_centers`` is ``nc``
+            # because the selected candidate is refit on the larger outer-training fold.
+            if nc is None:
+                centers_arg: object = None
+            else:
+                centers_arg = [X_tr[fold_center_index[fi][:nc]] for fi in range(n_folds)]
+            for mode, val in sigma_specs:
+                if mode == "none":
+                    sigma_arg: object = None
+                    report_sigma: float | None = None
+                elif mode == "abs":
+                    sigma_arg = float(val)  # type: ignore[arg-type]
+                    report_sigma = float(val)  # type: ignore[arg-type]
+                else:  # "mult": re-anchor per fold, report at the outer-training median
+                    sigma_arg = [float(val) * fold_medians[fi] for fi in range(n_folds)]  # type: ignore[arg-type]
+                    report_sigma = float(val) * float(global_median)  # type: ignore[arg-type]
+                for lam in lam_list:
+                    row = score_grr_candidate(
+                        X_train=X_tr,
+                        y_train=y_tr,
+                        m=m,
+                        template_basis=basis,
+                        generator=gen_candidate,
+                        sigma=sigma_arg,
+                        lam=lam,
+                        centers=centers_arg,
+                        inner_folds=inner_folds,
+                        riesz_penalty=riesz_penalty,
+                        riesz_p_norm=riesz_p_norm,
+                        outcome_link=outcome_link,
+                        outcome_penalty=outcome_penalty,
+                        outcome_lam=outcome_lam,
+                        max_iter=max_iter,
+                        tol=tol,
+                        want_kernel=want_kernel,
+                        want_squared_loss=config.selection_score == "squared_loss_validation",
+                    )
+                    # Report the candidate at its outer-training resolution -- the
+                    # values it is refit with -- not the per-fold ones.
+                    row["sigma"] = report_sigma
+                    row["n_centers"] = None if nc is None else int(nc)
+                    if gen_name is not None:
+                        row["generator_name"] = gen_name
+                    row["admissible"] = _is_admissible(row, thr)
+                    row["criterion"] = _criterion(
+                        row, score=config.selection_score, n=n, tau_R=config.tau_R, tau_K=config.tau_K
+                    )
+                    path.append(row)
+
+    generator_by_name = {name: g for name, g in gen_candidates if name is not None}
+    if config.generator_grid is None:
+        modifies_estimand = bool(getattr(generator, "modifies_estimand", False))
+    else:
+        # With a generator grid the flag is per candidate (score_grr_candidate
+        # records it on each row); the all-candidates flag drives the warning
+        # below and the winner's flag is reported on the result.
+        modifies_estimand = all(
+            bool(getattr(g, "modifies_estimand", False)) for _, g in gen_candidates
+        )
 
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
     pool = admissible
@@ -920,8 +983,12 @@ def select_grr_hyperparams(
                 "model, or inspect the CV path (return_riesz_cv_path=True)."
             )
         if modifies_estimand:
+            if config.generator_grid is None:
+                gen_desc = f"Generator {getattr(generator, 'name', type(generator).__name__)}"
+            else:
+                gen_desc = "Every candidate generator on the grid"
             warnings.warn(
-                f"Generator {getattr(generator, 'name', type(generator).__name__)} "
+                f"{gen_desc} "
                 f"modifies the estimand, so none of its candidates enter the "
                 f"admissible set (design section 9-4). The hyper-parameters "
                 f"selected below tune a target-sensitivity analysis over the "
@@ -942,6 +1009,13 @@ def select_grr_hyperparams(
 
     best = min(pool, key=lambda r: r["criterion"])
 
+    best_generator_name = best.get("generator_name")
+    best_generator = (
+        generator_by_name[best_generator_name] if best_generator_name is not None else None
+    )
+    if best_generator is not None:
+        modifies_estimand = bool(getattr(best_generator, "modifies_estimand", False))
+
     return GRRCVResult(
         sigma=best["sigma"],
         lam=best["lam"],
@@ -954,4 +1028,6 @@ def select_grr_hyperparams(
         modifies_estimand=modifies_estimand,
         strict_nested=bool(config.strict_nested),
         fold_provenance=fold_provenance,
+        generator=best_generator,
+        generator_name=best_generator_name,
     )
