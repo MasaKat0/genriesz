@@ -965,7 +965,11 @@ def select_grr_hyperparams(
                         row["generator_name"] = gen_name
                     row["admissible"] = _is_admissible(row, thr)
                     row["criterion"] = _criterion(
-                        row, score=config.selection_score, n=n, tau_R=config.tau_R, tau_K=config.tau_K
+                        row,
+                        score=config.selection_score,
+                        n=n,
+                        tau_R=config.tau_R,
+                        tau_K=config.tau_K,
                     )
                     path.append(row)
 
