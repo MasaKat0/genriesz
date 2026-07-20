@@ -98,6 +98,11 @@ TABLES = ("candidate", "selection", "repetition", "bound", "check", "oracle")
 #: The single split whose interval is covered by Theorem ``uniform_selected_inference``.
 SPLIT_FOLD = 0
 
+#: Schema of ``run_manifest.json``. Bumped whenever the digest inputs change, so
+#: that a directory written by an earlier schema reports what actually happened
+#: rather than a misleading "different configuration".
+MANIFEST_SCHEMA = 2
+
 
 @dataclass(frozen=True)
 class Numerics:
@@ -827,10 +832,8 @@ def expand_jobs(config: ExperimentConfig) -> list[tuple[ExperimentConfig, Scenar
 def batch_identities(config: ExperimentConfig) -> list[list[str]]:
     """The job identity of every batch, in order.
 
-    Two configurations can share a configuration record and still place different
-    jobs in the same batch, for instance when an earlier grid's replication count
-    changes. Comparing the expanded job list catches that; comparing the record
-    alone does not.
+    Recorded alongside the digest so a rejected resume can be diagnosed by
+    reading the manifest, rather than only by re-deriving the digest.
     """
 
     jobs = expand_jobs(config)
@@ -909,6 +912,14 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
     existing = _batch_files(output)
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        schema = int(previous.get("schema", 1))
+        if schema != MANIFEST_SCHEMA:
+            raise RuntimeError(
+                f"{output} was written under manifest schema {schema}, and this "
+                f"version writes schema {MANIFEST_SCHEMA}. The digest covers "
+                "different inputs, so the two cannot be compared. Delete the "
+                "directory and re-run, or load it read-only with load_experiment."
+            )
         if previous.get("digest") != digest:
             raise RuntimeError(
                 f"{output} holds results from a different configuration "
@@ -927,6 +938,7 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
     manifest_path.write_text(
         json.dumps(
             {
+                "schema": MANIFEST_SCHEMA,
                 "digest": digest,
                 "n_batches": len(batches),
                 "batches": batch_identities(config),

@@ -877,8 +877,17 @@ def test_reference_check_rate_is_fold_level_with_a_clustered_error() -> None:
     assert table["violation_mcse"].iloc[0] == pytest.approx(0.25)
     assert table["undecidable_rate"].iloc[0] == pytest.approx(0.0)
 
-    # An undecidable fold is excluded from the rate, not counted as a pass.
+    # An undecidable fold is excluded from the rate, not counted as a pass. The
+    # rate is the ratio of totals: one violation among three decidable folds.
+    # Averaging the per-replication rates would give 0.5 instead.
     rows[1] = {**scenario, "repetition": 0, "fold": 1, "checkable": False, "violated": None}
     partial = report.reference_check_table({"check": pd.DataFrame(rows)})
-    assert partial["violation_rate"].iloc[0] == pytest.approx(0.5)
+    assert partial["violation_rate"].iloc[0] == pytest.approx(1.0 / 3.0)
     assert partial["undecidable_rate"].iloc[0] == pytest.approx(0.25)
+    assert partial["decidable_folds"].iloc[0] == pytest.approx(3.0)
+
+    # With nothing decidable the rate is missing, not zero.
+    blind = [{**row, "checkable": False, "violated": None} for row in rows]
+    empty = report.reference_check_table({"check": pd.DataFrame(blind)})
+    assert np.isnan(empty["violation_rate"].iloc[0])
+    assert empty["decidable_replications"].iloc[0] == pytest.approx(0.0)

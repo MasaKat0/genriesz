@@ -327,26 +327,54 @@ def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     checks["_violated"] = checks["violated"].fillna(False).astype(bool)
 
     keys = ["first", "second", *SCENARIO_KEYS]
-    decidable = checks.loc[checks["checkable"]]
-
     per_replication = (
-        decidable.groupby([*keys, "repetition"], dropna=False)["_violated"]
-        .mean()
-        .rename("replication_rate")
+        checks.assign(_decidable=checks["checkable"].astype(float))
+        .assign(_fired=(checks["_violated"] & checks["checkable"]).astype(float))
+        .groupby([*keys, "repetition"], dropna=False)[["_fired", "_decidable"]]
+        .sum()
         .reset_index()
     )
 
-    def _clustered_mcse(rates: pd.Series) -> float:
-        values = rates.to_numpy(dtype=float)
-        if values.size < 2:
-            return float("nan")
-        return float(np.std(values, ddof=1) / np.sqrt(values.size))
+    def _ratio(frame: pd.DataFrame) -> pd.Series:
+        """Pooled fold-level rate with a replication-clustered standard error.
 
-    grouped = per_replication.groupby(keys, dropna=False).agg(
-        decidable_replications=("repetition", "nunique"),
-        violation_rate=("replication_rate", "mean"),
-        violation_mcse=("replication_rate", _clustered_mcse),
-    )
+        The point estimate is the ratio of totals, not the average of the
+        per-replication rates: those differ whenever the number of decidable
+        folds varies across replications, and only the ratio of totals is the
+        fold-level rate the column claims to report. Its standard error is the
+        linearized cluster-robust one for a ratio, with replications as clusters.
+        """
+
+        fired = frame["_fired"].to_numpy(dtype=float)
+        decidable = frame["_decidable"].to_numpy(dtype=float)
+        total_decidable = float(decidable.sum())
+        clusters = int(frame.shape[0])
+        if total_decidable == 0.0:
+            return pd.Series(
+                {
+                    "violation_rate": np.nan,
+                    "violation_mcse": np.nan,
+                    "decidable_folds": 0.0,
+                    "decidable_replications": 0.0,
+                }
+            )
+        rate = float(fired.sum()) / total_decidable
+        if clusters < 2:
+            mcse = np.nan
+        else:
+            residual = fired - rate * decidable
+            variance = clusters / (clusters - 1) * float(np.sum(residual**2)) / total_decidable**2
+            mcse = float(np.sqrt(max(variance, 0.0)))
+        return pd.Series(
+            {
+                "violation_rate": rate,
+                "violation_mcse": mcse,
+                "decidable_folds": total_decidable,
+                "decidable_replications": float((decidable > 0).sum()),
+            }
+        )
+
+    grouped = per_replication.groupby(keys, dropna=False).apply(_ratio, include_groups=False)
     detail = checks.groupby(keys, dropna=False).agg(
         folds=("fold", "size"),
         undecidable_rate=("checkable", lambda x: 1.0 - float(np.mean(x))),
