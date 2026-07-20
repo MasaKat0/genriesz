@@ -1,0 +1,583 @@
+# Reference-based loss--link selection: 実験計画 v2
+
+本書は `reference_selection_experiment_details.md`（v1）と `simulation_coding_design_v10.md`
+を**置き換える**。対象は Main.tex §4（`sec:nested_selection_inference`）と §7.2
+（`sec:selection_simulation_design`）の数値的裏付けである。
+
+実装:
+
+- `notebooks/experiments/refsel/`（パッケージ）
+- `notebooks/experiments/09_reference_based_loss_link_selection.ipynb`
+- `tests/test_reference_selection_experiment.py`
+
+本書の数値はすべて**実測値**である。設計段階の見積りと食い違った箇所は §18 に記録した。
+
+---
+
+## 1. なぜ計画を作り直すか
+
+v1 の実験は「提案手法を回して bias・RMSE・coverage を出す」構成だった。査読では通らない。
+Econometrica の査読者が最初に投げる質問に対して、v1 は一つも答えを用意していない。
+
+| 査読者の質問 | v1 の対応 |
+|---|---|
+| R1. なぜこの手法が要るのか。Bregman loss を CV すれば済むのでは | **対照実験なし**。§4 L794 の主張が未検証 |
+| R2. Theorem 3 は*一様*被覆の主張だ。最悪ケースを見せてほしい | **固定 DGP 数点の平均被覆のみ**。least-favorable な系列がない |
+| R3. reference allowance $b_r$ は肝心な部分を仮定で逃げている。外れたらどうなる | **misspecified reference の実験なし**。$c_r$ 感度のみ |
+| R4. bias が実際に無視できるとき、bias-aware 区間は損をしないのか | 長さは記録するが**対比する設計がない** |
+| R5. oracle inequality の remainder は情報量があるのか、それとも空虚か | regret は出すが**定理の remainder と突き合わせていない** |
+| R6. 再現できるのか | **40 コア日・fast mode なし**。replication package として成立しない |
+
+加えて v1 には実装上の問題があった（δ 予算超過、cross-fit bias-aware 区間に定理がない、
+audit が outcome noise を含むため精度不足、integration audit が計算量の 8 割を占める）。
+本計画はこれらも同時に解消する。
+
+## 2. 設計原則
+
+1. **一実験＝一主張。** どの定理・命題のどの部分を検証するかが言えない実験は載せない。
+2. **一様性の主張には最悪ケースを報告する。** 平均被覆ではなく DGP 族上の**最小被覆**を主表に出す。
+3. **競合手法を実装する。** 「提案手法は良い数字が出た」ではなく「素朴な代替は具体的にこう壊れる」を示す。
+4. **候補の fit を全ルールで共有する。** 選択規則の比較は追加コストがほぼゼロ（§7.1）。
+5. **段階的な計算量。** smoke / pilot / publication の 3 tier。査読者が 1 時間で回せる tier を必ず持つ。
+6. **監査量は解析的に計算する。** simulation truth を使えるのだから outcome noise を混ぜない（§10）。
+
+---
+
+## 3. 検証する主張と実験の対応
+
+| ID | 実験 | 検証対象 | 答える質問 | 実装 |
+|---|---|---|---|---|
+| E1a | generator 再スケール不変性 | §4 L794「raw Bregman は候補間で比較不能」 | R1 | `refsel.rescaling` |
+| E1b | 選択規則の horse race | 同上（Monte Carlo 版） | R1 | `refsel.selection` / `report.selection_rule_table` |
+| E2 | bias bound の妥当性と緊密性 | Thm `data_dependent_bias` の**両側** | R5 | `report.bias_bound_table` |
+| E3 | oracle inequality の remainder | Thm `nested_oracle`, Cor `oracle_remainder` | R5 | `report.oracle_regret_table` |
+| E4 | drifting bias 族上の一様被覆 | Thm `uniform_selected_inference` | **R2** | `report.uniform_coverage_table` |
+| E5 | reference の頑健性と整合チェック | Prop `several_references`, eq `reference_check` | **R3** | `report.reference_robustness_table` / `reference_check_table` |
+| E6 | bias が無視できる場合の区間長 | Cor `oa:bias_aware_length`, Cor `selected_wald` | R4 | `report.interval_length_table` |
+| E7 | 高次元設計 | 規則が $d=50$ でも動くこと | 補助 | grid C |
+
+E4 と E5 が主表になる。E1b は §4 の存在意義そのものなので主表に次ぐ扱い。
+
+---
+
+## 4. E1a: generator の再スケール不変性（決定的デモ）
+
+Main.tex L794 の主張は次のとおり：
+
+> rescaling a generator changes its objective value without changing the unregularized representer.
+
+これは Monte Carlo を要しない**決定的な事実**であり、一つの表で片が付く。
+
+`GRRGLM` が最小化するのは（`src/genriesz/glm.py:296-306`）
+
+$$L(\beta)=\frac1n\sum_i\left[g^\*(X_i,\phi(X_i)^\top\beta)-M_i^\top\beta\right]+P_\lambda(\beta).$$
+
+$g\mapsto\kappa g$ とすると $(\kappa g)^\*(v)=\kappa g^\*(v/\kappa)$ なので、$\lambda=0$ のとき
+
+- 係数は $\beta^\*_\kappa=\kappa\beta^\*_1$ にスケールする、
+- **fitted representer $\widehat\alpha$ は不変**（$(\kappa g)'^{-1}(\kappa v)=g'^{-1}(v)$）、
+- 目的値および held-out Bregman 基準はちょうど $\kappa$ 倍になる。
+
+**penalty の扱いが要点である。** $\beta=\kappa b$ を代入すると
+$F_\kappa(\kappa b)=\kappa\left[\text{（無正則化基準）}(b)\right]+P_\lambda(\kappa b)$ なので、
+**penalty が 1 次同次であれば不変性はそのまま生き残る**。本実験が使う $\ell_1$ penalty は
+1 次同次である。すなわち incomparability は「正則化を落としたから」生じる人工物ではなく、
+実際に推定している正則化付き推定量についてそのまま成立する。
+
+**実測**（$\kappa\in\{0.5,1,2\}$、$n=2000$、second-order、L-BFGS `tol=1e-10`、
+$\max|\Delta\widehat\alpha|$ は $\kappa=1$ 基準）：
+
+| generator | penalty | $\max|\Delta\widehat\alpha|$（$\kappa=0.5/2$） | 目的値の比（$\kappa=0.5/2$） | held-out 基準の比 |
+|---|---|---|---|---|
+| SQ | $\ell_1$, $c=0$ | 0.00019 / 0.00016 | 0.500000 / 2.000000 | 0.499999 / 1.999999 |
+| SQ | $\ell_1$, $c=1$ | 0.00102 / 0.00067 | 0.499999 / 2.000002 | 0.500001 / 1.999996 |
+| SQ | $\ell_2$, $c=1$ | **0.556 / 0.883** | **0.515 / 1.895** | 0.503 / 1.968 |
+| UKL | $\ell_1$, $c=0$ | 0.00052 / 0.00056 | 0.500000 / 2.000000 | 0.500001 / 2.000006 |
+| UKL | $\ell_1$, $c=1$ | 0.0219 / 0.0079 | 0.500008 / 1.999983 | 0.500020 / 1.999975 |
+| UKL | $\ell_2$, $c=1$ | **1.331 / 2.154** | **0.490 / 2.068** | 0.501 / 2.008 |
+| BP(0.5) | $\ell_1$, $c=0$ | 0.00012 / 0.00026 | 0.500000 / 2.000000 | 0.499998 / 2.000008 |
+| BP(0.5) | $\ell_1$, $c=1$ | 0.00197 / 0.00099 | 0.499826 / 2.000346 | 0.499993 / 1.999925 |
+| BP(0.5) | $\ell_2$, $c=1$ | **0.949 / 1.329** | **0.679 / 0.893** | 0.522 / 1.788 |
+
+$\ell_1$ の行では**同一の推定量**の held-out Bregman 基準を任意に大小できる。
+$\ell_2$ の行では推定量自体が動くが、それは generator の再スケールが実効 penalty を
+黙って変えたからであり、順位づけの根拠としてはやはり成立しない。
+どちらに読んでも generator をまたぐ raw Bregman CV は統計的に無意味である。
+
+**実装**: `refsel.candidates.ScaledGenerator`（`BregmanGenerator` を継承し
+`g`/`grad`/`grad2`/`inv_grad`/`domain_binding` の 5 つを override）。
+`SquaredGenerator` を継承してはならない — `glm.py:252` の閉形式分岐に落ちて誤った結果になる。
+本性質は unit test で恒久的に固定してある。
+
+---
+
+## 5. E1b: 選択規則の horse race
+
+同一 fold・同一の 90 候補 fit に対して、以下の規則を**すべて**適用する。fit を共有するので
+追加コストはほぼゼロである（§7.1）。
+
+| ID | 規則 | 何を分離するか |
+|---|---|---|
+| `proposed` | $\arg\min\ \widehat U_a^2+\widehat V_a^+/n_{\mathrm{eval}}$ | 提案手法 |
+| `proposed_min` | 同上、ただし $\widehat U_a^{\mathcal R}=\min_r(\cdot)$ | Prop `several_references` |
+| `bregman_cv` | diagnostic 標本上の**各候補自身の** Bregman 基準を最小化 | §4 が示す通り恣意的。素朴な代替 |
+| `lsif_cv` | generator 非依存の squared risk $\tfrac12E[\alpha^2]-E[m(\alpha)]$ を最小化 | **強い対抗馬**。候補間で比較可能だが $\alpha$ の推定誤差を測るのであって目標母数の drift を測らない |
+| `abs_drift` | $\arg\min|\widehat D_a|$（$q_a,b_r$ なし） | 同時信頼半径 $q_a$ の寄与を分離 |
+| `score_var` | $\arg\min\widehat V_a^+$ のみ | bias を無視した場合 |
+| `fixed_sq` / `fixed_ukl` / `fixed_bkl` / `fixed_bp05` | rich dictionary・$c=1$ 固定 | 実務家の既定選択 |
+| `oracle` | $\arg\min$ audit risk（実行不能） | 下限 |
+
+`lsif_cv` を入れるのが重要である。「generator ごとの目的値が比較不能なら、共通の squared risk で
+比較すればよい」という自然な反論に対し、**それでも目標母数の bias は測れない**ことを数値で示す。
+
+各規則について、選ばれた候補の RMSE・|bias|・oracle regret・区間の被覆と長さを報告する。
+**被覆は無条件**である（§14）。`fixed_bkl` は ATE では常に利用不能になる（§18.2）。
+
+---
+
+## 6. DGP
+
+### 6.1. Low-dimensional base design
+
+v1 から変更なし。$Z\sim N(0,I_5)$、
+
+$$h_L(Z)=0.6Z_1-0.4Z_2+0.5(Z_3^2-1)+0.3\sin(Z_4),\qquad e_0(Z)=\Lambda(sh_L(Z)),$$
+$$\mu_0(Z)=1+Z_1+0.5(Z_2^2-1)+0.5\sin(Z_3)+0.25Z_4Z_5,\qquad \tau(Z)=1+0.5Z_1-0.25Z_2,$$
+$$Y=\mu_0(Z)+D\tau(Z)+\varepsilon,\quad\varepsilon\sim N(0,1),\qquad \theta_0=1.$$
+
+$s\in\{0.5,1.5,2.5\}$。
+
+### 6.2. Drifting misspecification 族（E4 の中核）
+
+一様被覆を検証するには、bias と standard error の比
+$t=\sqrt{n_{\mathrm{eval}}}|B|/\sqrt V$ を**制御して掃く**必要がある。
+bounded-normal-mean 問題が指標づけられているのはこの $t$ だからである。
+
+$$\psi(Z)=\cos(2\pi Z_1),\qquad
+h_L^{(b)}(Z)=h_L(Z)+b\,\psi(Z),\qquad \mu_0^{(b)}(Z)=\mu_0(Z)+b\,\psi(Z).$$
+
+$\tau$ は触らないので **$\theta_0=1$ は $b$ によらない**（unit test で固定）。
+
+$\psi$ の選択理由：$Z_1\sim N(0,1)$ 上で $\cos(2\pi Z_1)$ は rich dictionary の張る空間と
+ほぼ直交する。**実測で $R^2=0.0215$**（分散の 98% が表現不能、$p_{\text{base}}=31$、
+$N=4\times10^5$）。unit test で $R^2<0.10$ を固定してある。
+
+#### 6.2.1. 誰が $\psi$ を表現できるべきか（重要な設計上の分岐）
+
+$\psi$ を「全員が表現できない」方向にすると**実験が壊れる**。実測（§18.1）では、
+その設計だと reference 自身の drift が $B_r=0.649$ に達し、自らの allowance $b_r=0.111$ を
+大きく破る。Thm `data_dependent_bias` の前提が全候補について同時に崩れるので、
+$t>0$ の領域で測っているものが無意味になる。
+
+正しい設計は次の非対称性である。
+
+| 主体 | $\psi$ を表現できるか | 理由 |
+|---|---|---|
+| candidate dictionary（linear/second-order/rich） | **できない** | これが候補 bias $B_a$ を生む |
+| candidate 共有 outcome estimator（`LowOutcomeBasis`） | **できない** | 同上。$B_a$ は積なので両方が誤っている必要がある |
+| `correct` reference（propensity・outcome とも） | **できる** | 手法の前提。reference は「bound が既知の、より良い推定量」である |
+| `misspecified` reference | できない | E5 が測る失敗ケース |
+
+この非対称性のため、**reference は fold 共有の outcome estimator を使わず自前の outcome
+series を持つ**（v1 は共有していた）。Main.tex L1125 の「correctly specified outcome series」
+という記述とも整合する。
+
+### 6.3. $b$ の校正
+
+**benchmark specification を SQ・rich・$c=0$ に固定**し、
+$t(b)=\sqrt{n_{\mathrm{eval}}}|B_{\mathrm{bench}}(b)|/\sqrt{V_{\mathrm{bench}}(b)}$
+が目標値に一致する $b$ を求める。benchmark を固定するのは $b$ の定義が選択規則に
+依存しないようにするためで、実際に選ばれた候補の $t$ はこれと異なる。
+**その差こそが E4 の測定対象である。**
+
+実測した校正曲線（low design, $s=1.5$, $R_{\mathrm{cal}}=40$, integration $10^5$）:
+
+| $b$ | 0 | 0.2 | 0.4 | 0.6 | 0.8 | 1.0 | 1.3 | 1.6 | 2.0 |
+|---|---|---|---|---|---|---|---|---|---|
+| $t$（$n=1000$） | 0.05 | 0.13 | 0.41 | 0.85 | 1.60 | 2.47 | 3.59 | 5.08 | 6.77 |
+| $t$（$n=3000$） | 0.01 | 0.25 | 0.97 | 2.12 | 3.49 | 5.29 | 7.77 | 11.16 | 14.82 |
+
+単調で、目標 $t\in\{0.5,1,2,4\}$ はいずれもグリッド内に収まる。逆補間した $b$ は
+`refsel/calibration.json` に**コミットする**。publication run は校正を再実行せずこの表を読むので、
+本実行は決定的である。
+
+### 6.4. High-dimensional design
+
+v1 から変更なし（$d=50$、$\operatorname{Cov}(Z_j,Z_\ell)=0.5^{|j-\ell|}$、$s\in\{0.75,2.0\}$）。
+drifting 族は同じ $\psi$ を加える（$t\in\{0,1\}$ のみ）。
+
+---
+
+## 7. Candidate library
+
+| Component | Values |
+|---|---|
+| Generator | SQ (`C=0`)，UKL (`C=1`)，BKL (`C=1`)，BP(0.25)，BP(0.5)（いずれも ATE branch） |
+| Dictionary | linear，second-order，rich |
+| Penalty multiplier | 0，0.25，0.5，1，2，4（$\lambda=c\sqrt{\log\max(p,2)/n_{\mathrm{tr}}}$、$\ell_1$） |
+
+計 90。BP(1) は fixed branch 上で $g''\equiv2$ となり SQ と同じ Bregman 幾何になるため除外する。
+**実測で厳密に一致することを unit test で固定した**（v1 は「確認する」と書いて未実装だった）。
+
+### 7.1. 計算構造（規則を増やしても fit は増えない）
+
+1 つの fold で $(\text{dictionary kind},X_{\mathrm{tr}})$ が同じなら `ExperimentBasis` は
+完全に同一であり、$(\text{loss},\omega)$ が同じなら generator も同一である。したがって：
+
+- basis は fold あたり **3 個**（v1 は 90 回 fit していた）、
+- generator インスタンスは **5 個**（v1 は 90 個。branch 符号は $X$ のみの関数なので共有すると
+  キャッシュが効く）、
+- integration 標本の生の特徴量を (design, overlap, $b$, dictionary) 単位でキャッシュし、
+  fold ごとの標準化はアフィン変換のみ、
+- 候補の $\widehat\alpha$ は $\Phi_{\mathrm{int}}B$（$B$ は $p\times30$）の 1 回の行列積、
+- **選択規則・reference・allowance scale はすべてこの共有結果の上で走る。**
+
+この 2 点（basis 共有と generator 共有＋branch cache）は unit test で固定してある。
+
+---
+
+## 8. Sample splitting
+
+v1 と同一。5 folds を回転させ、fold $k$ を evaluation、fold $(k+1)\bmod5$ を diagnostic、
+残る 3 folds を training とする。candidate fitting・outcome estimation・reference fitting は
+training のみ、選択は diagnostic のみ、evaluation は選択後の score 評価のみに使う。
+
+---
+
+## 9. Reference と allowance
+
+| ID | representer | outcome | $b_r$ |
+|---|---|---|---|
+| `truth` | simulation truth | simulation truth | 0 |
+| `correct` | logistic（true index ＋ **$\psi$**） | 自前 series（`LowOutcomeBasis` ＋ **$\psi$**） | sandwich 楕円体の積 |
+| `misspecified` | logistic（**$Z_1,Z_2$ の線形項のみ**） | 自前 series（**切片＋生 $Z$ のみ**） | correct と同じ式（＝過小） |
+| `rff` | 2,000 random Fourier features の squared Riesz | fold 共有の gradient boosting | $c_r/\sqrt{n_{\mathrm{eval}}}$ |
+
+`misspecified` は**allowance の式を正しいまま reference だけを壊す**。
+allowance は pseudo-true 係数まわりの標本誤差を測るのであって近似誤差を測らないので、
+これは意図的に過小になる。
+
+### 9.1. Allowance のスケーリング
+
+honest な $b_r$ に $\rho\in\{0,0.5,1,2\}$ を掛けたものも同時に評価する。$\rho=0$ は
+「allowance を無視した場合」であり、$b_r$ に結果がどれだけ依存しているかを定量化する。
+$\rho$ と $c_r$ は**スカラーとしてしか効かない**ので 1 つの job 内で全通りを評価する
+（v1 は $c_r$ の 4 通りを 4 つの別 job にして fit を 4 重に無駄打ちしていた）。
+`rff` では $b_r=1/\sqrt{n_{\mathrm{eval}}}$ とし $\rho$ に $c_r$ の役割を持たせる。
+
+### 9.2. Reference drift の監査
+
+各 reference について $B_r$ を §10 の解析式で計算し、$|B_r|\le b_r$ が**実際に成立したか**を
+記録する（`reference_drift`, `allowance_covers_reference`）。v1 は $B_r$ を一度も計算して
+いなかった。Main.tex L1131 の主張はこれで初めて裏づけられる。
+
+### 9.3. 複数 reference と整合チェック
+
+$\widehat U_a^{\mathcal R}=\min_{r}\left(|\widehat D_{a,r}|+q_{a,r}+b_r\right)$、
+$\mathcal R=\{\texttt{correct},\texttt{misspecified}\}$、および
+
+$$|\widehat D_{r,s}|\le q_{r,s}+b_r+b_s$$
+
+の**違反率**を報告する。$q_{r,s}$ は**単一比較の正規半径**であり、候補族に対する同時半径では
+ない（v1 の実装は候補半径を流用しており、閾値が一桁以上大きくなって検定が原理的に発火しな
+かった）。この検定の実測された検出力については §18.3 を見よ。
+
+---
+
+## 10. Audit（解析的評価）
+
+v1 は audit bias を `mean(m + α(y−γ)) − 1` で評価していた。これは outcome noise を含むため
+MC 誤差が $\mathrm{sd}(\hat s)/\sqrt{n_{\mathrm{int}}}$ となり、$10^5$ 点でも $\approx0.006$ である。
+
+simulation では $\alpha_0,\gamma_0,\sigma^2$ が既知なので、**noise を含まない厳密式**を使う：
+
+$$B_a=E_{\mathrm{int}}\left[(\alpha_0-\widehat\alpha_a)(\widehat\gamma-\gamma_0)\right],$$
+$$V_a=\operatorname{Var}_{\mathrm{int}}\left[m_a+\widehat\alpha_a(\gamma_0-\widehat\gamma)\right]
++E_{\mathrm{int}}\left[\widehat\alpha_a^2\right]\sigma^2,\qquad \sigma^2=1,$$
+
+$m_a=\widehat\gamma(1,Z)-\widehat\gamma(0,Z)$。第 1 式は Main.tex eq `candidate_bias` そのもの、
+第 2 式は $E[\varepsilon|X]=0$ から交差項が消えることによる。両式が実際に score の
+モーメントを再現することを unit test で確認してある。
+
+integration 標本は **(design, overlap, $b$) ごとに固定 seed で 1 回だけ生成**し全 replication で
+共有する（v1 は replication ごとに新規生成）。$Y$ は不要なので生成しない。
+サイズは low 100,000 / high 50,000、25,000 行単位で chunk 処理する。
+
+---
+
+## 11. Diagnostics と誤差確率の配分
+
+v1 は mean radius・variance bound・reference 楕円体にそれぞれ $\delta/(2K)$ を割り当て、
+合計が $1.5\delta$ になっていた。
+
+**修正の要点は、variance bound は被覆の主張に入らないことである。**
+Thm `uniform_selected_inference` が要求するのは $|B_a|\le\widehat U_a$ だけであり、
+$\widehat U_a=|\widehat D_a|+q_a+b_r$ に $\widehat V_a^+$ は現れない。$\widehat V_a^+$ は
+Thm `nested_oracle` の risk の主張にしか使われない。
+
+| 事象 | 記号 | 配分 |
+|---|---|---|
+| 全体の miscoverage | $\tau$ | 0.05 |
+| 同時 bias bound（被覆に効く） | $\delta$ | 0.01 |
+| — fold あたり | $\delta/K$ | 0.002 |
+| — うち mean radius $q_a$ | $\delta/(2K)$ | 0.001 |
+| — うち reference allowance $b_r$ | $\delta/(2K)$ | 0.001 |
+| — — $r_\alpha$ 楕円体 / $r_\gamma$ 楕円体 | $\delta/(4K)$ ずつ | 0.0005 |
+| evaluation の正規近似 | $\tau-\delta$ | 0.04 |
+| variance bound（risk の主張のみ・被覆とは独立） | $\delta_V$ | 0.01 |
+
+`DeltaBudget.bias_budget_is_exhausted()` が配分の一致を保証し、unit test で固定してある。
+
+---
+
+## 12. Inference
+
+| 区間 | 定理 | 扱い |
+|---|---|---|
+| `wald_split` / `wald_cf` | Cor `selected_wald` | 通常の Wald |
+| `bias_aware_split` | Thm `uniform_selected_inference` | **定理あり**。fold 0 単独。定理の直接検証 |
+| `conservative_cf` | eq `crossfit_bias_aware_half_length` | **定理あり**。cross-fit の主役 |
+| `bias_aware_pooled` | **なし** | 計算はするが「理論的裏づけなし」と明示して報告 |
+
+v1 は 5 fold を連結した pooled se に単一分割用の critical value を当てており、これを裏づける
+定理は原稿にない。v2 では `bias_aware_split` と `conservative_cf` を主表に据え、
+`bias_aware_pooled` は参考値に落とす。3 者の長さの差を見れば、cross-fit 版の定理を
+書く価値があるかも判断できる（§19 の判断待ち事項）。
+
+---
+
+## 13. 計算計画
+
+### 13.1. Tier
+
+| Tier | grid A / B / C の replications | 目安 |
+|---|---|---|
+| `smoke` | 2 / 2 / 2 | 1 分未満 |
+| `pilot` | 25 / 50 / 25 | 約 1 コア時間 |
+| `publication` | 1,000 / 2,000 / 1,000 | 約 99 コア時間 |
+
+v1 は「fast mode を作らない」方針だったが、これは replication package の要件に反する。
+**tier は replication 数のみを変え、候補集合・選択規則・DGP・seed 設計は一切変えない。**
+
+### 13.2. Publication grid
+
+| Grid | design | 設定 | R | jobs |
+|---|---|---|---|---|
+| A（overlap 掃引） | low | $n\in\{1000,3000\}$，$s\in\{0.5,1.5,2.5\}$，$t=0$ | 1,000 | 6,000 |
+| B（bias 掃引・**E4 主表**） | low | $n\in\{1000,3000\}$，$s=1.5$，$t\in\{0.5,1,2,4\}$ | 2,000 | 16,000 |
+| C | high | $n=3000$，$s\in\{0.75,2.0\}$，$t\in\{0,1\}$ | 1,000 | 4,000 |
+
+overlap と bias を全交差させないのは、$s$ が weight の裾を、$t$ が bias を動かす別々の軸であり、
+交差項に主張がないためである。B に replication を厚く配るのは、そこが一様被覆の主張を
+担うからである（被覆の MCSE は B で 0.0049、A・C で 0.0069）。
+全 reference 種別・全 $\rho$・全 $c_r$・全選択規則は**各 job の内部で**評価される。
+
+**実測コスト**（1 コア、1 replication）: low $n=1000$ 6.3 s / low $n=3000$ 9.9 s /
+high $n=3000$ 44 s。合計 $\approx$ 13.5 + 36 + 49 = **98.5 コア時間**。
+
+### 13.3. 出力
+
+`notebooks/experiments/results/reference_selection/<tier>/` に batch 単位の Parquet。
+**`.gitignore` に追加済み**（v1 は未追加で、本実行すると 50MB 制限と git を直撃した）。
+
+| File | 単位 |
+|---|---|
+| `candidate_*.parquet` | 候補 × fold |
+| `selection_*.parquet` | (規則, reference, $\rho$) × fold |
+| `repetition_*.parquet` | (規則, reference, $\rho$) × replication |
+| `bound_*.parquet` | (reference, $\rho$) × fold |
+| `check_*.parquet` | reference 対 × fold |
+| `oracle_*.parquet` | 規則 × fold |
+
+---
+
+## 14. 報告基準
+
+- 被覆・選択頻度には必ず MCSE $\sqrt{\hat p(1-\hat p)/R}$ を付す（最悪ケース行にも）。
+- **single-split 区間は fold 0 の可用性だけで判定する。** Thm `uniform_selected_inference` は
+  単一分割の主張なので、無関係な fold の失敗を被覆失敗として数えてはならない。
+  cross-fit 区間（`wald_cf`・`conservative_cf`・`bias_aware_pooled`）は全 fold の完了を要する。
+- **選択規則は (rule, reference, $\rho$) で区別する。** 同じ `proposed` でも reference が違えば
+  別の手続きであり、平均してはならない（MCSE の分母も合わなくなる）。
+- **一様性の主張には DGP 族上の最小被覆を主表に出す。** 平均被覆は補助。
+- **被覆は無条件**とする。推定量を出せなかった replication は分母に残し「被覆せず」と数える。
+  条件付き被覆だけを報告すると失敗の多い規則が不当に良く見える（`fixed_bkl` は ATE で
+  常に失敗する）。この規約は `report._coverage_frame` に実装してあり notebook 側の裁量にしない。
+- E2 では定理の**上側** $\widehat U_a\le|B_a|+2(q_a+b_r)$ の成立率も報告する。
+- E2 では $\widehat U_a$ を $(|\widehat D_a|,q_a,b_r)$ に分解し、どの項が binding かを示す。
+
+### 14.1. 主表の形
+
+**Table E4（一様被覆）** — `uniform_coverage_table` が $t$ ごとの掃引、
+`worst_case_coverage_table` が headline の最悪ケース行を出す：
+
+| interval | min 被覆 | MCSE | 達成した $t$ | その $t$ での長さ | 定理あり |
+|---|---|---|---|---|---|
+| wald_split | | | | | ✓ |
+| bias_aware_split | | | | | ✓ |
+| conservative_cf | | | | | ✓ |
+| bias_aware_pooled | | | | | **なし** |
+
+最悪ケース行は列ごとの min ではなく **`idxmin` で選んだ 1 行**から取る。列ごとに min を取ると
+被覆と長さが別のシナリオ由来になり、MCSE も付かない。
+
+Wald は $2\Phi(1.96-t)-1$ に沿って崩れるはずであり（図に理論曲線を重ねる）、
+bias-aware は $t$ によらず $\ge0.95$ を保つはずである。**この対比が論文の核心図表になる。**
+
+**Table E1b（horse race）** — 行が選択規則、列が RMSE・regret・被覆・長さ。
+
+---
+
+## 15. テスト
+
+`tests/test_reference_selection_experiment.py`（**`tests/` に置く** — v1 は
+`notebooks/experiments/` にあり `make test` の対象外だった）。29 件。
+
+| 分類 | 内容 |
+|---|---|
+| DGP | 任意の $b$ で ATE=1／fold rotation の disjoint 性と各観測がちょうど 1 回 evaluation／seed の順序非依存 |
+| **E1a** | **再スケールで $\widehat\alpha$ 不変・目的値は $\kappa$ 倍**（SQ・UKL） |
+| **候補集合** | **BP(1) の曲率が SQ と一致**／90 ラベルが相異なり BP(1) を含まない |
+| **E4 の前提** | **$\psi$ の rich dictionary への $R^2<0.10$** |
+| dictionary | 標準化が training のみで決まる／SQ 候補の符号／**batched `alpha_matrix` が個別 `predict_alpha` と一致** |
+| **効率不変条件** | **basis 3 個・generator 5 個の共有** |
+| **audit** | **解析式が noisy Monte Carlo 平均と一致**／truth reference の bias が厳密に 0 |
+| **reference** | **`correct` は $b\in\{0,1\}$ で allowance を守る**／**`misspecified` は $b=1$ で破る**／truth の allowance は 0 |
+| **予算** | **$\delta$ 配分が $\delta$ を超えない**／不整合な配分を拒否 |
+| inference | bounded-normal-mean が単調・公称被覆を厳密に達成／min-bound が各 bound 以下 |
+| **再現性** | **全 6 テーブルが出る**／同一 job は同一出力／batch 書き出しと再読込 |
+
+`make lint` の対象に `notebooks/experiments/refsel` を追加した（v1 は `src tests tools` のみで
+実験コードが lint されていなかった）。
+
+---
+
+## 16. v1 からの変更点
+
+| # | 変更 | 理由 |
+|---|---|---|
+| 1 | E1a・E1b（再スケール不変性と horse race）を新設 | §4 の存在意義が未検証だった（R1） |
+| 2 | drifting bias 族と $t$ 校正を新設、最小被覆を主表化 | 一様性の主張に最悪ケースがなかった（R2） |
+| 3 | `misspecified` reference・$\rho$ 掃引・reference check を新設 | $b_r$ への依存が未検証だった（R3） |
+| 4 | **reference に自前の outcome estimator を持たせた** | 共有だと reference 自身が allowance を破る（§18.1） |
+| 5 | audit を解析式に変更（noise なし）、$B_r$ も監査 | MC 誤差が $B$ と同オーダーで被覆判定が信用できなかった |
+| 6 | integration 標本を scenario 単位で共有・特徴量をキャッシュ | 計算量の 8 割が audit だった |
+| 7 | **generator を $(\text{loss},\omega)$ 単位で共有し branch cache を導入** | branch 選択子が 1 replication で 1,370 万回呼ばれていた（§18.4） |
+| 8 | $c_r$・$\rho$・reference 種別・選択規則を 1 job 内で評価 | fit の 4 重無駄打ちを解消 |
+| 9 | $\delta$ 予算を再配分（variance を分離） | 合計が $1.5\delta$ で宣言値を超えていた |
+| 10 | `bias_aware_split` を主役にし pooled は「理論なし」と明示 | cross-fit 版に定理がなかった |
+| 11 | 3 tier 構成 | 40 コア日・fast mode なしでは replication package にならない（R6） |
+| 12 | tests を `tests/` へ移動し 29 件に拡充、lint 対象に追加 | 品質ゲートを素通りしていた |
+| 13 | `results/` を `.gitignore` へ | 本実行で 50MB 制限に抵触する |
+| 14 | 選択後の再 fit を廃止（fold 内の結果を再利用） | 同一計算の二度打ち |
+| 15 | NaN の `clip_binding_rate` を fail-closed に（clip を持たない generator のみ例外） | 監査 v3 の K-05/N-19 と同型の fail-open |
+
+---
+
+## 17. モジュール構成
+
+```text
+notebooks/experiments/refsel/
+  dgp.py          DGP・drifting 族・fold rotation・seed
+  candidates.py   basis・候補グリッド・ScaledGenerator・FoldLibrary（fit 共有）
+  reference.py    4 種の reference・allowance・pairwise check
+  selection.py    multiplier bootstrap・DeltaBudget・全選択規則
+  audit.py        解析的 audit（integration 標本と特徴量のキャッシュ）
+  inference.py    4 種の区間・MCSE
+  calibration.py  $t$ 校正と calibration.json の読み書き
+  grids.py        publication / smoke grid、tier 設定
+  report.py       E1b–E6 の表
+  rescaling.py    E1a
+  calibration.json  コミット済みの校正表
+```
+
+---
+
+## 18. 実装後に判明した事実（すべて実測）
+
+計画段階の想定と食い違い、設計変更につながった事項。
+
+### 18.1. 「全員が表現できない方向」は reference も壊す
+
+当初計画では $\psi$ を candidate・reference の双方が表現できない方向としていた。
+$n=3000$, $b=1$ での実測：
+
+| reference | $B_r$ | $b_r$ | $\lvert B_r\rvert\le b_r$ |
+|---|---|---|---|
+| correct（当時：outcome 共有） | +0.649 | 0.111 | **偽** |
+| misspecified（当時） | +0.584 | 0.068 | **偽** |
+
+Thm `data_dependent_bias` の前提が壊れるので $t>0$ の測定が無意味になる。
+§6.2.1 の非対称性を導入して修正した。修正後（$b=1$）：
+
+| reference | $B_r$ | $b_r$ | 判定 | 候補 bound の被覆 |
+|---|---|---|---|---|
+| truth | 0.000 | 0 | 真 | 0.994 |
+| correct | +0.0006 | 0.934 | **真** | 0.996 |
+| misspecified | +0.587 | 0.119 | **偽** | **0.126** |
+
+`misspecified` では候補 bias bound の被覆が 0.126 まで崩壊する。これが E5 の測定対象である。
+
+**Prop `several_references` についての含意**: `min` bound は
+無効な reference を 1 本混ぜるだけで被覆が 0.126 まで落ちる（無効な方の bound が小さいので
+min に選ばれる）。命題は「各 $r$ について $|B_r|\le b_r$」を仮定しているので数学的には正しいが、
+**実務上は min を取る操作が最も弱い reference の妥当性に完全に依存する**。
+原稿で注意喚起する価値がある。
+
+### 18.2. BKL は ATE で 100% 失敗する
+
+$n=3000$, $s=1.5$, 5 fold・全 dictionary で BKL は 90/90 が `domain_error`。
+Main.tex Table 5（既存の二標本実験）の「BKL failures 200」と整合し、
+Main.tex の guidance 表が BKL を OWATE に割り当てていることとも整合する。
+候補集合には残す（admissibility screen が非互換ペアを排除することの実演になる）が、
+`fixed_bkl` は常に利用不能となるので、被覆を無条件で報告する規約（§14）が必須になる。
+
+その他の失敗率（$n=3000$, $s=1.5$、全 450 fit 中）: `converged` 213、
+`diagnostic_failure` 147、`domain_error` 90。admissible は約 50%。BP は rich/second-order で
+30 中 25 が失敗する。これらは報告対象であって不具合ではない。
+
+### 18.3. reference check の検出力は低い
+
+$q_{r,s}$ を単一比較の正規半径に直した後でも、`correct` vs `misspecified` の違反率は
+**5%**（$n=3000$, $b=1$, 20 fold）。$|\widehat D_{r,s}|=0.62$ に対し閾値
+$q_{r,s}+b_r+b_s=1.77$ で、**有効な側の reference の allowance $b_r=0.93$ が閾値を支配する**。
+すなわち、片方の reference の allowance が大きいと、他方が無効でも検定は発火しにくい。
+eq `reference_check` の実用上の限界として報告すべきである。
+
+### 18.4. 計算量のボトルネックは fit ではなく branch 選択子だった
+
+プロファイル（low $n=3000$、1 replication）で `ate_branch` が **1,370 万回**呼ばれ、
+全体 18.6 s のうち 7.1 s を占めていた。generator が候補ごとに 90 個作られており、
+branch 符号のキャッシュ（`generators.py:283`）が候補間で共有されなかったためである。
+$(\text{loss},\omega)$ 単位で 5 個に共有し、評価ブロックを `branch_caches()` で包んで
+13.5 s → 9.9 s に短縮した。残りは L-BFGS そのもので、これ以上は削れない。
+
+高次元は当初「1 replication が 40 分超」と誤って測定したが、これは macOS に `timeout`
+コマンドが無く `|| echo` が誤発火しただけだった。実測は **44 秒**である。
+
+### 18.5. bias bound は有益だが安くはない
+
+$n=3000$, $t=0$, `correct` reference で $\widehat U/\widehat{se}=3.02$、
+bias-aware 区間は Wald の 2.4 倍の長さ。`truth` reference では 0.96 で 1.4 倍。
+$\widehat U$ の内訳は $q_a\approx0.41$、$b_r\approx0.24$ で、
+**同時半径 $q_a$ の方が allowance より大きい**。候補数 90 に対する同時性の代償である。
+Cor `oa:bias_aware_length` の前提 $\widehat U/\widehat{se}\to0$ はこの設計では成立しない。
+E6 はこれを正直に報告する。
+
+---
+
+## 19. 原稿側で確定が必要な点
+
+コードではなく Main.tex の問題。
+
+1. **L1125「Tuning uses only the training sample」** — 実装は outcome も high-dim reference の
+   ridge もハイパラ固定で、CV していない。v2 でも固定を維持する（候補比較の交絡を避けるため）
+   ので、**原稿の記述を「固定値を用いる」に改めるのが正しい**。
+2. **L1131「realized reference drift を近似する」** — v2 の §9.2 で実装したので裏づけられる。
+3. **L1133 のベンチマーク 4 種** — v2 の E1b が `fixed_*`・`bregman_cv`・`lsif_cv`・`oracle` を
+   実装するので裏づけられる。
+4. **Prop `several_references`** — v2 の §9.3 が実装する。ただし §18.1・§18.3 の限界を
+   本文に書き添えるべきである。
+5. **cross-fit の bias-aware 区間** — 定理がない。定理を追加するか、`conservative_cf` を
+   主表に据えるか。**著者の判断待ち。**
+6. **§7.2 の記述全体** — 結果が出てから書き直す。数値のない段階で主張を先に書かないこと。
