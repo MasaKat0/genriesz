@@ -245,23 +245,44 @@ def bias_bound_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def oracle_regret_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Experiment E3: realized regret against the theorem's predicted remainder."""
+    """Experiment E3: realized regret against the theorem's predicted remainder.
+
+    Regret is only defined on folds where the rule produced an estimate, so it is
+    unavoidably conditional. ``folds_used`` and ``fold_share`` state that
+    denominator explicitly, measured against the folds on which the oracle itself
+    was available: a rule that fails often would otherwise show a flattering mean
+    computed over its easy folds. The median is reported next to the mean because
+    the distribution has a heavy right tail.
+    """
 
     oracle = tables.get("oracle")
     if oracle is None or oracle.empty:
         return pd.DataFrame()
-    return (
-        oracle.groupby(["rule", "reference", "allowance_scale", *SCENARIO_KEYS], dropna=False)
+    keys = ["rule", "reference", "allowance_scale", *SCENARIO_KEYS]
+    table = (
+        oracle.groupby(keys, dropna=False)
         .agg(
-            folds=("fold", "size"),
+            folds_used=("fold", "size"),
             mean_oracle_regret=("oracle_regret", "mean"),
             median_oracle_regret=("oracle_regret", "median"),
+            p90_oracle_regret=("oracle_regret", lambda x: float(np.quantile(x, 0.9))),
+            max_oracle_regret=("oracle_regret", "max"),
             mean_risk=("audit_risk", "mean"),
             mean_oracle_risk=("oracle_audit_risk", "mean"),
         )
         .assign(risk_ratio=lambda f: f["mean_risk"] / f["mean_oracle_risk"])
         .reset_index()
     )
+    totals = (
+        oracle.loc[oracle["rule"].eq("oracle")]
+        .groupby(list(SCENARIO_KEYS), dropna=False)
+        .size()
+        .rename("folds_with_oracle")
+        .reset_index()
+    )
+    table = table.merge(totals, on=list(SCENARIO_KEYS), how="left")
+    table["fold_share"] = table["folds_used"] / table["folds_with_oracle"]
+    return table
 
 
 def reference_robustness_table(
@@ -281,13 +302,22 @@ def reference_robustness_table(
 
 
 def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """Experiment E5: violation rate of the pairwise reference check."""
+    """Experiment E5: violation rate of the pairwise reference check.
+
+    ``undecidable_rate`` counts folds where some ingredient was non-finite. Those
+    are neither passes nor violations, and folding them into the pass rate would
+    let a blown-up reference score be reported as a clean check.
+    """
 
     checks = tables.get("check")
     if checks is None or checks.empty:
         return pd.DataFrame()
+    checks = checks.copy()
+    if "checkable" not in checks:
+        checks["checkable"] = True
     grouped = checks.groupby(["first", "second", *SCENARIO_KEYS], dropna=False).agg(
         folds=("fold", "size"),
+        undecidable_rate=("checkable", lambda x: 1.0 - float(np.mean(x))),
         violation_rate=("violated", "mean"),
         mean_absolute_difference=("difference", lambda x: float(np.mean(np.abs(x)))),
         mean_radius=("radius", "mean"),

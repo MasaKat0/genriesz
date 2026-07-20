@@ -30,8 +30,26 @@ from .dgp import Design, generate_data, make_fold_roles, stable_seed
 
 CALIBRATION_PATH = Path(__file__).with_name("calibration.json")
 
-#: Hidden-direction scales evaluated when building the calibration curve.
-DEFAULT_B_GRID: tuple[float, ...] = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0)
+#: Hidden-direction scales evaluated when building the calibration curve, and the
+#: cost settings, per design. The committed ``calibration.json`` is reproduced by
+#: ``build_calibration(calibration_specifications())`` with these values; keeping
+#: them here rather than in the caller is what makes the provenance of the table
+#: recoverable from the code alone.
+CALIBRATION_SETTINGS: dict[str, dict[str, object]] = {
+    "low": {
+        "b_grid": (0.0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.3, 1.6, 2.0),
+        "replications": 40,
+        "integration_size": 100_000,
+    },
+    "high": {
+        "b_grid": (0.0, 0.3, 0.6, 1.0, 1.5, 2.0),
+        "replications": 15,
+        "integration_size": 50_000,
+    },
+}
+
+#: Retained for callers that want a single grid.
+DEFAULT_B_GRID: tuple[float, ...] = CALIBRATION_SETTINGS["low"]["b_grid"]  # type: ignore[assignment]
 
 
 def calibration_key(design: Design, sample_size: int, overlap_scale: float, target_t: float) -> str:
@@ -58,6 +76,7 @@ def benchmark_curve(
     """
 
     curve: dict[float, float] = {}
+    attempts: dict[float, tuple[int, int]] = {}
     for b in b_grid:
         seed = stable_seed(base_seed, "calibration", design, sample_size, overlap_scale, b)
         shared = dict(
@@ -100,8 +119,16 @@ def benchmark_curve(
             if np.isfinite(audit.bias[0]) and np.isfinite(audit.variance[0]):
                 biases.append(float(audit.bias[0]))
                 variances.append(float(audit.variance[0]))
-        if not biases:
-            raise RuntimeError(f"The benchmark specification never fit at b={b}.")
+        attempts[b] = (len(biases), replications)
+        if len(biases) < replications:
+            # Conditioning t(b) on the replications that happened to fit would
+            # calibrate a different data-generating process than the one the
+            # publication grid then runs, and the failure rate grows with b.
+            raise RuntimeError(
+                f"The benchmark specification fit on only {len(biases)} of "
+                f"{replications} replications at b={b}. The calibration curve "
+                "would be conditional on success."
+            )
         curve[b] = float(
             np.sqrt(n_evaluation) * abs(np.mean(biases)) / np.sqrt(np.mean(variances))
         )
@@ -134,20 +161,29 @@ def invert_curve(curve: dict[float, float], target_t: float) -> float:
 def build_calibration(
     specifications: tuple[tuple[Design, int, float, tuple[float, ...]], ...],
     *,
-    replications: int = 40,
-    integration_size: int = 100_000,
+    settings: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Build the full calibration table for a set of ``(design, n, s, targets)``."""
+    """Build the full calibration table for a set of ``(design, n, s, targets)``.
 
+    Cost settings are per design, because the high-dimensional benchmark is far
+    more expensive per replication. The payload records the grid and the counts
+    actually used, so the committed table can be regenerated and checked against
+    the code that produced it.
+    """
+
+    settings = settings or CALIBRATION_SETTINGS
     entries: dict[str, float] = {}
     curves: dict[str, dict[str, float]] = {}
     for design, sample_size, overlap_scale, targets in specifications:
+        chosen = settings[design]
+        b_grid = tuple(float(b) for b in chosen["b_grid"])  # type: ignore[index]
         curve = benchmark_curve(
             design=design,
             sample_size=sample_size,
             overlap_scale=overlap_scale,
-            replications=replications,
-            integration_size=integration_size,
+            b_grid=b_grid,
+            replications=int(chosen["replications"]),  # type: ignore[index]
+            integration_size=int(chosen["integration_size"]),  # type: ignore[index]
         )
         curves[f"{design}|n={sample_size}|s={overlap_scale:g}"] = {
             f"{b:g}": value for b, value in curve.items()
@@ -158,8 +194,14 @@ def build_calibration(
             )
     return {
         "benchmark": BENCHMARK_SPEC.label,
-        "replications": replications,
-        "integration_size": integration_size,
+        "settings": {
+            design: {
+                "b_grid": [float(b) for b in chosen["b_grid"]],  # type: ignore[index]
+                "replications": int(chosen["replications"]),  # type: ignore[index]
+                "integration_size": int(chosen["integration_size"]),  # type: ignore[index]
+            }
+            for design, chosen in settings.items()
+        },
         "curves": curves,
         "hidden_scale": entries,
     }

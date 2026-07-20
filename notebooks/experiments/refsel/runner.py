@@ -9,8 +9,10 @@ library, so widening the comparison costs almost no additional computation.
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
+from hashlib import blake2b
 from pathlib import Path
 from typing import Literal
 
@@ -77,15 +79,17 @@ Tier = Literal["smoke", "pilot", "publication"]
 #:
 #: Grid B carries the uniform-coverage claim and gets the most replications
 #: (coverage Monte Carlo standard error 0.0049 at the nominal level). Grid A is
-#: supporting evidence on overlap and grid C is the high-dimensional check, so
-#: both run at 1,000 (standard error 0.0069). Measured single-core costs per
-#: replication are 6.3 s at n=1000, 9.9 s at n=3000, and 44 s in the
-#: high-dimensional design, giving roughly 99 core-hours for the publication
-#: tier.
+#: supporting evidence on overlap, at 1,000 (0.0069). Grid C is the
+#: high-dimensional check and is by far the most expensive per replication, so it
+#: runs at 500 (0.0097), which is adequate for a secondary design.
+#:
+#: Measured single-core costs per replication: 7.6 s at n=1000, 12.7 s at
+#: n=3000, and 57.5 s in the high-dimensional design. The publication tier is
+#: therefore about 94 core-hours.
 TIER_REPLICATIONS: dict[str, dict[str, int]] = {
     "smoke": {"A": 2, "B": 2, "C": 2},
     "pilot": {"A": 25, "B": 50, "C": 25},
-    "publication": {"A": 1000, "B": 2000, "C": 1000},
+    "publication": {"A": 1000, "B": 2000, "C": 500},
 }
 
 #: Tables written per batch.
@@ -119,6 +123,15 @@ class Numerics:
     base_seed: int = 20260720
     budget: DeltaBudget = field(default_factory=DeltaBudget)
     store_candidates: bool = True
+
+    def __post_init__(self) -> None:
+        if self.budget.n_folds != self.n_folds:
+            raise ValueError(
+                "The error budget is allocated per fold, so DeltaBudget.n_folds "
+                f"({self.budget.n_folds}) must equal Numerics.n_folds ({self.n_folds}). "
+                "Otherwise the bias event is charged at the wrong rate and the "
+                "total silently exceeds delta."
+            )
 
     def integration_size(self, design: Design) -> int:
         return self.low_integration_size if design == "low" else self.high_integration_size
@@ -345,20 +358,40 @@ def run_fold(
         library, X_eval, y_eval, outcome.contrast(X_eval), outcome.predict(X_eval)
     )
 
-    variants = reference_variants(scenario.design, numerics)
+    # A reference whose fit failed carries no allowance guarantee, so it must not
+    # produce a bias bound, a selection, or an interval. Recording only its
+    # status while still using its numbers would be a fail-open on exactly the
+    # premise of Theorem ``data_dependent_bias``.
+    usable = {name for name, reference in references.items() if reference.success}
+    variants = tuple(
+        (name, scale)
+        for name, scale in reference_variants(scenario.design, numerics)
+        if name in usable
+    )
     bounds: dict[tuple[str, float], FloatArray] = {
         (name, scale): bias_upper_bound(
             np.abs(drift[name]), radius[name], references[name].allowance(scale)
         )
         for name, scale in variants
     }
-    if scenario.design == "low":
+    if scenario.design == "low" and {"correct", "misspecified"} <= usable:
         for scale in numerics.allowance_scales:
             bounds[("min", scale)] = minimum_bias_upper_bound(
                 {name: bounds[(name, scale)] for name in ("correct", "misspecified")}
             )
 
-    inference_bound = bounds[(primary_reference(scenario.design), 1.0)]
+    primary = primary_reference(scenario.design)
+    inference_bound = bounds.get((primary, 1.0))
+    if inference_bound is None:
+        # Without the primary reference no rule has a bound to build an interval
+        # from. Record the fold as producing nothing rather than silently falling
+        # back to a different reference.
+        return FoldOutcome(
+            selection={},
+            rows_candidate=[],
+            rows_bound=[],
+            rows_check=[],
+        )
     selection: dict[tuple[str, str, float], dict[str, object]] = {}
 
     def record(
@@ -422,7 +455,7 @@ def run_fold(
         if rule not in REFERENCE_DEPENDENT_RULES:
             record(rule, "none", 1.0, apply_rule(rule, base_inputs), base_inputs)
 
-    for name in references:
+    for name in sorted(usable):
         inputs = replace(base_inputs, absolute_drift=np.abs(drift[name]))
         record("abs_drift", name, 1.0, apply_rule("abs_drift", inputs), inputs)
 
@@ -464,6 +497,9 @@ def run_fold(
                 "mean_radius": float(np.mean(radius[name][mask])) if has_radius else np.nan,
                 "allowance": float(allowance),
                 "truth_reference_bias": float(truth_reference_bias),
+                "reference_status": (
+                    references[name].status if name in references else "minimum"
+                ),
                 "reference_drift": float(reference_drift.get(name, np.nan)),
                 # None for the minimum-bound row, which has no single reference
                 # and therefore no single allowance to check.
@@ -476,7 +512,7 @@ def run_fold(
         )
 
     rows_check: list[dict[str, object]] = []
-    estimated = [name for name in references if name != "truth"]
+    estimated = [name for name in references if name != "truth" and name in usable]
     for i, first in enumerate(estimated):
         for second in estimated[i + 1 :]:
             check = reference_check(
@@ -494,6 +530,7 @@ def run_fold(
                     "difference": check.difference,
                     "radius": check.radius,
                     "allowance_sum": check.allowance_sum,
+                    "checkable": check.checkable,
                     "violated": check.violated,
                 }
             )
@@ -755,6 +792,19 @@ def expand_jobs(config: ExperimentConfig) -> list[tuple[ExperimentConfig, Scenar
     ]
 
 
+def configuration_digest(config: ExperimentConfig) -> str:
+    """Stable digest of everything that determines the numbers in a run.
+
+    Reusing a completed batch is only safe when the configuration that produced
+    it is the one being asked for now. Skipping on file existence alone would let
+    a changed calibration table, multiplier count, or scenario list read stale
+    Parquet as if it were the new run's output.
+    """
+
+    payload = json.dumps(configuration_record(config), sort_keys=True, default=str)
+    return blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
+
+
 def configuration_record(config: ExperimentConfig) -> dict[str, object]:
     """Serializable description of a configuration, written next to the results."""
 
@@ -790,12 +840,46 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
 
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([configuration_record(config)]).to_json(
-        output / "configuration.json", orient="records", indent=2
-    )
-
     jobs = expand_jobs(config)
     batches = [jobs[i : i + config.batch_size] for i in range(0, len(jobs), config.batch_size)]
+    digest = configuration_digest(config)
+    manifest_path = output / "run_manifest.json"
+    if manifest_path.exists():
+        previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if previous.get("digest") != digest:
+            raise RuntimeError(
+                f"{output} holds results from a different configuration "
+                f"(digest {previous.get('digest')} on disk, {digest} requested). "
+                "Resuming would mix runs. Write to a new directory, or delete the "
+                "existing one if the old results are no longer wanted."
+            )
+        stale = sorted(
+            path.name
+            for table in TABLES
+            for path in output.glob(f"{table}_*.parquet")
+            if int(path.stem.rsplit("_", 1)[1]) >= len(batches)
+        )
+        if stale:
+            raise RuntimeError(
+                f"{output} holds {len(stale)} batch files beyond the {len(batches)} "
+                f"batches of this configuration, starting with {stale[0]}. "
+                "load_experiment would read them as part of this run."
+            )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "digest": digest,
+                "n_batches": len(batches),
+                "configuration": configuration_record(config),
+            },
+            indent=2,
+            sort_keys=True,
+            default=str,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
     for batch_index, batch in enumerate(batches):
         paths = {table: output / f"{table}_{batch_index:05d}.parquet" for table in TABLES}
         if all(path.exists() for path in paths.values()):
@@ -812,9 +896,23 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
 
 
 def load_experiment(output_dir: str | Path) -> dict[str, pd.DataFrame]:
-    """Load every completed batch of an experiment directory."""
+    """Load every completed batch of an experiment directory.
+
+    Raises when the directory contains more batch files than its manifest
+    records, which would otherwise silently mix a shorter run's output into a
+    longer one's tables.
+    """
 
     output = Path(output_dir)
+    manifest_path = output / "run_manifest.json"
+    if manifest_path.exists():
+        expected = int(json.loads(manifest_path.read_text(encoding="utf-8"))["n_batches"])
+        found = len(list(output.glob("repetition_*.parquet")))
+        if found > expected:
+            raise RuntimeError(
+                f"{output} holds {found} repetition batches but its manifest records "
+                f"{expected}. Remove the stale files before loading."
+            )
     loaded: dict[str, pd.DataFrame] = {}
     for table in TABLES:
         frames = [pd.read_parquet(path) for path in sorted(output.glob(f"{table}_*.parquet"))]

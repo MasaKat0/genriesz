@@ -74,21 +74,49 @@ def test_ate_is_one_for_every_hidden_scale(hidden_scale: float) -> None:
     assert np.all((data.propensity > 0.0) & (data.propensity < 1.0))
 
 
-def test_hidden_direction_is_nearly_orthogonal_to_the_rich_dictionary() -> None:
-    """Experiment E4 needs a direction the candidates genuinely cannot fit.
+def _projection_r_squared(target: np.ndarray, features: np.ndarray) -> float:
+    beta, *_ = np.linalg.lstsq(features, target, rcond=None)
+    residual = target - features @ beta
+    return 1.0 - float(np.mean(residual**2)) / float(np.var(target))
 
-    If the rich dictionary could approximate it, increasing the hidden scale
-    would not increase the bias and the calibration would be meaningless.
+
+def test_hidden_direction_asymmetry_holds_in_the_spaces_actually_used() -> None:
+    """The invariant experiment E4 rests on, checked on the real bases.
+
+    The candidate basis is treatment specific, and treatment depends on the
+    hidden direction through the propensity, so the interaction absorbs part of
+    it: the unconditional projection understates what the candidates can fit.
+    The test therefore uses the treatment-specific bases at the largest
+    calibrated scale, where absorption is worst.
+
+    What must hold is the asymmetry, not orthogonality: the candidates leave most
+    of the direction unexplained while the correct reference spans it exactly. If
+    the reference did not, its own allowance would fail and every candidate bound
+    would fail with it.
     """
 
-    rng = np.random.default_rng(7)
-    Z = rng.normal(size=(200_000, 5))
-    psi = hidden_direction(Z)
-    features = ExperimentBasis("rich").base_features(Z)
-    beta, *_ = np.linalg.lstsq(features, psi, rcond=None)
-    residual = psi - features @ beta
-    r_squared = 1.0 - float(np.mean(residual**2)) / float(np.var(psi))
-    assert r_squared < 0.10
+    from refsel.reference import (
+        MisspecifiedOutcomeBasis,
+        ReferenceOutcomeBasis,
+        _correct_features,
+    )
+
+    # The largest hidden scale in the committed calibration table.
+    data = generate_data(
+        n=100_000, design="low", overlap_scale=1.5, hidden_scale=1.383, seed=13
+    )
+    psi = hidden_direction(data.X[:, 1:])
+    intercept = np.ones((data.X.shape[0], 1))
+
+    candidate = _projection_r_squared(psi, ExperimentBasis("rich").raw_features(data.X))
+    assert candidate < 0.5, "candidates must leave most of the hidden direction unfitted"
+
+    assert _projection_r_squared(psi, ReferenceOutcomeBasis()(data.X)) > 0.999
+    assert (
+        _projection_r_squared(psi, np.column_stack((intercept, _correct_features(data.X))))
+        > 0.999
+    )
+    assert _projection_r_squared(psi, MisspecifiedOutcomeBasis()(data.X)) < 0.5
 
 
 def test_fold_rotation_is_disjoint_and_covers_the_sample() -> None:
@@ -487,7 +515,30 @@ def test_batched_run_writes_and_reloads(tmp_path) -> None:
     loaded = load_experiment(tmp_path / "smoke")
     assert set(loaded) == set(TABLES)
     assert not loaded["repetition"].empty
-    assert (tmp_path / "smoke" / "configuration.json").exists()
+    assert (tmp_path / "smoke" / "run_manifest.json").exists()
+
+
+def test_a_changed_configuration_refuses_to_reuse_batches(tmp_path) -> None:
+    """Resuming must not read another configuration's Parquet as this run's output.
+
+    Skipping a batch on file existence alone would let a changed calibration
+    table, multiplier count, or scenario list report stale numbers under the new
+    configuration's name.
+    """
+
+    from dataclasses import replace as dataclass_replace
+
+    from refsel.runner import Numerics, run_experiment
+
+    config = _smoke_config(1)
+    run_experiment(config, tmp_path / "run")
+    changed = dataclass_replace(
+        config,
+        numerics=dataclass_replace(config.numerics, multiplier_draws=123),
+    )
+    with pytest.raises(RuntimeError, match="different configuration"):
+        run_experiment(changed, tmp_path / "run")
+    assert Numerics is not None
 
 
 def test_rescaling_invariance_survives_the_l1_penalty() -> None:
@@ -609,3 +660,101 @@ def test_audit_caches_can_be_cleared() -> None:
     )
     assert fresh is not sample
     assert np.array_equal(fresh.X, sample.X)
+
+
+def test_numerics_rejects_a_fold_count_that_disagrees_with_the_budget() -> None:
+    """The budget is allocated per fold, so the two counts must not drift apart.
+
+    With ten folds and a five-fold budget the bias event would be charged at
+    delta/(2*5) ten times over, doubling the declared spend while every
+    within-budget check still passed.
+    """
+
+    from refsel.runner import Numerics
+
+    with pytest.raises(ValueError, match="must equal"):
+        Numerics(n_folds=10)
+    assert Numerics(n_folds=10, budget=DeltaBudget(n_folds=10)).n_folds == 10
+
+
+def test_reference_check_reports_a_nonfinite_comparison_as_undecidable() -> None:
+    """A blown-up reference score must not be recorded as a passing check."""
+
+    from refsel.reference import ReferenceCheck
+
+    clean = ReferenceCheck("a", "b", difference=0.1, radius=0.05, allowance_sum=0.01)
+    assert clean.checkable
+    assert clean.violated is True
+
+    broken = ReferenceCheck("a", "b", difference=np.nan, radius=0.05, allowance_sum=0.01)
+    assert not broken.checkable
+    assert broken.violated is None
+
+
+def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
+    """A reference without a valid allowance carries no guarantee.
+
+    Recording the failure in a status column while still forming its bias bound,
+    selecting with it, and reporting its interval would be a fail-open on the
+    premise of Theorem ``data_dependent_bias``.
+    """
+
+    from refsel import runner as runner_module
+    from refsel.audit import integration_sample, scenario_key
+    from refsel.candidates import candidate_grid
+    from refsel.runner import Numerics, Scenario, run_fold
+
+    scenario = Scenario(
+        grid="A",
+        design="low",
+        sample_size=600,
+        overlap_scale=1.5,
+        target_t=0.0,
+        hidden_scale=0.0,
+    )
+    numerics = Numerics(low_integration_size=3000, multiplier_draws=60)
+    data = generate_data(
+        n=scenario.sample_size,
+        design="low",
+        overlap_scale=1.5,
+        hidden_scale=0.0,
+        seed=101,
+    )
+    shared = dict(
+        design="low", overlap_scale=1.5, hidden_scale=0.0, size=3000, seed=102
+    )
+    kwargs = dict(
+        scenario=scenario,
+        numerics=numerics,
+        data=data,
+        integration=integration_sample(**shared),
+        integration_key=scenario_key(**shared),
+        roles=make_fold_roles(scenario.sample_size, 5, 103)[0],
+        specs=candidate_grid(),
+        scenario_seed=104,
+        repetition=0,
+        fold_index=0,
+    )
+    healthy = run_fold(**kwargs)
+    assert any(key[1] == "misspecified" for key in healthy.selection)
+
+    original = runner_module._build_references
+
+    def break_misspecified(*args, **kw):
+        references = original(*args, **kw)
+        references["misspecified"].success = False
+        references["misspecified"].status = "logistic_separation"
+        return references
+
+    runner_module._build_references = break_misspecified
+    try:
+        degraded = run_fold(**kwargs)
+    finally:
+        runner_module._build_references = original
+
+    assert not any(key[1] == "misspecified" for key in degraded.selection)
+    assert not any(row["reference"] == "misspecified" for row in degraded.rows_bound)
+    # The minimum bound of Proposition several_references needs both members.
+    assert not any(key[1] == "min" for key in degraded.selection)
+    # The surviving references are unaffected.
+    assert any(key[1] == "correct" for key in degraded.selection)

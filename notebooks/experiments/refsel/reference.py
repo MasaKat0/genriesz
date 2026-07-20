@@ -78,6 +78,9 @@ class ReferenceEstimator:
     name: str
     status: str
     honest_allowance: float
+    #: Whether the fit met its convergence and finiteness conditions. A reference
+    #: that failed carries no allowance guarantee, so the fold must not use it.
+    success: bool = True
 
     def alpha(self, X: FloatArray) -> FloatArray:
         raise NotImplementedError
@@ -114,6 +117,7 @@ class TruthReference(ReferenceEstimator):
         self.hidden_scale = hidden_scale
         self.status = "truth"
         self.honest_allowance = 0.0
+        self.success = True
 
     def alpha(self, X: FloatArray) -> FloatArray:
         return true_representer(
@@ -409,7 +413,24 @@ class ReferenceCheck:
     allowance_sum: float
 
     @property
-    def violated(self) -> bool:
+    def checkable(self) -> bool:
+        """Whether every ingredient is finite.
+
+        Without this the comparison fails open: ``abs(nan) > nan`` is ``False``,
+        so a reference whose score blew up would be recorded as having passed the
+        check rather than as undecidable.
+        """
+
+        return bool(
+            np.isfinite(self.difference)
+            and np.isfinite(self.radius)
+            and np.isfinite(self.allowance_sum)
+        )
+
+    @property
+    def violated(self) -> bool | None:
+        if not self.checkable:
+            return None
         return bool(abs(self.difference) > self.radius + self.allowance_sum)
 
 
