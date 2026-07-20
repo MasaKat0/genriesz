@@ -442,6 +442,7 @@ def failure_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         failure_rate=("fit_success", lambda x: 1.0 - float(np.mean(x))),
         inadmissible_rate=("admissible", lambda x: 1.0 - float(np.mean(x))),
         median_max_abs_alpha=("max_abs_alpha", "median"),
+        median_ess_ratio=("ess_ratio", "median"),
     )
     status = (
         candidates.assign(count=1)

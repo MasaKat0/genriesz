@@ -43,6 +43,8 @@ from refsel.dgp import (  # noqa: E402
 from refsel.inference import bias_aware_critical_value  # noqa: E402
 from refsel.selection import (  # noqa: E402
     DeltaBudget,
+    candidate_scores,
+    effective_sample_ratio,
     gaussian_multiplier_mean_radii,
     minimum_bias_upper_bound,
 )
@@ -263,6 +265,61 @@ def test_alpha_matrix_agrees_with_individual_prediction() -> None:
         v = np.asarray(basis(data.X), dtype=float) @ library.fits[j].beta
         expected = np.asarray(library.generators[j].inv_grad(data.X, v), dtype=float)
         assert np.allclose(batched[:, j], expected)
+
+
+def test_effective_sample_ratio_is_scale_free_and_bracketed() -> None:
+    """Uniform weight gives one, a single spike gives ``1/n``, and scale is irrelevant."""
+
+    n = 50
+    uniform = np.full(n, 2.0)
+    spike = np.zeros(n)
+    spike[0] = 1.0
+    alternating = np.where(np.arange(n) % 2 == 0, 1.0, -1.0)
+    ratios = effective_sample_ratio(np.column_stack([uniform, spike, alternating]))
+    assert np.isclose(ratios[0], 1.0)
+    assert np.isclose(ratios[1], 1.0 / n)
+    assert np.isclose(ratios[2], 1.0)
+    # The Kish ratio is homogeneous of degree zero, so screening on it cannot
+    # depend on the units of the target parameter.
+    scaled = effective_sample_ratio(np.column_stack([uniform, spike]) * 137.0)
+    assert np.allclose(scaled, ratios[:2])
+    assert np.isclose(effective_sample_ratio(np.zeros((n, 1)))[0], 0.0)
+
+
+def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:
+    """A stricter pre-specified restriction may only remove candidates."""
+
+    data = generate_data(n=600, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=97)
+    specs = candidate_grid()[:20]
+    library = FoldLibrary(data.X, specs, max_iter=1000, tolerance=1e-8)
+    gamma = np.zeros(data.X.shape[0])
+    contrast = np.zeros(data.X.shape[0])
+
+    def admissible_at(threshold: float | None) -> np.ndarray:
+        _, admissible, _, _ = candidate_scores(
+            library, data.X, data.y, contrast, gamma, min_ess_ratio=threshold
+        )
+        return admissible
+
+    unrestricted = admissible_at(None)
+    assert np.array_equal(admissible_at(0.0), unrestricted)
+    previous = unrestricted
+    for threshold in (0.05, 0.2, 0.5):
+        current = admissible_at(threshold)
+        assert np.all(current <= previous)
+        previous = current
+    # The strictest threshold below one still cannot admit anything new.
+    assert np.sum(admissible_at(0.99)) <= np.sum(unrestricted)
+
+
+def test_weight_screen_rejects_a_threshold_outside_the_unit_interval() -> None:
+    data = generate_data(n=300, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=11)
+    library = FoldLibrary(data.X, (BENCHMARK_SPEC,), max_iter=500, tolerance=1e-8)
+    zeros = np.zeros(data.X.shape[0])
+    with pytest.raises(ValueError, match="min_ess_ratio"):
+        candidate_scores(library, data.X, data.y, zeros, zeros, min_ess_ratio=1.0)
+    with pytest.raises(ValueError, match="min_ess_ratio"):
+        candidate_scores(library, data.X, data.y, zeros, zeros, min_ess_ratio=-0.1)
 
 
 # --------------------------------------------------------------------------- #

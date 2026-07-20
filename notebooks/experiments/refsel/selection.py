@@ -291,25 +291,64 @@ def fixed_benchmark_indices(library: FoldLibrary) -> dict[str, int]:
     return out
 
 
+def effective_sample_ratio(alpha: FloatArray) -> FloatArray:
+    """Kish effective sample size of each column, divided by the sample size.
+
+    ``(sum_i |a_i|)^2 / (n sum_i a_i^2)`` equals one for uniform weights and
+    ``1/n`` when a single observation carries all of the weight. It is invariant
+    to rescaling a column, so screening on it neither depends on the units of the
+    target parameter nor interferes with the rescaling invariance of Section 4.
+
+    A column that is identically zero has no effective sample and receives zero.
+    """
+
+    alpha = np.asarray(alpha, dtype=float)
+    n = alpha.shape[0]
+    absolute = np.abs(alpha)
+    numerator = absolute.sum(axis=0) ** 2
+    denominator = n * (alpha * alpha).sum(axis=0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        ratio = np.where(denominator > 0.0, numerator / denominator, 0.0)
+    return np.asarray(ratio, dtype=float)
+
+
 def candidate_scores(
     library: FoldLibrary,
     X: FloatArray,
     y: FloatArray,
     contrast: FloatArray,
     gamma: FloatArray,
-) -> tuple[FloatArray, BoolArray, FloatArray]:
-    """Return the score matrix, admissibility flags, and maximum absolute weights."""
+    *,
+    min_ess_ratio: float | None = None,
+) -> tuple[FloatArray, BoolArray, FloatArray, FloatArray]:
+    """Return scores, admissibility flags, maximum weights, and ESS ratios.
 
+    ``min_ess_ratio`` is the pre-specified weight-concentration restriction that
+    Section 4 of the manuscript allows. A candidate whose representer spreads its
+    weight over less than that fraction of the diagnostic fold is inadmissible.
+    ``None`` imposes no restriction, which is the behaviour the plan measured.
+
+    The restriction screens candidates; it does not cap any weight, so the
+    estimand is unchanged. Admissibility still requires a converged fit and
+    finite scores, and the ratio is reported for every candidate whether or not
+    the restriction is imposed.
+    """
+
+    if min_ess_ratio is not None and not 0.0 <= min_ess_ratio < 1.0:
+        raise ValueError("Require 0 <= min_ess_ratio < 1.")
     alpha = library.alpha_matrix(X)
     residual = np.asarray(y, dtype=float) - np.asarray(gamma, dtype=float)
     scores = np.asarray(contrast, dtype=float)[:, None] + alpha * residual[:, None]
     finite_alpha = np.all(np.isfinite(alpha), axis=0)
     finite_scores = np.all(np.isfinite(scores), axis=0)
     admissible = np.asarray(library.success, dtype=bool) & finite_alpha & finite_scores
+    ess_ratio = np.where(finite_alpha, effective_sample_ratio(alpha), np.nan)
+    if min_ess_ratio is not None:
+        admissible &= np.nan_to_num(ess_ratio, nan=0.0) >= min_ess_ratio
     scores[:, ~admissible] = np.nan
     with np.errstate(invalid="ignore"):
         max_weight = np.where(admissible, np.max(np.abs(alpha), axis=0), np.nan)
-    return scores, admissible, max_weight
+    return scores, admissible, max_weight, ess_ratio
 
 
 def theorem_upper_slack(

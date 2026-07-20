@@ -128,6 +128,13 @@ class Numerics:
     base_seed: int = 20260720
     budget: DeltaBudget = field(default_factory=DeltaBudget)
     store_candidates: bool = True
+    #: Pre-specified weight-concentration restriction on admissibility, as a
+    #: minimum Kish effective sample size relative to the diagnostic fold.
+    #: ``None`` reproduces the unrestricted candidate set of the plan. The
+    #: restriction shrinks the admissible set, which shortens the simultaneous
+    #: radius as well as excluding heavy-tailed representers, so a run that sets
+    #: it is not comparable with one that does not.
+    min_ess_ratio: float | None = None
 
     def __post_init__(self) -> None:
         if self.budget.n_folds != self.n_folds:
@@ -320,14 +327,29 @@ def run_fold(
         seed=stable_seed(scenario_seed, repetition, fold_index, "reference"),
     )
 
-    scores_diag, admissible, max_weight = candidate_scores(
-        library, X_diag, y_diag, outcome.contrast(X_diag), outcome.predict(X_diag)
+    scores_diag, admissible, max_weight, ess_ratio = candidate_scores(
+        library,
+        X_diag,
+        y_diag,
+        outcome.contrast(X_diag),
+        outcome.predict(X_diag),
+        min_ess_ratio=numerics.min_ess_ratio,
     )
     valid = np.where(admissible)[0]
     if valid.size == 0:
+        location = (
+            f"scenario {scenario.label!r}, repetition {repetition}, fold {fold_index}"
+        )
+        if numerics.min_ess_ratio is not None:
+            raise RuntimeError(
+                f"The weight screen min_ess_ratio={numerics.min_ess_ratio} left no "
+                f"admissible candidate on a diagnostic fold of {location}. The "
+                "restriction is pre-specified, so a threshold that empties the "
+                "candidate set is a configuration error rather than a run to report; "
+                f"the largest ratio available was {np.nanmax(ess_ratio):.4f}."
+            )
         raise RuntimeError(
-            "Every candidate failed on a diagnostic fold of scenario "
-            f"{scenario.label!r}, repetition {repetition}, fold {fold_index}. "
+            f"Every candidate failed on a diagnostic fold of {location}. "
             "This is a design problem, not an expected numerical status: at least "
             "the unpenalized squared candidate should fit."
         )
@@ -393,7 +415,11 @@ def run_fold(
     bregman = library.heldout_bregman(X_diag)
     lsif = library.heldout_lsif(X_diag)
 
-    scores_eval, admissible_eval, _ = candidate_scores(
+    # No weight screen here. The restriction belongs to selection, which happens
+    # on the diagnostic fold; re-applying it to the evaluation fold would discard
+    # an already selected candidate after the fact and break the unconditional
+    # coverage convention of Section 14.
+    scores_eval, admissible_eval, _, _ = candidate_scores(
         library, X_eval, y_eval, outcome.contrast(X_eval), outcome.predict(X_eval)
     )
 
@@ -589,6 +615,7 @@ def run_fold(
                     "binding_rate": fit.binding_rate,
                     "admissible": bool(admissible[j]),
                     "max_abs_alpha": max_weight[j],
+                    "ess_ratio": ess_ratio[j],
                     "relative_drift": drift[name][j],
                     "diagnostic_radius": radius[name][j],
                     "bias_bound": inference_bound[j],
