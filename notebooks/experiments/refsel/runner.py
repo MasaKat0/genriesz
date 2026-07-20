@@ -871,6 +871,12 @@ def configuration_record(config: ExperimentConfig) -> dict[str, object]:
         "tier": config.tier,
         "batch_size": config.batch_size,
         "scenarios": [asdict(scenario) for scenario in config.scenarios],
+        # Resolved rather than implied by the tier name: TIER_REPLICATIONS is a
+        # module-level table, so recording only the tier would let an edit to it
+        # produce a different run under an unchanged record.
+        "replications": {
+            scenario.label: config.replications(scenario) for scenario in config.scenarios
+        },
         "numerics": numerics,
     }
 

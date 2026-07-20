@@ -304,9 +304,17 @@ def reference_robustness_table(
 def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     """Experiment E5: violation rate of the pairwise reference check.
 
-    ``undecidable_rate`` counts folds where some ingredient was non-finite. Those
-    are neither passes nor violations, and folding them into the pass rate would
-    let a blown-up reference score be reported as a clean check.
+    ``violation_rate`` is the fold-level rate among *decidable* folds. A fold
+    whose difference, radius, or allowance was non-finite is neither a pass nor a
+    violation; counting it as a pass would let a blown-up reference score be
+    reported as a clean check. ``undecidable_rate`` reports how often that
+    happened, over all folds.
+
+    ``violation_mcse`` is clustered by replication. The folds of one replication
+    share a sample and are therefore not independent Bernoulli trials, so the
+    standard error comes from the between-replication spread of the per-
+    replication rates rather than from a fold-level Bernoulli formula, which
+    would understate it by roughly ``sqrt(K)`` when folds agree.
     """
 
     checks = tables.get("check")
@@ -316,40 +324,37 @@ def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     if "checkable" not in checks:
         checks["checkable"] = True
     checks["checkable"] = checks["checkable"].fillna(False).astype(bool)
-    checks["_violated"] = checks["violated"].fillna(False).astype(bool) & checks["checkable"]
+    checks["_violated"] = checks["violated"].fillna(False).astype(bool)
 
     keys = ["first", "second", *SCENARIO_KEYS]
-    # The five folds of one replication share a sample, so they are not
-    # independent Bernoulli trials. Collapse to one indicator per replication
-    # before computing a Monte Carlo standard error; treating folds as
-    # independent would understate it by roughly sqrt(K).
+    decidable = checks.loc[checks["checkable"]]
+
     per_replication = (
-        checks.groupby([*keys, "repetition"], dropna=False)
-        .agg(
-            fired=("_violated", "any"),
-            decidable=("checkable", "any"),
-        )
+        decidable.groupby([*keys, "repetition"], dropna=False)["_violated"]
+        .mean()
+        .rename("replication_rate")
         .reset_index()
     )
+
+    def _clustered_mcse(rates: pd.Series) -> float:
+        values = rates.to_numpy(dtype=float)
+        if values.size < 2:
+            return float("nan")
+        return float(np.std(values, ddof=1) / np.sqrt(values.size))
+
     grouped = per_replication.groupby(keys, dropna=False).agg(
-        replications=("repetition", "nunique"),
-        decidable_replications=("decidable", "sum"),
-        violation_rate=("fired", "mean"),
+        decidable_replications=("repetition", "nunique"),
+        violation_rate=("replication_rate", "mean"),
+        violation_mcse=("replication_rate", _clustered_mcse),
     )
-    grouped["undecidable_rate"] = 1.0 - grouped["decidable_replications"] / grouped[
-        "replications"
-    ]
     detail = checks.groupby(keys, dropna=False).agg(
         folds=("fold", "size"),
-        mean_absolute_difference=("difference", lambda x: float(np.mean(np.abs(x)))),
+        undecidable_rate=("checkable", lambda x: 1.0 - float(np.mean(x))),
+        mean_absolute_difference=("difference", lambda x: float(np.nanmean(np.abs(x)))),
         mean_radius=("radius", "mean"),
         mean_allowance_sum=("allowance_sum", "mean"),
     )
-    grouped = grouped.join(detail, how="left")
-    grouped["violation_mcse"] = monte_carlo_standard_error(
-        grouped["violation_rate"].to_numpy(), grouped["replications"].to_numpy()
-    )
-    return grouped.reset_index()
+    return detail.join(grouped, how="left").reset_index()
 
 
 def interval_length_table(

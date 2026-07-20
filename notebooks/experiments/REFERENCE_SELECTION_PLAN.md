@@ -458,21 +458,24 @@ bias-aware は $t$ によらず $\ge0.95$ を保つはずである。**この対
 ## 15. テスト
 
 `tests/test_reference_selection_experiment.py`（**`tests/` に置く** — v1 は
-`notebooks/experiments/` にあり `make test` の対象外だった）。29 件。
+`notebooks/experiments/` にあり `make test` の対象外だった）。42 件。
 
 | 分類 | 内容 |
 |---|---|
 | DGP | 任意の $b$ で ATE=1／fold rotation の disjoint 性と各観測がちょうど 1 回 evaluation／seed の順序非依存 |
 | **E1a** | **再スケールで $\widehat\alpha$ 不変・目的値は $\kappa$ 倍**（SQ・UKL） |
 | **候補集合** | **BP(1) の曲率が SQ と一致**／90 ラベルが相異なり BP(1) を含まない |
-| **E4 の前提** | **$\psi$ の rich dictionary への $R^2<0.10$** |
+| **E4 の前提** | **実際に使う空間での非対称性**（candidate rich $R^2<0.5$、`correct` reference の outcome/propensity $>0.999$、`misspecified` $<0.5$） |
 | dictionary | 標準化が training のみで決まる／SQ 候補の符号／**batched `alpha_matrix` が個別 `predict_alpha` と一致** |
 | **効率不変条件** | **basis 3 個・generator 5 個の共有** |
 | **audit** | **解析式が noisy Monte Carlo 平均と一致**／truth reference の bias が厳密に 0 |
 | **reference** | **`correct` は $b\in\{0,1\}$ で allowance を守る**／**`misspecified` は $b=1$ で破る**／truth の allowance は 0 |
-| **予算** | **$\delta$ 配分が $\delta$ を超えない**／不整合な配分を拒否 |
+| **予算** | **bias 事象の合計がちょうど $\delta$**（v1 の配分なら $1.5\delta$ になることも確認）／`Numerics.n_folds` と `DeltaBudget.n_folds` の不一致を拒否 |
 | inference | bounded-normal-mean が単調・公称被覆を厳密に達成／min-bound が各 bound 以下 |
 | **再現性** | **全 6 テーブルが出る**／同一 job は同一出力／batch 書き出しと再読込 |
+| **失敗の可視性** | **設定した procedure は成否によらず必ず行が出る**（`fixed_bkl` を含む）／**単一分割区間は他 fold の失敗で無効化されない** |
+| **来歴** | **manifest 無しの batch を拒否**／**範囲外 batch を拒否**／**digest が展開後の job 列を区別** |
+| **reference の失敗** | **失敗した reference は selection・bounds・check から除外**／非有限な check は undecidable |
 
 `make lint` の対象に `notebooks/experiments/refsel` を追加した（v1 は `src tests tools` のみで
 実験コードが lint されていなかった）。
@@ -494,7 +497,7 @@ bias-aware は $t$ によらず $\ge0.95$ を保つはずである。**この対
 | 9 | $\delta$ 予算を再配分（variance を分離） | 合計が $1.5\delta$ で宣言値を超えていた |
 | 10 | `bias_aware_split` を主役にし pooled は「理論なし」と明示 | cross-fit 版に定理がなかった |
 | 11 | 3 tier 構成 | 40 コア日・fast mode なしでは replication package にならない（R6） |
-| 12 | tests を `tests/` へ移動し 29 件に拡充、lint 対象に追加 | 品質ゲートを素通りしていた |
+| 12 | tests を `tests/` へ移動し 42 件に拡充、lint 対象に追加 | 品質ゲートを素通りしていた |
 | 13 | `results/` を `.gitignore` へ | 本実行で 50MB 制限に抵触する |
 | 14 | 選択後の再 fit を廃止（fold 内の結果を再利用） | 同一計算の二度打ち |
 | 15 | NaN の `clip_binding_rate` を fail-closed に（clip を持たない generator のみ例外） | 監査 v3 の K-05/N-19 と同型の fail-open |

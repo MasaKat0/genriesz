@@ -813,13 +813,72 @@ def test_batch_files_beyond_the_run_are_refused(tmp_path) -> None:
         load_experiment(tmp_path / "run")
 
 
-def test_digest_separates_runs_that_share_a_configuration_record(tmp_path) -> None:
-    """Batch contents depend on the expanded job list, not only on the record."""
+def test_digest_tracks_the_expanded_job_list(tmp_path) -> None:
+    """Batch contents depend on the job list, not only on the declared settings.
+
+    The replication count comes from a module-level table, so recording the tier
+    name alone would let an edit to that table produce a different run under an
+    unchanged digest.
+    """
 
     from dataclasses import replace as dataclass_replace
 
+    from refsel import runner as runner_module
     from refsel.runner import configuration_digest
 
     config = _smoke_config(1)
-    wider = dataclass_replace(config, batch_size=config.batch_size + 1)
-    assert configuration_digest(config) != configuration_digest(wider)
+    baseline = configuration_digest(config)
+    assert configuration_digest(dataclass_replace(config, batch_size=3)) != baseline
+
+    grid = config.scenarios[0].grid
+    original = runner_module.TIER_REPLICATIONS["smoke"][grid]
+    runner_module.TIER_REPLICATIONS["smoke"][grid] = original + 1
+    try:
+        assert configuration_digest(config) != baseline
+    finally:
+        runner_module.TIER_REPLICATIONS["smoke"][grid] = original
+    assert configuration_digest(config) == baseline
+
+
+def test_reference_check_rate_is_fold_level_with_a_clustered_error() -> None:
+    """The reported quantity must stay the fold-level violation rate.
+
+    Collapsing each replication to "did it fire at least once" would silently
+    change the estimand: two replications of two folds violating once and never
+    give a fold rate of 0.25 but an any-fold rate of 0.5. Undecidable folds are
+    excluded from the rate rather than counted as passes, and the standard error
+    is clustered by replication because folds share a sample.
+    """
+
+    import pandas as pd
+    from refsel import report
+
+    scenario = {
+        "grid": "A",
+        "design": "low",
+        "sample_size": 400,
+        "overlap_scale": 1.5,
+        "target_t": 0.0,
+        "first": "correct",
+        "second": "misspecified",
+        "difference": 0.1,
+        "radius": 0.05,
+        "allowance_sum": 0.01,
+    }
+    rows = [
+        {**scenario, "repetition": 0, "fold": 0, "checkable": True, "violated": True},
+        {**scenario, "repetition": 0, "fold": 1, "checkable": True, "violated": False},
+        {**scenario, "repetition": 1, "fold": 0, "checkable": True, "violated": False},
+        {**scenario, "repetition": 1, "fold": 1, "checkable": True, "violated": False},
+    ]
+    table = report.reference_check_table({"check": pd.DataFrame(rows)})
+    assert table["violation_rate"].iloc[0] == pytest.approx(0.25)
+    # Two replication rates, 0.5 and 0.0: sd 0.3536 over sqrt(2).
+    assert table["violation_mcse"].iloc[0] == pytest.approx(0.25)
+    assert table["undecidable_rate"].iloc[0] == pytest.approx(0.0)
+
+    # An undecidable fold is excluded from the rate, not counted as a pass.
+    rows[1] = {**scenario, "repetition": 0, "fold": 1, "checkable": False, "violated": None}
+    partial = report.reference_check_table({"check": pd.DataFrame(rows)})
+    assert partial["violation_rate"].iloc[0] == pytest.approx(0.5)
+    assert partial["undecidable_rate"].iloc[0] == pytest.approx(0.25)
