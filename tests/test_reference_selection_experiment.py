@@ -758,3 +758,68 @@ def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
     assert not any(key[1] == "min" for key in degraded.selection)
     # The surviving references are unaffected.
     assert any(key[1] == "correct" for key in degraded.selection)
+
+
+def test_every_configured_procedure_appears_even_when_it_always_fails() -> None:
+    """Failures must stay in the denominator, including total ones.
+
+    Building the row set from the folds that succeeded would delete a procedure
+    from its own denominator precisely when it failed everywhere, which is the
+    reporting convention the plan forbids.
+    """
+
+    from refsel.runner import expected_procedures, run_repetition
+
+    config = _smoke_config(1)
+    tables = run_repetition((config, config.scenarios[0], 0))
+    expected = set(expected_procedures(config.scenarios[0].design, config.numerics))
+    produced = set(
+        map(tuple, tables["repetition"][["rule", "reference", "allowance_scale"]].to_numpy())
+    )
+    assert produced == expected
+    # fixed_bkl leaves its domain on every ATE fold, so it must be present and
+    # marked incomplete rather than missing.
+    bkl = tables["repetition"].loc[tables["repetition"]["rule"].eq("fixed_bkl")]
+    assert len(bkl) == 1
+    assert not bool(bkl["complete"].iloc[0])
+
+
+def test_batches_without_a_manifest_are_refused(tmp_path) -> None:
+    """Parquet of unknown provenance must not be adopted by a new run."""
+
+    from refsel.runner import load_experiment, run_experiment
+
+    config = _smoke_config(1)
+    run_experiment(config, tmp_path / "run")
+    (tmp_path / "run" / "run_manifest.json").unlink()
+    with pytest.raises(RuntimeError, match="no run_manifest"):
+        run_experiment(config, tmp_path / "run")
+    with pytest.raises(FileNotFoundError, match="no run_manifest"):
+        load_experiment(tmp_path / "run")
+
+
+def test_batch_files_beyond_the_run_are_refused(tmp_path) -> None:
+    """A shorter re-run must not read the longer run's leftover batches."""
+
+    import shutil
+
+    from refsel.runner import load_experiment, run_experiment
+
+    config = _smoke_config(1)
+    run_experiment(config, tmp_path / "run")
+    source = next((tmp_path / "run").glob("candidate_*.parquet"))
+    shutil.copy(source, tmp_path / "run" / "candidate_00099.parquet")
+    with pytest.raises(RuntimeError, match="beyond"):
+        load_experiment(tmp_path / "run")
+
+
+def test_digest_separates_runs_that_share_a_configuration_record(tmp_path) -> None:
+    """Batch contents depend on the expanded job list, not only on the record."""
+
+    from dataclasses import replace as dataclass_replace
+
+    from refsel.runner import configuration_digest
+
+    config = _smoke_config(1)
+    wider = dataclass_replace(config, batch_size=config.batch_size + 1)
+    assert configuration_digest(config) != configuration_digest(wider)

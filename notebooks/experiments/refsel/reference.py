@@ -10,6 +10,7 @@ pairwise reference check detects it.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Literal
 
@@ -279,14 +280,24 @@ def fit_logistic_reference(
     outcome = fit_reference_outcome(X_train, y_train, name=name)
     feature_map = _correct_features if name == "correct" else _misspecified_features
     features = feature_map(X_train)
+    # scikit-learn 1.8 deprecates ``penalty=None`` and directs callers to
+    # ``C=np.inf``, which then emits a self-contradictory UserWarning about
+    # ignoring C. The message is filtered narrowly rather than with a blanket
+    # suppression so that genuine convergence warnings still surface.
     model = LogisticRegression(
-        penalty=None,
+        C=np.inf,
         solver="lbfgs",
         max_iter=max_iter,
         tol=tolerance,
         fit_intercept=True,
     )
-    model.fit(features, X_train[:, 0])
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"Setting penalty=None will ignore the C and l1_ratio parameters",
+            category=UserWarning,
+        )
+        model.fit(features, X_train[:, 0])
 
     design = np.column_stack((np.ones(X_train.shape[0]), features))
     e = np.asarray(model.predict_proba(features)[:, 1], dtype=float)

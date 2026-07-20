@@ -315,16 +315,39 @@ def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     checks = checks.copy()
     if "checkable" not in checks:
         checks["checkable"] = True
-    grouped = checks.groupby(["first", "second", *SCENARIO_KEYS], dropna=False).agg(
+    checks["checkable"] = checks["checkable"].fillna(False).astype(bool)
+    checks["_violated"] = checks["violated"].fillna(False).astype(bool) & checks["checkable"]
+
+    keys = ["first", "second", *SCENARIO_KEYS]
+    # The five folds of one replication share a sample, so they are not
+    # independent Bernoulli trials. Collapse to one indicator per replication
+    # before computing a Monte Carlo standard error; treating folds as
+    # independent would understate it by roughly sqrt(K).
+    per_replication = (
+        checks.groupby([*keys, "repetition"], dropna=False)
+        .agg(
+            fired=("_violated", "any"),
+            decidable=("checkable", "any"),
+        )
+        .reset_index()
+    )
+    grouped = per_replication.groupby(keys, dropna=False).agg(
+        replications=("repetition", "nunique"),
+        decidable_replications=("decidable", "sum"),
+        violation_rate=("fired", "mean"),
+    )
+    grouped["undecidable_rate"] = 1.0 - grouped["decidable_replications"] / grouped[
+        "replications"
+    ]
+    detail = checks.groupby(keys, dropna=False).agg(
         folds=("fold", "size"),
-        undecidable_rate=("checkable", lambda x: 1.0 - float(np.mean(x))),
-        violation_rate=("violated", "mean"),
         mean_absolute_difference=("difference", lambda x: float(np.mean(np.abs(x)))),
         mean_radius=("radius", "mean"),
         mean_allowance_sum=("allowance_sum", "mean"),
     )
+    grouped = grouped.join(detail, how="left")
     grouped["violation_mcse"] = monte_carlo_standard_error(
-        grouped["violation_rate"].to_numpy(), grouped["folds"].to_numpy()
+        grouped["violation_rate"].to_numpy(), grouped["replications"].to_numpy()
     )
     return grouped.reset_index()
 

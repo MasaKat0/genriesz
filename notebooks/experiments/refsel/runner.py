@@ -177,6 +177,33 @@ def primary_reference(design: Design) -> str:
     return "correct" if design == "low" else "rff"
 
 
+def reference_names(design: Design) -> tuple[str, ...]:
+    """Every reference a design defines, regardless of whether its fit succeeds."""
+
+    return ("truth", "correct", "misspecified") if design == "low" else ("truth", "rff")
+
+
+def expected_procedures(
+    design: Design, numerics: Numerics
+) -> tuple[tuple[str, str, float], ...]:
+    """The full set of ``(rule, reference, scale)`` a scenario should produce.
+
+    Enumerated from the configuration rather than from what a fold happened to
+    return. Building the set from the successful folds would drop a procedure
+    from the denominator exactly when it failed everywhere, which is the
+    reporting convention the plan forbids.
+    """
+
+    keys: list[tuple[str, str, float]] = [
+        (rule, "none", 1.0) for rule in RULES if rule not in REFERENCE_DEPENDENT_RULES
+    ]
+    keys.extend(("abs_drift", name, 1.0) for name in reference_names(design))
+    keys.extend(("proposed", name, scale) for name, scale in reference_variants(design, numerics))
+    if design == "low":
+        keys.extend(("proposed_min", "min", scale) for scale in numerics.allowance_scales)
+    return tuple(sorted(keys))
+
+
 def reference_variants(design: Design, numerics: Numerics) -> tuple[tuple[str, float], ...]:
     """Return the ``(reference, scale)`` pairs evaluated in every fold.
 
@@ -309,6 +336,13 @@ def run_fold(
         seed=stable_seed(scenario_seed, repetition, fold_index, "variance_bootstrap"),
     )
 
+    # A reference whose fit failed carries no allowance guarantee. Exclude it
+    # before anything reads it: RFFSquaredReference.alpha raises when its
+    # conjugate-gradient solve did not converge, so merely filtering the outputs
+    # would still abort the fold on the way there.
+    usable = {name for name, reference in references.items() if reference.success}
+    references = {name: reference for name, reference in references.items() if name in usable}
+
     drift: dict[str, FloatArray] = {}
     radius: dict[str, FloatArray] = {}
     for name, reference in references.items():
@@ -358,11 +392,6 @@ def run_fold(
         library, X_eval, y_eval, outcome.contrast(X_eval), outcome.predict(X_eval)
     )
 
-    # A reference whose fit failed carries no allowance guarantee, so it must not
-    # produce a bias bound, a selection, or an interval. Recording only its
-    # status while still using its numbers would be a fail-open on exactly the
-    # premise of Theorem ``data_dependent_bias``.
-    usable = {name for name, reference in references.items() if reference.success}
     variants = tuple(
         (name, scale)
         for name, scale in reference_variants(scenario.design, numerics)
@@ -638,7 +667,10 @@ def run_repetition(job: tuple[ExperimentConfig, Scenario, int]) -> dict[str, pd.
     weights = np.asarray(
         [len(role.evaluation) / scenario.sample_size for role in roles], dtype=float
     )
-    keys = sorted({key for outcome in fold_outcomes for key in outcome.selection})
+    # Iterate over the procedures the configuration defines, not over the ones
+    # that happened to succeed, so a procedure that failed on every fold still
+    # contributes an incomplete row to its own denominator.
+    keys = expected_procedures(scenario.design, numerics)
 
     selection_rows: list[dict[str, object]] = []
     repetition_rows: list[dict[str, object]] = []
@@ -792,6 +824,23 @@ def expand_jobs(config: ExperimentConfig) -> list[tuple[ExperimentConfig, Scenar
     ]
 
 
+def batch_identities(config: ExperimentConfig) -> list[list[str]]:
+    """The job identity of every batch, in order.
+
+    Two configurations can share a configuration record and still place different
+    jobs in the same batch, for instance when an earlier grid's replication count
+    changes. Comparing the expanded job list catches that; comparing the record
+    alone does not.
+    """
+
+    jobs = expand_jobs(config)
+    size = config.batch_size
+    return [
+        [f"{scenario.label}#{repetition}" for _, scenario, repetition in jobs[i : i + size]]
+        for i in range(0, len(jobs), size)
+    ]
+
+
 def configuration_digest(config: ExperimentConfig) -> str:
     """Stable digest of everything that determines the numbers in a run.
 
@@ -801,7 +850,14 @@ def configuration_digest(config: ExperimentConfig) -> str:
     Parquet as if it were the new run's output.
     """
 
-    payload = json.dumps(configuration_record(config), sort_keys=True, default=str)
+    payload = json.dumps(
+        {
+            "configuration": configuration_record(config),
+            "batches": batch_identities(config),
+        },
+        sort_keys=True,
+        default=str,
+    )
     return blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
 
 
@@ -844,6 +900,7 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
     batches = [jobs[i : i + config.batch_size] for i in range(0, len(jobs), config.batch_size)]
     digest = configuration_digest(config)
     manifest_path = output / "run_manifest.json"
+    existing = _batch_files(output)
     if manifest_path.exists():
         previous = json.loads(manifest_path.read_text(encoding="utf-8"))
         if previous.get("digest") != digest:
@@ -853,23 +910,20 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
                 "Resuming would mix runs. Write to a new directory, or delete the "
                 "existing one if the old results are no longer wanted."
             )
-        stale = sorted(
-            path.name
-            for table in TABLES
-            for path in output.glob(f"{table}_*.parquet")
-            if int(path.stem.rsplit("_", 1)[1]) >= len(batches)
+    elif existing:
+        raise RuntimeError(
+            f"{output} holds {len(existing)} batch files but no run_manifest.json, "
+            "so their provenance cannot be checked. Reusing them would report an "
+            "unknown configuration's numbers as this run's. Delete them or write "
+            "to a new directory."
         )
-        if stale:
-            raise RuntimeError(
-                f"{output} holds {len(stale)} batch files beyond the {len(batches)} "
-                f"batches of this configuration, starting with {stale[0]}. "
-                "load_experiment would read them as part of this run."
-            )
+    _reject_batches_beyond(output, len(batches))
     manifest_path.write_text(
         json.dumps(
             {
                 "digest": digest,
                 "n_batches": len(batches),
+                "batches": batch_identities(config),
                 "configuration": configuration_record(config),
             },
             indent=2,
@@ -895,24 +949,44 @@ def run_experiment(config: ExperimentConfig, output_dir: str | Path) -> None:
             combined.to_parquet(path, index=False)
 
 
+def _batch_files(output: Path) -> list[Path]:
+    return sorted(path for table in TABLES for path in output.glob(f"{table}_*.parquet"))
+
+
+def _reject_batches_beyond(output: Path, n_batches: int) -> None:
+    """Refuse batch files whose index lies outside the current run."""
+
+    stale = sorted(
+        path.name
+        for path in _batch_files(output)
+        if int(path.stem.rsplit("_", 1)[1]) >= n_batches
+    )
+    if stale:
+        raise RuntimeError(
+            f"{output} holds {len(stale)} batch files beyond the {n_batches} batches "
+            f"of this configuration, starting with {stale[0]}. They would be read as "
+            "part of this run."
+        )
+
+
 def load_experiment(output_dir: str | Path) -> dict[str, pd.DataFrame]:
     """Load every completed batch of an experiment directory.
 
-    Raises when the directory contains more batch files than its manifest
-    records, which would otherwise silently mix a shorter run's output into a
-    longer one's tables.
+    Refuses a directory without a manifest, or one holding batch files outside
+    the manifest's range, either of which would mix another run's output into
+    these tables.
     """
 
     output = Path(output_dir)
     manifest_path = output / "run_manifest.json"
-    if manifest_path.exists():
-        expected = int(json.loads(manifest_path.read_text(encoding="utf-8"))["n_batches"])
-        found = len(list(output.glob("repetition_*.parquet")))
-        if found > expected:
-            raise RuntimeError(
-                f"{output} holds {found} repetition batches but its manifest records "
-                f"{expected}. Remove the stale files before loading."
-            )
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"{output} has no run_manifest.json, so the provenance of its batch "
+            "files cannot be checked. Re-run the experiment into this directory."
+        )
+    _reject_batches_beyond(
+        output, int(json.loads(manifest_path.read_text(encoding="utf-8"))["n_batches"])
+    )
     loaded: dict[str, pd.DataFrame] = {}
     for table in TABLES:
         frames = [pd.read_parquet(path) for path in sorted(output.glob(f"{table}_*.parquet"))]
