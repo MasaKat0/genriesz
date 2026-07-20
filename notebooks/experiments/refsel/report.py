@@ -335,46 +335,57 @@ def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
         .reset_index()
     )
 
-    def _ratio(frame: pd.DataFrame) -> pd.Series:
-        """Pooled fold-level rate with a replication-clustered standard error.
-
-        The point estimate is the ratio of totals, not the average of the
-        per-replication rates: those differ whenever the number of decidable
-        folds varies across replications, and only the ratio of totals is the
-        fold-level rate the column claims to report. Its standard error is the
-        linearized cluster-robust one for a ratio, with replications as clusters.
-        """
-
-        fired = frame["_fired"].to_numpy(dtype=float)
-        decidable = frame["_decidable"].to_numpy(dtype=float)
-        total_decidable = float(decidable.sum())
-        clusters = int(frame.shape[0])
-        if total_decidable == 0.0:
-            return pd.Series(
-                {
-                    "violation_rate": np.nan,
-                    "violation_mcse": np.nan,
-                    "decidable_folds": 0.0,
-                    "decidable_replications": 0.0,
-                }
-            )
-        rate = float(fired.sum()) / total_decidable
-        if clusters < 2:
-            mcse = np.nan
-        else:
-            residual = fired - rate * decidable
-            variance = clusters / (clusters - 1) * float(np.sum(residual**2)) / total_decidable**2
-            mcse = float(np.sqrt(max(variance, 0.0)))
-        return pd.Series(
-            {
-                "violation_rate": rate,
-                "violation_mcse": mcse,
-                "decidable_folds": total_decidable,
-                "decidable_replications": float((decidable > 0).sum()),
-            }
+    # Pooled fold-level rate with a replication-clustered standard error.
+    #
+    # The point estimate is the ratio of totals, not the average of the
+    # per-replication rates: those differ whenever the number of decidable folds
+    # varies across replications, and only the ratio of totals is the fold-level
+    # rate the column claims to report.
+    #
+    # The standard error is the linearized cluster-robust one for a ratio, with
+    # replications as clusters. Expanding sum((v - p d)^2) into
+    # sum(v^2) - 2 p sum(v d) + p^2 sum(d^2) keeps the whole computation inside
+    # one groupby aggregation, which also avoids GroupBy.apply and its
+    # ``include_groups`` argument -- that keyword only exists from pandas 2.2,
+    # while this project supports pandas 2.0.
+    per_replication = per_replication.assign(
+        _vv=lambda f: f["_fired"] ** 2,
+        _vd=lambda f: f["_fired"] * f["_decidable"],
+        _dd=lambda f: f["_decidable"] ** 2,
+        _has=lambda f: (f["_decidable"] > 0).astype(float),
+    )
+    sums = per_replication.groupby(keys, dropna=False).agg(
+        fired_total=("_fired", "sum"),
+        decidable_folds=("_decidable", "sum"),
+        sum_vv=("_vv", "sum"),
+        sum_vd=("_vd", "sum"),
+        sum_dd=("_dd", "sum"),
+        clusters=("repetition", "nunique"),
+        decidable_replications=("_has", "sum"),
+    )
+    total = sums["decidable_folds"].to_numpy(dtype=float)
+    clusters = sums["clusters"].to_numpy(dtype=float)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rate = np.where(total > 0, sums["fired_total"].to_numpy(dtype=float) / total, np.nan)
+        residual_sq = (
+            sums["sum_vv"].to_numpy(dtype=float)
+            - 2.0 * rate * sums["sum_vd"].to_numpy(dtype=float)
+            + rate**2 * sums["sum_dd"].to_numpy(dtype=float)
         )
-
-    grouped = per_replication.groupby(keys, dropna=False).apply(_ratio, include_groups=False)
+        variance = np.where(
+            (total > 0) & (clusters > 1),
+            clusters / np.maximum(clusters - 1.0, 1.0) * residual_sq / total**2,
+            np.nan,
+        )
+    grouped = pd.DataFrame(
+        {
+            "violation_rate": rate,
+            "violation_mcse": np.sqrt(np.maximum(variance, 0.0)),
+            "decidable_folds": total,
+            "decidable_replications": sums["decidable_replications"].to_numpy(dtype=float),
+        },
+        index=sums.index,
+    )
     detail = checks.groupby(keys, dropna=False).agg(
         folds=("fold", "size"),
         undecidable_rate=("checkable", lambda x: 1.0 - float(np.mean(x))),
