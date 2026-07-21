@@ -526,6 +526,59 @@ def test_fallback_policy_is_validated():
         GRRCVConfig(fallback_policy="anything_goes")
 
 
+def test_modifies_estimand_does_not_bypass_the_quality_checks():
+    # Codex review of the CV-11 fix: the estimand flag alone must not smuggle a
+    # candidate past the ESS floor or any other threshold. When no
+    # target-sensitivity candidate passes the remaining checks, the default
+    # policy halts exactly as for an exact-target generator, and the opt-in
+    # fallback records every violation.
+    X, y = _healthy_sample()
+    gen = SquaredGenerator()
+    gen.modifies_estimand = True  # a stub target-sensitivity generator
+    common = dict(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=30, random_state=0),
+        generator=gen,
+    )
+    with pytest.raises(RuntimeError, match="remaining.*quality checks"):
+        select_grr_hyperparams(
+            config=GRRCVConfig(
+                sigma_grid="auto",
+                cv_folds=2,
+                random_state=0,
+                admissibility_thresholds=_IMPOSSIBLE,
+            ),
+            **common,
+        )
+    with pytest.warns(UserWarning, match="fallback_policy"):
+        res = select_grr_hyperparams(
+            config=GRRCVConfig(
+                sigma_grid="auto",
+                cv_folds=2,
+                random_state=0,
+                admissibility_thresholds=_IMPOSSIBLE,
+                fallback_policy="best_criterion",
+            ),
+            **common,
+        )
+    assert res.used_fallback is True
+    assert res.fallback_reason == "no_admissible_candidate"
+    assert "min_ess_ratio" in res.fallback_violations
+    assert "modifies_estimand" in res.fallback_violations
+    # With sane thresholds the dedicated sensitivity path still works, over
+    # candidates whose only violation is the estimand flag.
+    with pytest.warns(UserWarning, match="modifies the estimand"):
+        ok = select_grr_hyperparams(
+            config=GRRCVConfig(sigma_grid="auto", cv_folds=2, random_state=0),
+            **common,
+        )
+    assert ok.used_fallback is True
+    assert ok.fallback_reason == "modifies_estimand"
+    assert ok.fallback_violations == ["modifies_estimand"]
+
+
 def test_riesz_fallback_policy_reaches_the_estimation_diagnostics():
     # The estimation entry points must expose the policy and surface the
     # fallback record per outer fold, so a user of grr_ate can see that a fold's

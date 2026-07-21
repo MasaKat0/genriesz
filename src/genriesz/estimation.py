@@ -398,12 +398,13 @@ def grr_functional(
         folds): cheaper, but it leaks each fold's validation rows into its own
         scoring feature map.
     riesz_fallback_policy:
-        What the inner Riesz CV does when no exact-target candidate passes the
-        admissibility screen (audit CV-11). ``None`` (default) raises instead of
-        silently selecting an inadmissible candidate whose criterion is not
-        trustworthy. ``"best_criterion"`` opts into taking the best fitted
-        candidate anyway, with a warning; the per-fold diagnostics then record
-        ``used_fallback``, the reason, and the violated thresholds.
+        What the inner Riesz CV does when no candidate passes the admissibility
+        screen (audit CV-11; for a ``modifies_estimand`` generator: when no
+        candidate passes the remaining quality checks). ``None`` (default)
+        raises instead of silently selecting an inadmissible candidate whose
+        criterion is not trustworthy. ``"best_criterion"`` opts into taking the
+        best fitted candidate anyway, with a warning; the per-fold diagnostics
+        then record ``used_fallback``, the reason, and the violated thresholds.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link. An explicit ``'logit'``

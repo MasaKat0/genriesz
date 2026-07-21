@@ -173,10 +173,11 @@ class GRRCVConfig:
     #: ``"best_criterion"`` opts into the pre-audit behaviour -- take the best
     #: finite-criterion candidate among all fitted ones -- with a warning, and
     #: the result records ``used_fallback``, the reason, and the thresholds the
-    #: chosen candidate violates. A ``modifies_estimand`` generator is not
-    #: gated by this policy: its candidates are inadmissible *by design*
-    #: (section 9-4), and its dedicated warning path is kept until CV-12
-    #: separates target-sensitivity candidates from exact-target selection.
+    #: chosen candidate violates. A ``modifies_estimand`` generator keeps its
+    #: dedicated target-sensitivity path (section 9-4, until CV-12 separates it
+    #: from exact-target selection), but only over candidates that pass every
+    #: *other* admissibility check; when none does, this policy gates it like
+    #: any other screen wipe-out.
     fallback_policy: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -232,9 +233,10 @@ class GRRCVResult:
     strict_nested: bool = field(default=True, kw_only=True)
     #: Whether the winner came from the fallback pool rather than the admissible
     #: set (audit CV-11). ``fallback_reason`` is ``"no_admissible_candidate"``
-    #: (exact-target screen wipe-out, only reachable with
+    #: (screen wipe-out, only reachable with
     #: ``fallback_policy="best_criterion"``) or ``"modifies_estimand"`` (the
-    #: generator's candidates are inadmissible by design, section 9-4).
+    #: generator's candidates are inadmissible by design, section 9-4, and the
+    #: winner passes every remaining quality check).
     #: ``fallback_violations`` lists the admissibility thresholds the chosen
     #: candidate violates, so the caller can see *why* it was inadmissible
     #: without re-deriving the screen. Inference-status downgrade for fallback
@@ -613,53 +615,23 @@ def score_grr_candidate(
 
 
 def _is_admissible(row: dict, thr: dict[str, float | None]) -> bool:
-    if not row["success"]:
-        return False
-    # Design section 9-4: a generator that modifies the estimand is always a
-    # target-sensitivity candidate, never an admissible one -- even when its
-    # bound happens not to bind on this sample.
-    if row.get("modifies_estimand", False):
-        return False
-    min_ess = thr.get("min_ess_ratio")
-    if min_ess is not None and row["ess_ratio_min"] < float(min_ess):
-        return False
-    max_bind = thr.get("max_cap_binding_rate")
-    if max_bind is not None and row["cap_binding_rate"] > float(max_bind):
-        return False
-    # Kernel-health band (skipped when kernel diagnostics are unavailable, i.e.
-    # kernel_median is NaN for non-kernel bases).
-    kmed = row["kernel_median"]
-    if np.isfinite(kmed):
-        floor = thr.get("kernel_median_floor")
-        if floor is not None and kmed < float(floor):
-            return False
-        ceil = thr.get("kernel_median_ceil")
-        if ceil is not None and kmed > float(ceil):
-            return False
-    max_kkt = thr.get("max_kkt_residual")
-    if max_kkt is not None and np.isfinite(row["r_hat"]) and row["r_hat"] > float(max_kkt):
-        return False
-    max_alpha = thr.get("max_abs_alpha")
-    if (
-        max_alpha is not None
-        and np.isfinite(row["max_abs_alpha"])
-        and row["max_abs_alpha"] > float(max_alpha)
-    ):
-        return False
-    max_si = thr.get("max_std_imbalance")
-    if max_si is not None and np.isfinite(row["std_imbalance"]) and row["std_imbalance"] > float(
-        max_si
-    ):
-        return False
-    return True
+    """A row is admissible exactly when it violates nothing.
+
+    Derived from :func:`_violated_thresholds` so there is a single source of
+    truth for the screen: the two cannot drift apart.
+    """
+
+    return not _violated_thresholds(row, thr)
 
 
 def _violated_thresholds(row: dict, thr: dict[str, float | None]) -> list[str]:
     """Which admissibility checks ``row`` fails, by name (audit CV-11).
 
-    The mirror of :func:`_is_admissible`, kept next to it so the two cannot
-    drift: a row is admissible exactly when this list is empty and neither
-    ``fit_failure`` nor ``modifies_estimand`` applies.
+    The single source of truth for the screen: :func:`_is_admissible` is
+    "this list is empty". ``"modifies_estimand"`` reflects design section 9-4
+    (a generator that modifies the estimand is always a target-sensitivity
+    candidate, never an admissible one -- even when its bound happens not to
+    bind on this sample).
     """
 
     violations: list[str] = []
@@ -1016,7 +988,20 @@ def select_grr_hyperparams(
                 "model, or inspect the CV path (return_riesz_cv_path=True)."
             )
         used_fallback = True
-        if modifies_estimand:
+        # A modifies_estimand generator is inadmissible by design (section 9-4),
+        # but that flag must not bypass the *quality* checks: a target-
+        # sensitivity candidate still has to pass the ESS floor, the
+        # kernel-health band, and every other threshold. The sensitivity pool
+        # therefore keeps only candidates whose sole violation is the estimand
+        # flag; if none qualifies, the fallback policy decides, exactly as for
+        # an exact-target generator.
+        sensitivity = [
+            r
+            for r in pool
+            if _violated_thresholds(r, thr) == ["modifies_estimand"]
+        ]
+        if modifies_estimand and sensitivity:
+            pool = sensitivity
             fallback_reason = "modifies_estimand"
             warnings.warn(
                 f"Generator {getattr(generator, 'name', type(generator).__name__)} "
@@ -1044,9 +1029,16 @@ def select_grr_hyperparams(
             # Audit CV-11: an inadmissible winner can carry a deceptively small
             # criterion (a saturated kernel scores near zero while estimating
             # nothing), so silently returning one is worse than stopping.
+            sensitivity_note = (
+                "The generator modifies the estimand, so this means no "
+                "candidate passed the *remaining* quality checks either. "
+                if modifies_estimand
+                else ""
+            )
             raise RuntimeError(
                 f"No Riesz candidate passed the admissibility screen on this "
                 f"training fold ({len(path)} candidates scored, 0 admissible). "
+                f"{sensitivity_note}"
                 "An inadmissible candidate is not returned by default because "
                 "its criterion is not trustworthy -- a saturated kernel scores "
                 "near zero while estimating nothing. Inspect the CV path "

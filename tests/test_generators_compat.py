@@ -282,7 +282,7 @@ def test_route_and_class_prior_ratio_agree():
 # ---------------------------------------------------------------------------
 # 3b. Section 9-4: estimand-modifying generators are never admissible.
 # ---------------------------------------------------------------------------
-def _select(gen, *, n: int = 250, seed: int = 10):
+def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None):
     X, Y = _make_ate(n=n, seed=seed)
     return select_grr_hyperparams(
         X_train=X,
@@ -290,7 +290,13 @@ def _select(gen, *, n: int = 250, seed: int = 10):
         m=ATEFunctional(treatment_index=0),
         basis=GaussianRKHSBasis(n_centers=40, sigma=1.0, random_state=0),
         generator=gen,
-        config=GRRCVConfig(lam_grid=[1e-2, 1e-1], cv_folds=2, return_path=True, random_state=0),
+        config=GRRCVConfig(
+            lam_grid=[1e-2, 1e-1],
+            cv_folds=2,
+            return_path=True,
+            random_state=0,
+            admissibility_thresholds=admissibility_thresholds,
+        ),
         outcome_link="identity",
     )
 
@@ -314,11 +320,18 @@ def test_exclusion_holds_even_when_the_bound_never_binds():
     A binding-rate-only screen (``max_cap_binding_rate``) would admit this
     candidate, because ``alpha_max`` is far above any alpha the fit produces.
     Section 9-4 says bounded links are *always* target-sensitivity.
+
+    The effectively-unclipped fit concentrates its weight on a couple of
+    observations (max alpha ~1e6, ESS ratio ~0.01), which genuinely violates
+    the ESS floor -- a *quality* failure the estimand flag must not mask (audit
+    CV-11). This test pins the flag alone, so it disables that floor; the
+    quality gating itself is covered by
+    ``test_modifies_estimand_does_not_bypass_the_quality_checks``.
     """
 
     gen = BoundedBKLGenerator(C=1e-2, alpha_max=1e6, branch_fn=_treated_branch)
     with pytest.warns(UserWarning, match="modifies the estimand"):
-        res = _select(gen)
+        res = _select(gen, admissibility_thresholds={"min_ess_ratio": None})
 
     assert all(r["cap_binding_rate"] == 0.0 for r in res.path)
     assert res.n_admissible == 0
