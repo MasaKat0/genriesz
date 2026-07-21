@@ -1,0 +1,83 @@
+=== probe_truth_ess.py（2026-07-21）===
+design     s  t/hs  n_diag  ESS(alpha0): p05 / median / p95
+low      0.5   0.0     600  0.897 / 0.934 / 0.953
+low      1.5   0.0     600  0.406 / 0.622 / 0.712
+low      2.5   0.0     600  0.051 / 0.312 / 0.560
+high    0.75   0.0     600  0.891 / 0.930 / 0.945
+high     2.0   0.0     600  0.190 / 0.618 / 0.705
+
+=== probe2.py（§4 の床は 2026-07-21 修正版）===
+=== 1. Did the screen raise the attainable oracle risk itself? (t=4, fold-level mean/max) ===
+          mean  median     max
+screen
+0.25    0.1973  0.1989  0.2119
+0.4     0.1973  0.1989  0.2119
+0.55    0.1973  0.1989  0.2119
+none    0.1973  0.1989  0.2119
+
+=== 2. Fragility: folds with regret > 1 at t=4, by screen (which candidate, its ESS) ===
+screen  repetition  fold            candidate  ess_ratio  oracle_regret
+  0.25           5     2       UKL|rich|c=0.5   0.624202       1.663793
+  0.25          35     4 UKL|second_order|c=0   0.267080       1.746816
+  0.25          29     0         UKL|rich|c=0   0.509051       1.927388
+  0.25          76     3         UKL|rich|c=0   0.375808       4.526554
+  0.25          80     4       UKL|rich|c=0.5   0.284813       6.989609
+  0.25          87     3         UKL|rich|c=0   0.408034      14.748266
+  0.25          96     4      UKL|rich|c=0.25   0.361931      16.054916
+  0.25          79     4         UKL|rich|c=0   0.497895      94.244452
+  0.25          86     3      UKL|rich|c=0.25   0.433203     364.436420
+  0.25          12     0         UKL|rich|c=0   0.454299     826.474396
+  0.25          72     3      UKL|rich|c=0.25   0.467170    1962.575740
+  0.25          81     3         UKL|rich|c=0   0.314609    2529.176755
+   0.4          96     4       UKL|rich|c=0.5   0.426231       1.025913
+   0.4           5     2       UKL|rich|c=0.5   0.624202       1.663793
+   0.4          29     0         UKL|rich|c=0   0.509051       1.927388
+   0.4          81     3      UKL|rich|c=0.25   0.516534       3.684916
+   0.4          87     3         UKL|rich|c=0   0.408034      14.748266
+   0.4          79     4         UKL|rich|c=0   0.497895      94.244452
+   0.4          86     3      UKL|rich|c=0.25   0.433203     364.436420
+   0.4          12     0         UKL|rich|c=0   0.454299     826.474396
+   0.4          72     3      UKL|rich|c=0.25   0.467170    1962.575740
+  0.55           5     2       UKL|rich|c=0.5   0.624202       1.663793
+  0.55          12     0      UKL|rich|c=0.25   0.607913       1.864314
+  none           5     2       UKL|rich|c=0.5   0.624202       1.663793
+  none          35     4 UKL|second_order|c=0   0.267080       1.746816
+  none          29     0         UKL|rich|c=0   0.509051       1.927388
+  none         119     2         UKL|rich|c=0   0.202800       2.662687
+  none          76     3         UKL|rich|c=0   0.375808       4.526554
+  none          89     0         UKL|rich|c=0   0.161482       5.998894
+  none          87     3         UKL|rich|c=0   0.408034      14.748266
+  none          96     4      UKL|rich|c=0.25   0.361931      16.054916
+  none          55     0         UKL|rich|c=0   0.072159      41.702499
+  none          80     4      UKL|rich|c=0.25   0.205806      90.805650
+  none          79     4         UKL|rich|c=0   0.497895      94.244452
+  none          23     1         UKL|rich|c=0   0.002744     106.134821
+  none          63     0         UKL|rich|c=0   0.181293     223.015105
+  none          86     3      UKL|rich|c=0.25   0.433203     364.436420
+  none          12     0         UKL|rich|c=0   0.454299     826.474396
+  none          72     3      UKL|rich|c=0.25   0.467170    1962.575740
+  none          81     3         UKL|rich|c=0   0.314609    2529.176755
+
+=== 3. Other rules in oracle table (what reference label do they carry?) ===
+rule          reference
+abs_drift     correct         2400
+              misspecified    2400
+              truth           2400
+bregman_cv    none            2400
+fixed_sq      none            2300
+fixed_ukl     none            2085
+lsif_cv       none            2400
+oracle        none            2400
+proposed      correct         9600
+              misspecified    9600
+              truth           2400
+proposed_min  min             9600
+score_var     none            2400
+
+=== 4. Excess length decomposition (proposed/correct/rho=1, split interval) ===
+t=0.0: floor cv_0.96(t)/z_0.975=1.048 | measured BA/Wald median: 0.25=2.59(premium 2.48x), 0.4=2.69(premium 2.56x), 0.55=2.74(premium 2.61x), none=2.59(premium 2.47x)
+t=4.0: floor cv_0.96(t)/z_0.975=2.934 | measured BA/Wald median: 0.25=6.08(premium 2.07x), 0.4=6.13(premium 2.09x), 0.55=6.13(premium 2.09x), none=6.10(premium 2.08x)
+
+=== probe3.py ===
+hs=0                   ESS(alpha0): p05=0.216 med=0.596
+hs=0.857 (t=4)         ESS(alpha0): p05=0.156 med=0.479

@@ -3,7 +3,7 @@ PYTHON ?= python3
 .PHONY: lint test verify notebooks-strip notebooks-check large-files-check install-hooks
 
 lint:
-	ruff check src tests tools notebooks/experiments/refsel
+	ruff check src tests tools notebooks/experiments/refsel notebooks/experiments/pilots
 
 test:
 	$(PYTHON) -m pytest tests/ -q

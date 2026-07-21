@@ -622,7 +622,38 @@ fold あたり $\delta/(2K)=0.001$ の同時性を要求するため、$q_a$ が
 **査読者は必ず「常に被覆するのは区間が 3〜6 倍広いからだろう」と言う。** 対応の選択肢は
 (a) 候補集合を絞る、(b) 同時性の補正を弱める（例: 候補を事前にグループ化して
 group-wise に同時性を取る）、(c) 保守性を正直に報告し、Wald が壊れる領域で
-**有効な**区間が他に無いことを主張する。**著者の判断が必要。**
+**有効な**区間が他に無いことを主張する。
+
+**〔2026-07-20 の pilot で (a) は却下された〕** §18.9 の weight screen で候補を
+42.7 → 36.1 に絞っても（$t=0$、15% 減）、$q_a$ の中央値は 0.2485 → 0.2431 と 2% しか
+縮まず、$\widehat U/\widehat{se}$ は 3.32 → **3.61 と悪化**、区間長比は 2.59 → 2.74 に増えた。
+screen は分散の大きい候補を落とすため Wald 長さが 0.208 → 0.197 と縮み、$\widehat U$ が
+ほぼ不変なので比が上がる。構造的な理由があり、$q_a$ は $\sqrt{\log p/n_{\mathrm{diag}}}$
+オーダーなので候補数 $p$ を減らしても $\sqrt{\log}$ でしか効かない。
+**候補集合の削減でこの保守性は解消しない。** 残る選択肢は (b)・(c) と、
+$n_{\mathrm{diag}}$ を増やす fold 構成の変更（未実測、§8 の設計変更になる）である。
+
+**〔2026-07-21 追記〕(c) を publishable にする長さの分解。** 比較の床は、同じ
+bounded-normal 区間クラスで **bias bound が誤差なく分かっている**場合の長さ
+$\mathrm{cv}_{1-(\tau-\delta)}(t)\,se$ に取る（`inference.bias_aware_critical_value`、
+すなわち $\widehat U=t\cdot se$・$q_a=b_r=0$ の理想化）。$t$ が大きいと有効な裾が
+片側になるため $\mathrm{cv}(t)<t+z$ であり、$t=4$ では
+$\mathrm{cv}_{0.96}(4)=5.75$、Wald（$z_{0.975}$）比 2.93 になる。pilot の実測
+（`followup_probes.txt` probe2 §4、床は repo の関数で計算）:
+
+| $t$ | 床 $\mathrm{cv}_{0.96}(t)/z_{0.975}$ | 実測 BA/Wald | **feasibility premium** |
+|---|---|---|---|
+| 0 | 1.05 | 2.59 | 2.47 |
+| 4 | 2.93 | 6.10 | **2.08** |
+
+つまり「6 倍」のうち 3 倍弱は**この区間クラスが bias bound 既知でも払う分**で、
+$\widehat U$ の推定に帰属する超過（$q_a+b_r$ の feasibility premium）は
+**$t$ によらず約 2.1--2.5 倍で安定**している。E6 はこの 3 列で報告するのがよい。
+「常に被覆するのは広いからだろう」への回答は「広さの大半は bias に対する honest 性の
+価格であり、bound を feasible に推定する追加費用が約 2 倍」となる。
+残る選択肢 (b) の期待効果は小さい（グループ化しても $q_a$ の critical value は
+$\sqrt{2\log(p/\delta)}$ の $p$ を分母に持つだけで、45 → 9 グループでも 1 割前後）。
+**推奨は (c)＋この分解の明示。著者の判断待ち。**
 
 ### 18.8. 提案規則は裾の重い候補を取り逃すことがある
 
@@ -648,24 +679,123 @@ restrictions"）が想定している事態そのものである。**現在の�
 なお `n_ranked` は全規則で一致した（平均 45.2、範囲 40--50）ので、
 規則ごとに候補集合が違うことによる交絡は $n=3000$ では生じていない。
 
+### 18.9. weight screen は採用不能（pilot 実測 2026-07-20、追試 2026-07-21 で結論反転）
+
+§18.8 の追加制約を `Numerics.min_ess_ratio` として実装した。候補 $a$ の representer が
+診断 fold で持つ Kish 有効標本サイズ比
+$\mathrm{ESS}_a/n_{\mathrm{diag}}=(\sum_i|\widehat\alpha_a(Z_i)|)^2/(n_{\mathrm{diag}}\sum_i\widehat\alpha_a(Z_i)^2)$
+が閾値未満の候補を inadmissible にする。**weight を cap しないので estimand は変わらない**
+（Main.tex L1207 が警告するのは cap の方であり、候補の screen は L734 が明示的に許容する）。
+比はスケール不変なので E1a の再スケール不変性とも干渉しない。
+
+閾値 4 条件 $\times$ $t\in\{0,4\}$ $\times$ $R=120$ を、同一 seed・同一 fit の対照として実測した
+（960 jobs、27.2 分、12 並列）。$t=4$・`proposed`・`correct`・$\rho=1$ の oracle regret（fold 単位、各 $n=600$）:
+
+| screen | median | p90 | p99 | max | `n_ranked` | 選択候補の ESS 比 min |
+|---|---|---|---|---|---|---|
+| なし | 0.0094 | 0.096 | **94.4** | **2529** | 45.2 | **0.0027** |
+| 0.25 | 0.0093 | 0.085 | 14.8 | 2529 | 43.6 | 0.252 |
+| 0.40 | 0.0092 | 0.078 | 1.95 | 1963 | 42.6 | 0.402 |
+| 0.55 | 0.0091 | 0.064 | **0.379** | **1.86** | 40.9 | 0.550 |
+
+- 閾値 0.55 で p99 が 250 分の 1、max が 1360 分の 1 になる一方、**median は悪化しない**
+  （$t=0$ でも median 0.0087 → 0.0063、p99 0.146 → 0.069 と改善する）。
+- 破滅例の正体が特定できた。screen なしのとき `proposed` が選んだ候補の ESS 比は
+  最小 **0.0027**（$n_{\mathrm{diag}}=600$ で有効標本 ≈1.6 観測分）だった。
+- $s=1.5$ では副作用は観測されなかった。`available` は全条件で 1.000、admissible の
+  最小は 24（$t=0$, 0.55）で全滅する fold は無く、選択候補の分布もほぼ不変。
+- **一方 §18.7 の保守性には効かない**（上記 §18.7 の追記を参照）。
+
+#### 追補（2026-07-21）: 上の表は screen の採用を正当化しない
+
+翌日の追試（`followup_probes.txt`、probe 3 本）が前日の解釈を覆した。
+
+1. **固定閾値は真値自身を排除する。** 真の representer $\alpha_0$ の ESS 比を
+   診断 fold サイズ（$n=600$、40 標本）で実測すると:
+
+   | design | $s$ | $t$ | p05 | median |
+   |---|---|---|---|---|
+   | low | 0.5 | 0 | 0.90 | 0.93 |
+   | low | 1.5 | 0 | 0.41 | 0.62 |
+   | low | **1.5** | **4** | **0.16** | **0.48** |
+   | low | 2.5 | 0 | 0.05 | 0.31 |
+   | high | 2.0 | 0 | 0.19 | 0.62 |
+
+   閾値 0.55 は、**screen を正当化した当の $t=4$ シナリオで真値の中央値 0.48 を上回る**。
+   hidden 項は $\alpha_0$ 自体を重くする（$t=4$ で median 0.60 → 0.48）ので、bias が
+   大きい regime ほど誤爆する。grid A の弱 overlap（$s=2.5$）では真値の **92.5%**
+   （40 標本中 37）が閾値未満になり、正しく特定された候補ごと排除される。
+   grid C（$s=2.0$）でも 30%・p05 は 0.19 で、無視できない割合の fold で同じ誤爆が起きる。
+2. **破滅候補と正しい候補は ESS では分離できない。** screen なし条件で regret $>1$ は
+   **17 fold**、例外なく under-regularized UKL（`UKL|rich|c≤0.5` が 16、
+   `UKL|second_order|c=0` が 1）で、選ばれた候補の ESS 比は 0.003--0.62 に散らばる。
+   下の裾（$\le 0.27$、7 fold）は緩い閾値でも切れるが、0.40 を生き残る破滅候補の
+   ESS（0.41--0.62）は **$t=4$ の真値の分布（median 0.48）と同じ範囲**にある。
+   0.40 → 0.55 の p99 改善（1.95 → 0.379）は ESS 0.41--0.52 に偶々座っていた 7 fold を
+   切れたことによるもので、margin ではなく標本の運である。実際 0.55 でも rep 12 は
+   penalty path の一つ上（`UKL|rich|c=0.25`、ESS 0.61）に移って regret 1.86 を出した。
+   fold 内で reference の ESS を基準に相対化する案も分離できない: low design の
+   `correct` reference は正しい logistic なので、その ESS は真値の分布に従い
+   （probe3、$t=4$ で median 0.48）、0.40 を生き残る破滅候補（0.41--0.62）と同水準にある。
+3. **$s=1.5$ で「副作用なし」に見えたのは grid の冗長性のため。** screen は真値級の候補も
+   切っていたが、より滑らかな正則化候補（ESS ≈ 0.86）が残って選択を引き受けた。
+   oracle の attainable risk が全 screen 条件で一致した（0.1973）のはこの冗長性の帰結で、
+   弱 overlap で冗長性が消えれば admissible 全滅（実装は RuntimeError）に至る。
+
+**結論: realized weight の集中度に基づく screen は、本設計では採用不能。**
+実測した範囲で、破滅候補の ESS の分布と真値（および正しく特定された候補）の ESS の
+分布が重なるため、「破滅候補を切り、真値を残す」閾値は取れなかった。
+§18.8 は screen で消せる実装上の穴では
+なく、**診断 fold が裾を undersample する regime における手法の本質的限界**として
+正直に報告するのが正しい。原稿 §4 の "additional pre-specified restrictions" の一文は
+残してよいが、少なくとも本設計では weight 集中に基づく制約が機能しないことが実測された。
+実装の `Numerics.min_ess_ratio` はデフォルト `None` のまま残す（測って棄却した記録として）。
+
+- スクリプト・固定した集計（追跡対象）: `notebooks/experiments/pilots/weight_screen_2026-07-20/`
+  （`summary.txt` に本表、`followup_probes.txt` に追試 3 本、`README.md` に再実行手順）。
+  Parquet 生データ（約 19MB）のみ `notebooks/experiments/results/weight_screen_pilot/`
+  （`.gitignore` 対象、seed 固定で再生成可能）。
+
 ---
 
 ## 19. 原稿側で確定が必要な点
 
 コードではなく Main.tex の問題。
 
-1. **L1125「Tuning uses only the training sample」** — 実装は outcome も high-dim reference の
-   ridge もハイパラ固定で、CV していない。v2 でも固定を維持する（候補比較の交絡を避けるため）
-   ので、**原稿の記述を「固定値を用いる」に改めるのが正しい**。
+1. **L1125「Tuning uses only the training sample」** — 〔2026-07-20 に原稿を修正して解決〕
+   実装は outcome も high-dim reference の ridge もハイパラ固定で、CV していない
+   （`candidates.py:276-296`、`runner.py:124-125`）。v2 でも固定を維持する（候補比較の
+   交絡を避けるため）ので、原稿の当該文を「training sample のみで fit し、ハイパラは
+   事前固定で CV しない」旨に書き改めた。なお同じ文の
+   "gradient-boosted outcome regression" は実測すると実装と一致しており（high design は
+   `HistGradientBoostingRegressor`）、修正不要である。
 2. **L1131「realized reference drift を近似する」** — v2 の §9.2 で実装したので裏づけられる。
 3. **L1133 のベンチマーク 4 種** — v2 の E1b が `fixed_*`・`bregman_cv`・`lsif_cv`・`oracle` を
    実装するので裏づけられる。
 4. **Prop `several_references`** — v2 の §9.3 が実装する。ただし §18.1・§18.3 の限界を
    本文に書き添えるべきである。
-5. **cross-fit の bias-aware 区間** — 定理がない。定理を追加するか、`conservative_cf` を
-   主表に据えるか。**著者の判断待ち。**
+5. **cross-fit の bias-aware 区間** — 〔2026-07-20 に原稿を実測して解決〕
+   `conservative_cf` に**裏づけはある**。Main.tex L866-880 が
+   $\widehat H^{\mathrm{CF}}=\sum_k w_k(\widehat U_k+z_{1-(\tau-\delta)/(2K)}\widehat{se}_k)$ を定義し、
+   直後に union bound による漸近被覆 $\ge 1-\tau$ を主張する。証明は OA L1354 にあり、
+   fold ごとに Thm `uniform_selected_inference` の議論を normal-tail $(\tau-\delta)/K$・
+   bias 失敗確率 $\delta/K$ で適用し、fold 事象の共通部分上で結論する。
+   裏づけが無いのは `bias_aware_pooled`（pooled se に単一分割の critical value を当てる
+   v1 の設計）だけであり、§12 のとおり v2 は既にこれを参考値に落としている。
+   **残る判断は体裁のみ**: 本文の主張を `\begin{theorem}` 環境に格上げするかどうか。
 6. **§7.2 の記述全体** — 結果が出てから書き直す。数値のない段階で主張を先に書かないこと。
-7. **bias-aware 区間の保守性**（§18.7）— 候補集合を絞るか、同時性補正を弱めるか、
-   保守性を正直に報告するか。
-8. **weight 集中の admissibility 制約**（§18.8）— §4 の admissibility 段落が想定している
-   追加制約を実装するかどうか。
+7. **bias-aware 区間の保守性**（§18.7）— 〔2026-07-20 に (a) を実測で却下、
+   2026-07-21 に (c) の中身を用意〕候補集合を絞っても解消しない（§18.9）。
+   長さの分解（bias bound 既知の bounded-normal 床 $\mathrm{cv}(t)/z$ ＋
+   feasibility premium ≈2.1--2.5 倍、§18.7 追記）を E6 で明示して正直に報告する。
+   (b) グループ化の期待効果は 1 割前後で小さく採らない。
+   **〔2026-07-21 著者確定〕(c)＋分解の明示で決着。**
+8. **weight 集中の admissibility 制約**（§18.8）— 〔2026-07-21 の追試で採用不能と判明、
+   同日著者確定: screen 不採用〕
+   `Numerics.min_ess_ratio` として実装・実測したが、真の representer 自身が bias の
+   大きい regime で同水準の weight 集中を持ち、破滅候補と正しい候補の ESS の分布が
+   重なることが実測された（§18.9 追補）。screen は採用せず、§18.8 は手法の本質的限界として E3 の regret 裾で
+   正直に報告する。Main.tex L1131「We report large weights without capping them」は
+   **そのまま正しい**ので修正不要。§4 の "additional pre-specified restrictions" の
+   一文も残してよい（本設計で機能しないのは weight 集中に基づく制約という実測事実を
+   限界の段落に書き添える）。**残る著者判断は §7.2 執筆時の文言のみ。**

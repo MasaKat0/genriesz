@@ -43,6 +43,8 @@ from refsel.dgp import (  # noqa: E402
 from refsel.inference import bias_aware_critical_value  # noqa: E402
 from refsel.selection import (  # noqa: E402
     DeltaBudget,
+    candidate_scores,
+    effective_sample_ratio,
     gaussian_multiplier_mean_radii,
     minimum_bias_upper_bound,
 )
@@ -263,6 +265,118 @@ def test_alpha_matrix_agrees_with_individual_prediction() -> None:
         v = np.asarray(basis(data.X), dtype=float) @ library.fits[j].beta
         expected = np.asarray(library.generators[j].inv_grad(data.X, v), dtype=float)
         assert np.allclose(batched[:, j], expected)
+
+
+def test_effective_sample_ratio_is_scale_free_and_bracketed() -> None:
+    """Uniform weight gives one, a single spike gives ``1/n``, and scale is irrelevant."""
+
+    n = 50
+    uniform = np.full(n, 2.0)
+    spike = np.zeros(n)
+    spike[0] = 1.0
+    alternating = np.where(np.arange(n) % 2 == 0, 1.0, -1.0)
+    ratios = effective_sample_ratio(np.column_stack([uniform, spike, alternating]))
+    assert np.isclose(ratios[0], 1.0)
+    assert np.isclose(ratios[1], 1.0 / n)
+    assert np.isclose(ratios[2], 1.0)
+    # The Kish ratio is homogeneous of degree zero, so screening on it cannot
+    # depend on the units of the target parameter. That must hold to the edge of
+    # the floating-point range: without peak normalization, uniform weights of
+    # ``2e307`` make ``(sum |a|)^2`` overflow to ``inf / inf = nan`` and uniform
+    # tiny weights underflow to zero, both of which would silently change
+    # admissibility. (``1e308`` would overflow in the test input itself.)
+    for scale in (137.0, 1e307, 1e-300, np.nextafter(0.0, 1.0)):
+        scaled = effective_sample_ratio(np.column_stack([uniform, spike]) * scale)
+        assert np.allclose(scaled, ratios[:2]), scale
+    assert np.isclose(effective_sample_ratio(np.zeros((n, 1)))[0], 0.0)
+    # A non-finite entry of any kind is a failed fit, not a concentrated one.
+    for bad in (np.inf, -np.inf, np.nan):
+        with_bad = np.column_stack([uniform, uniform])
+        with_bad[3, 1] = bad
+        ratios_bad = effective_sample_ratio(with_bad)
+        assert np.isclose(ratios_bad[0], 1.0)
+        assert np.isnan(ratios_bad[1])
+
+
+def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:
+    """A stricter pre-specified restriction may only remove candidates."""
+
+    data = generate_data(n=600, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=97)
+    specs = candidate_grid()[:20]
+    library = FoldLibrary(data.X, specs, max_iter=1000, tolerance=1e-8)
+    gamma = np.zeros(data.X.shape[0])
+    contrast = np.zeros(data.X.shape[0])
+
+    def admissible_at(threshold: float | None) -> np.ndarray:
+        _, admissible, _, _ = candidate_scores(
+            library, data.X, data.y, contrast, gamma, min_ess_ratio=threshold
+        )
+        return admissible
+
+    unrestricted = admissible_at(None)
+    # Guard against a degenerate screen: monotonicity alone would also hold for
+    # an implementation that rejects everything at any positive threshold.
+    assert np.sum(unrestricted) > 0
+    assert np.sum(admissible_at(0.05)) > 0
+    assert np.array_equal(admissible_at(0.0), unrestricted)
+    previous = unrestricted
+    for threshold in (0.05, 0.2, 0.5):
+        current = admissible_at(threshold)
+        assert np.all(current <= previous)
+        previous = current
+    # The strictest threshold below one still cannot admit anything new.
+    assert np.sum(admissible_at(0.99)) <= np.sum(unrestricted)
+
+
+def test_screened_candidate_keeps_its_diagnostics_but_loses_its_scores() -> None:
+    """The screen must remove a candidate from selection without erasing the record.
+
+    ``scores`` drive selection, so they become ``nan``; ``ess_ratio`` and
+    ``max_abs_alpha`` describe the fit and must survive so that the candidate
+    table can say what was screened and why.
+    """
+
+    data = generate_data(n=600, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=43)
+    specs = candidate_grid()[:20]
+    library = FoldLibrary(data.X, specs, max_iter=1000, tolerance=1e-8)
+    zeros = np.zeros(data.X.shape[0])
+    _, unrestricted, _, ess = candidate_scores(library, data.X, data.y, zeros, zeros)
+    values = ess[unrestricted]
+    assert values.min() < values.max(), "grid too homogeneous for this test"
+    threshold = float((values.min() + values.max()) / 2.0)
+    scores, admissible, max_weight, ess_after = candidate_scores(
+        library, data.X, data.y, zeros, zeros, min_ess_ratio=threshold
+    )
+    screened = unrestricted & ~admissible
+    kept = unrestricted & admissible
+    assert screened.any() and kept.any()
+    assert np.all(np.isnan(scores[:, screened]))
+    assert np.all(np.isfinite(ess_after[screened]))
+    assert np.all(ess_after[screened] < threshold)
+    assert np.all(np.isfinite(max_weight[screened]))
+    assert np.all(np.isfinite(scores[:, kept]))
+
+
+def test_min_ess_ratio_changes_the_configuration_digest() -> None:
+    """A screened run must never silently reuse batches from an unscreened one."""
+
+    from refsel.grids import experiment_config
+    from refsel.runner import Numerics, configuration_digest, configuration_record
+
+    plain = experiment_config("smoke")
+    screened = experiment_config("smoke", numerics=Numerics(min_ess_ratio=0.5))
+    assert configuration_record(screened)["numerics"]["min_ess_ratio"] == 0.5
+    assert configuration_digest(plain) != configuration_digest(screened)
+
+
+def test_weight_screen_rejects_a_threshold_outside_the_unit_interval() -> None:
+    data = generate_data(n=300, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=11)
+    library = FoldLibrary(data.X, (BENCHMARK_SPEC,), max_iter=500, tolerance=1e-8)
+    zeros = np.zeros(data.X.shape[0])
+    with pytest.raises(ValueError, match="min_ess_ratio"):
+        candidate_scores(library, data.X, data.y, zeros, zeros, min_ess_ratio=1.0)
+    with pytest.raises(ValueError, match="min_ess_ratio"):
+        candidate_scores(library, data.X, data.y, zeros, zeros, min_ess_ratio=-0.1)
 
 
 # --------------------------------------------------------------------------- #

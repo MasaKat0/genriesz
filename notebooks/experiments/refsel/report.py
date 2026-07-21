@@ -435,14 +435,21 @@ def failure_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     candidates = tables.get("candidate")
     if candidates is None or candidates.empty:
         return pd.DataFrame()
-    grouped = candidates.groupby(
-        ["loss", "dictionary", "design", "sample_size", "overlap_scale"], dropna=False
-    ).agg(
+    aggregations = dict(
         fits=("fit_success", "size"),
         failure_rate=("fit_success", lambda x: 1.0 - float(np.mean(x))),
         inadmissible_rate=("admissible", lambda x: 1.0 - float(np.mean(x))),
         median_max_abs_alpha=("max_abs_alpha", "median"),
+        median_ess_ratio=("ess_ratio", "median"),
     )
+    # Results written before manifest schema 3 have no ess_ratio column; they
+    # remain readable, so the report degrades to the columns that exist rather
+    # than raising on a directory the loader accepted.
+    if "ess_ratio" not in candidates.columns:
+        del aggregations["median_ess_ratio"]
+    grouped = candidates.groupby(
+        ["loss", "dictionary", "design", "sample_size", "overlap_scale"], dropna=False
+    ).agg(**aggregations)
     status = (
         candidates.assign(count=1)
         .pivot_table(
