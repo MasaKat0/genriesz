@@ -47,3 +47,71 @@ Recent numerical fixes:
 - The score-guided appendix fixes the loss at UKL-Riesz and uses a separate regressor-basis outcome model. This avoids the degenerate `alpha=0` solution that occurs when an unconstrained SQ loss is combined with covariate-only ATE features.
 - The Zhao/Kang--Schafer appendix now reports balance-path diagnostics rather than treatment-effect MSE for that subsection. This follows the purpose of Zhao's Figure 1 and avoids displaying unstable outcome estimates from deliberately misspecified early-step models.
 - The weak-overlap synthetic DGP is kept nonlinear but no longer uses extremely heavy-tailed covariates. Propensities are clipped to `[0.05, 0.95]` to make the comparison about loss-link behavior rather than rare numerical outliers.
+
+## Reference-based loss--link selection (`09_*.ipynb` and `refsel/`)
+
+This experiment is separate from the eight notebooks above. It validates the selection
+theorems of the manuscript rather than comparing fixed specifications, so it lives in a
+package (`refsel/`) with its own tests rather than in a single notebook cell.
+
+The design is specified in `notebooks/experiments/REFERENCE_SELECTION_PLAN.md`, which
+**supersedes** `reference_selection_experiment_details.md` and `simulation_coding_design_v10.md`
+in the manuscript repository. Read it before changing anything here: each experiment maps to
+one claim in Main.tex section 4, and an experiment that answers no referee question does not
+belong in the run.
+
+```text
+refsel/
+  dgp.py          designs, the drifting misspecification family, fold rotation, seeds
+  candidates.py   dictionaries, the 90-candidate grid, ScaledGenerator, FoldLibrary
+  reference.py    four references, their allowances, the pairwise check
+  selection.py    multiplier bootstrap, the error budget, every selection rule
+  audit.py        analytic bias/variance audit with a shared integration sample
+  inference.py    the four intervals and Monte Carlo standard errors
+  calibration.py  bias-to-standard-error calibration; writes calibration.json
+  grids.py        publication and smoke grids, tier settings
+  report.py       the manuscript tables
+  rescaling.py    the generator-rescaling demonstration
+```
+
+### Tiers
+
+Set `TIER` in the notebook. Only the replication count changes; the candidate library,
+selection rules, designs, and seed construction are identical across tiers.
+
+| Tier | Jobs | Cost |
+|---|---|---|
+| `smoke` | 4 | under a minute |
+| `pilot` | 650 | about 1 core-hour |
+| `publication` | 26,000 | about 99 core-hours (measured: 6.3 s at n=1000, 9.9 s at n=3000, 44 s high-dimensional) |
+
+Unlike the other experiment notebooks, this one is safe to open and run: the default tier is
+`smoke`. Results go to `notebooks/experiments/results/`, which is git-ignored.
+
+For the publication tier, set `MAX_WORKERS`. Running from the notebook is fine. Running from a
+**script** on macOS or Windows requires the standard entry-point guard, because the default
+multiprocessing start method re-imports the calling module in every worker:
+
+```python
+if __name__ == "__main__":
+    run_experiment(config, output_dir)
+```
+
+Without it the pool dies with `BrokenProcessPool` partway through the first batch.
+
+### Things that are easy to get wrong here
+
+- **`calibration.json` is committed and must not be regenerated casually.** The publication
+  run reads it instead of re-calibrating, which is what makes the run deterministic.
+  Regenerating it changes every grid-B scenario.
+- **The hidden direction must stay unrepresentable by the candidates and representable by the
+  `correct` reference.** Making it unrepresentable by everything breaks the reference's own
+  allowance and the experiment stops measuring anything (plan section 18.1).
+- **BKL fails on every ATE fold by design** (`domain_error`). It is kept in the library to show
+  the admissibility screen removing an incompatible pair; that is why coverage is reported
+  unconditionally, with failures in the denominator.
+- **`bias_aware_pooled` has no supporting theorem.** Use `bias_aware_split` or
+  `conservative_cf` when transcribing numbers into the manuscript.
+
+Tests are in `tests/test_reference_selection_experiment.py` and run under `make verify`;
+`make lint` covers `notebooks/experiments/refsel`.

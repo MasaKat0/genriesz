@@ -225,3 +225,6 @@ notebooks/scorematchingriesz/data/*
 
 
 
+
+# Experiment results (Parquet). Regenerate with notebooks/experiments/09_reference_based_loss_link_selection.ipynb
+notebooks/experiments/results/
