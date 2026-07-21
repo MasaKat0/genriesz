@@ -291,7 +291,15 @@ def normalize_grid(
     median: float | None = None,
     n: int | None = None,
 ) -> list[float] | list[int]:
-    """Normalize a grid spec (``"auto"`` / scalar / list) into a candidate list."""
+    """Normalize a grid spec (``"auto"`` / scalar / list) into a candidate list.
+
+    Every user-supplied value is validated here, at the entrance (audit K-19 /
+    CV-03): a bad value that slips through surfaces later as an unrelated deep
+    error (``negative dimensions``, the solver's ``A and b must be finite``) or,
+    worse, is silently reinterpreted (``True`` as one kernel center, ``40.7``
+    truncated to ``40``, an empty grid reported as "no candidate could be
+    fitted").
+    """
 
     if kind == "sigma":
         if isinstance(spec, str):
@@ -301,8 +309,11 @@ def normalize_grid(
                 raise ValueError("sigma_grid='auto' needs a positive median distance")
             return [float(median) * m for m in DEFAULT_SIGMA_MULTIPLIERS]
         if np.isscalar(spec):
-            return [float(spec)]  # type: ignore[arg-type]
-        return [float(s) for s in spec]  # type: ignore[union-attr]
+            return [_validated_sigma(spec)]
+        values = list(spec)  # type: ignore[arg-type]
+        if not values:
+            raise ValueError("sigma_grid is an empty list: there is no candidate to score")
+        return [_validated_sigma(s) for s in values]
 
     if kind == "lam":
         if spec is None:
@@ -316,8 +327,11 @@ def normalize_grid(
                 raise ValueError("lam_grid string must be 'auto'")
             return list(DEFAULT_LAM_GRID)
         if np.isscalar(spec):
-            return [float(spec)]  # type: ignore[arg-type]
-        return [float(x) for x in spec]  # type: ignore[union-attr]
+            return [_validated_lam(spec)]
+        values = list(spec)  # type: ignore[arg-type]
+        if not values:
+            raise ValueError("lam_grid is an empty list: there is no candidate to score")
+        return [_validated_lam(x) for x in values]
 
     if kind == "n_centers":
         if n is None:
@@ -327,10 +341,52 @@ def normalize_grid(
                 raise ValueError("n_centers_grid string must be 'auto'")
             return sorted({min(int(c), int(n)) for c in DEFAULT_N_CENTERS_BASE})
         if np.isscalar(spec):
-            return [min(int(spec), int(n))]  # type: ignore[arg-type]
-        return sorted({min(int(c), int(n)) for c in spec})  # type: ignore[union-attr]
+            return [min(_validated_n_centers(spec), int(n))]
+        values = list(spec)  # type: ignore[arg-type]
+        if not values:
+            raise ValueError("n_centers_grid is an empty list: there is no candidate to score")
+        return sorted({min(_validated_n_centers(c), int(n)) for c in values})
 
     raise ValueError(f"Unknown grid kind: {kind}")
+
+
+def _validated_sigma(value: object) -> float:
+    """A user-supplied bandwidth candidate: a finite positive number."""
+
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"sigma_grid contains a boolean ({value!r}): not a bandwidth")
+    out = float(value)  # type: ignore[arg-type]
+    if not np.isfinite(out) or out <= 0.0:
+        raise ValueError(f"sigma_grid values must be finite and positive, got {value!r}")
+    return out
+
+
+def _validated_lam(value: object) -> float:
+    """A user-supplied penalty candidate: a finite nonnegative number."""
+
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"lam_grid contains a boolean ({value!r}): not a penalty")
+    out = float(value)  # type: ignore[arg-type]
+    if not np.isfinite(out) or out < 0.0:
+        raise ValueError(f"lam_grid values must be finite and >= 0, got {value!r}")
+    return out
+
+
+def _validated_n_centers(value: object) -> int:
+    """A user-supplied center-count candidate: an integral number >= 1.
+
+    ``True`` would silently become one kernel center and ``40.7`` would be
+    truncated to ``40`` -- both change the scored candidate without telling the
+    caller -- and ``0`` or a negative count surfaces later as an unrelated
+    indexing or ``negative dimensions`` error (audit K-19).
+    """
+
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"n_centers_grid contains a boolean ({value!r}): not a center count")
+    out = float(value)  # type: ignore[arg-type]
+    if not np.isfinite(out) or not out.is_integer() or out < 1.0:
+        raise ValueError(f"n_centers_grid values must be integers >= 1, got {value!r}")
+    return int(out)
 
 
 def _select_center_indices(
@@ -737,8 +793,11 @@ def _sigma_candidate_specs(
             raise ValueError("sigma_grid='auto' needs a positive median distance")
         return [("mult", float(mult)) for mult in DEFAULT_SIGMA_MULTIPLIERS]
     if np.isscalar(spec):
-        return [("abs", float(spec))]  # type: ignore[arg-type]
-    return [("abs", float(s)) for s in spec]  # type: ignore[union-attr]
+        return [("abs", _validated_sigma(spec))]
+    values = list(spec)  # type: ignore[arg-type]
+    if not values:
+        raise ValueError("sigma_grid is an empty list: there is no candidate to score")
+    return [("abs", _validated_sigma(s)) for s in values]
 
 
 def select_grr_hyperparams(
