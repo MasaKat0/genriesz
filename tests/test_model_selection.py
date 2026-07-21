@@ -92,19 +92,27 @@ def test_normalize_grid_lam_rejects_none_and_unknown_string():
         ("n_centers", [0, 40], "integers >= 1"),
         ("n_centers", [-5], "integers >= 1"),
         ("n_centers", [True], "boolean"),
+        ("n_centers", [np.bool_(True)], "boolean"),
         ("n_centers", [40.7], "integers >= 1"),
+        ("n_centers", [float("inf")], "integers >= 1"),
         ("n_centers", [], "empty list"),
         ("n_centers", float("nan"), "integers >= 1"),
+        ("n_centers", 0, "integers >= 1"),
         ("lam", [float("nan")], "finite"),
+        ("lam", [float("-inf")], "finite"),
         ("lam", [-1e-2], ">= 0"),
         ("lam", [True], "boolean"),
+        ("lam", [np.bool_(False)], "boolean"),
         ("lam", [], "empty list"),
+        ("lam", float("inf"), "finite"),
         ("sigma", [float("nan")], "finite and positive"),
         ("sigma", [-1.0], "finite and positive"),
         ("sigma", [0.0], "finite and positive"),
         ("sigma", [float("inf")], "finite and positive"),
         ("sigma", [True], "boolean"),
+        ("sigma", [np.bool_(True)], "boolean"),
         ("sigma", [], "empty list"),
+        ("sigma", float("nan"), "finite and positive"),
     ],
 )
 def test_normalize_grid_rejects_garbage_at_the_entrance(kind, bad, match):
@@ -131,11 +139,14 @@ def test_select_grr_hyperparams_rejects_garbage_grids_before_fitting():
         basis=GaussianRKHSBasis(n_centers=20, random_state=0),
         generator=SquaredGenerator(),
     )
+    # The matches pin the *entrance* messages: before the fix a NaN reached the
+    # solver and died with "A and b must be finite", which a loose match like
+    # "finite" would also accept.
     for grids, match in [
-        (dict(sigma_grid=[float("nan")], lam_grid=[1e-2]), "finite and positive"),
-        (dict(sigma_grid=[], lam_grid=[1e-2]), "empty list"),
-        (dict(n_centers_grid=[0, 40], lam_grid=[1e-2]), "integers >= 1"),
-        (dict(lam_grid=[float("nan")]), "finite"),
+        (dict(sigma_grid=[float("nan")], lam_grid=[1e-2]), "^sigma_grid values must be finite"),
+        (dict(sigma_grid=[], lam_grid=[1e-2]), "^sigma_grid is an empty list"),
+        (dict(n_centers_grid=[0, 40], lam_grid=[1e-2]), "^n_centers_grid values must be integers"),
+        (dict(lam_grid=[float("nan")]), "^lam_grid values must be finite"),
     ]:
         with pytest.raises(ValueError, match=match):
             select_grr_hyperparams(
