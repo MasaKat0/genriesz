@@ -482,6 +482,16 @@ band* that rejects both collapsed and saturated bandwidths, and any thresholds
 you set via ``riesz_admissibility_thresholds``).  Among admissible candidates the
 criterion chosen by ``riesz_selection_score`` is minimized.  Neither coverage
 nor any true nuisance is used for selection.
+The ``"auto"`` bandwidth anchor is measured in the basis's own coordinate
+system: standardized features for a standardizing basis (the default), raw
+features for ``GaussianRKHSBasis(standardize=False)``.
+If *no* candidate passes the screen, the selection **stops with an error** by
+default — an inadmissible candidate's criterion is not trustworthy (a saturated
+kernel scores near zero while estimating nothing).  Pass
+``riesz_fallback_policy="best_criterion"`` to accept the best fitted candidate
+anyway; the per-fold entries of ``diagnostics["riesz_cv"]["selected"]`` then
+record ``used_fallback``, the reason, and the thresholds the chosen candidate
+violates.
 ``riesz_sigma_grid``/``riesz_n_centers_grid`` require a kernel basis
 with ``copy_with_params`` (e.g. :class:`~genriesz.GaussianRKHSBasis`); with any
 other basis you can still cross-validate ``riesz_lam_grid`` alone.

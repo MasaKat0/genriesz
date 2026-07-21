@@ -7,6 +7,8 @@ when no grid is supplied.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -317,16 +319,27 @@ def test_strict_nested_survives_degenerate_inner_fold(monkeypatch):
         yield Fold(train=B, test=A)
 
     monkeypatch.setattr(ms, "kfold_splits", fake_splits)
-    cfg = GRRCVConfig(sigma_grid="auto", lam_grid=[1e-2], cv_folds=2, random_state=0)
-    res = select_grr_hyperparams(  # must not raise
-        X_train=X,
-        y_train=Y,
-        m=ATEFunctional(0),
-        basis=GaussianRKHSBasis(n_centers=20, sigma=1.0, random_state=0),
-        generator=SquaredGenerator(),
-        config=cfg,
-        outcome_link="identity",
+    # The degenerate fold also makes every candidate inadmissible, so this test
+    # opts into the recorded fallback (audit CV-11): its target is the bandwidth
+    # fallback, not the admissibility policy.
+    cfg = GRRCVConfig(
+        sigma_grid="auto",
+        lam_grid=[1e-2],
+        cv_folds=2,
+        random_state=0,
+        fallback_policy="best_criterion",
     )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        res = select_grr_hyperparams(  # must not raise
+            X_train=X,
+            y_train=Y,
+            m=ATEFunctional(0),
+            basis=GaussianRKHSBasis(n_centers=20, sigma=1.0, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+            outcome_link="identity",
+        )
     assert res.sigma is not None and np.isfinite(res.sigma) and res.sigma > 0
     assert res.fold_provenance[0]["preprocess_fit_index"].tolist() == A.tolist()
 
@@ -362,6 +375,237 @@ def test_grrcvconfig_positional_signature_is_stable():
     assert res.strict_nested is True and res.fold_provenance == []
     assert "strict_nested" not in GRRCVResult.__match_args__
     assert "fold_provenance" not in GRRCVResult.__match_args__
+    assert res.used_fallback is False and res.fallback_reason is None
+    assert "used_fallback" not in GRRCVResult.__match_args__
+
+
+# --------------------------------------------------------------------------- #
+# Audit N-03: the "auto" sigma anchor follows the basis's coordinate system
+# --------------------------------------------------------------------------- #
+
+
+def _large_scale_sample(n: int = 240, scale: float = 1000.0):
+    rng = np.random.default_rng(0)
+    D = rng.binomial(1, 0.5, size=n).astype(float)
+    Z = rng.normal(0.0, scale, size=(n, 3))
+    X = np.column_stack([D, Z])
+    y = Z[:, 0] / scale + D + rng.normal(size=n)
+    return X, y
+
+
+def test_auto_sigma_anchor_follows_the_basis_coordinate_system():
+    # A basis with standardize=False measures kernel distances on the raw
+    # features, so the "auto" grid must anchor at the *raw* median. Anchoring at
+    # the standardized median (audit N-03) puts every candidate bandwidth a
+    # factor of the feature scale too small, the kernel saturates, and the whole
+    # grid is rejected by the admissibility screen.
+    from genriesz.model_selection import _standardized as std
+
+    X, y = _large_scale_sample()
+    cfg = GRRCVConfig(sigma_grid="auto", cv_folds=3, return_path=True, random_state=0)
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=40, standardize=False, random_state=0),
+        generator=SquaredGenerator(),
+        config=cfg,
+    )
+    raw_median = _median_pairwise_distance(X, random_state=0)
+    std_median = _median_pairwise_distance(std(X), random_state=0)
+    assert raw_median > 100 * std_median  # the scale gap the anchor must bridge
+    expected = sorted(float(m) * raw_median for m in DEFAULT_SIGMA_MULTIPLIERS)
+    got = sorted(row["sigma"] for row in res.path)
+    assert np.allclose(got, expected, rtol=1e-12)
+    # The point of the fix: candidates in the right coordinate system are
+    # healthy, so the screen keeps some and no fallback is involved.
+    assert res.n_admissible > 0
+    assert res.used_fallback is False
+
+
+def test_auto_sigma_anchor_stays_standardized_for_a_standardizing_basis():
+    # The default (standardize=True) basis keeps the standardized anchor: the
+    # N-03 fix must not move it.
+    from genriesz.model_selection import _standardized as std
+
+    X, y = _large_scale_sample()
+    cfg = GRRCVConfig(sigma_grid="auto", cv_folds=3, return_path=True, random_state=0)
+    res = select_grr_hyperparams(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=40, random_state=0),
+        generator=SquaredGenerator(),
+        config=cfg,
+    )
+    std_median = _median_pairwise_distance(std(X), random_state=0)
+    expected = sorted(float(m) * std_median for m in DEFAULT_SIGMA_MULTIPLIERS)
+    got = sorted(row["sigma"] for row in res.path)
+    assert np.allclose(got, expected, rtol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
+# Audit CV-11 / K-06: the admissibility fallback is an explicit policy
+# --------------------------------------------------------------------------- #
+
+
+def _healthy_sample(n: int = 150):
+    rng = np.random.default_rng(1)
+    D = rng.binomial(1, 0.5, size=n).astype(float)
+    X = np.column_stack([D, rng.normal(size=(n, 2))])
+    y = X[:, 1] + D + rng.normal(size=n)
+    return X, y
+
+
+#: A threshold no candidate can meet: the ESS ratio is at most one by
+#: construction, so every candidate is inadmissible and only the policy decides
+#: what happens next.
+_IMPOSSIBLE = {"min_ess_ratio": 2.0}
+
+
+def test_no_admissible_candidate_halts_by_default():
+    # Audit CV-11: an inadmissible winner can carry a deceptively small
+    # criterion (a saturated kernel scores near zero), so the default is to
+    # stop, not to warn and return it.
+    X, y = _healthy_sample()
+    cfg = GRRCVConfig(
+        sigma_grid="auto",
+        cv_folds=2,
+        random_state=0,
+        admissibility_thresholds=_IMPOSSIBLE,
+    )
+    with pytest.raises(RuntimeError, match="admissibility screen"):
+        select_grr_hyperparams(
+            X_train=X,
+            y_train=y,
+            m=ATEFunctional(0),
+            basis=GaussianRKHSBasis(n_centers=30, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+        )
+
+
+def test_fallback_policy_opt_in_warns_and_records_the_violations():
+    X, y = _healthy_sample()
+    cfg = GRRCVConfig(
+        sigma_grid="auto",
+        cv_folds=2,
+        random_state=0,
+        admissibility_thresholds=_IMPOSSIBLE,
+        fallback_policy="best_criterion",
+    )
+    with pytest.warns(UserWarning, match="fallback_policy"):
+        res = select_grr_hyperparams(
+            X_train=X,
+            y_train=y,
+            m=ATEFunctional(0),
+            basis=GaussianRKHSBasis(n_centers=30, random_state=0),
+            generator=SquaredGenerator(),
+            config=cfg,
+        )
+    assert res.used_fallback is True
+    assert res.fallback_reason == "no_admissible_candidate"
+    assert "min_ess_ratio" in res.fallback_violations
+    assert res.n_admissible == 0
+    # A healthy selection leaves the fallback record empty.
+    healthy = select_grr_hyperparams(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=30, random_state=0),
+        generator=SquaredGenerator(),
+        config=GRRCVConfig(sigma_grid="auto", cv_folds=2, random_state=0),
+    )
+    assert healthy.used_fallback is False
+    assert healthy.fallback_reason is None
+    assert healthy.fallback_violations == []
+
+
+def test_fallback_policy_is_validated():
+    with pytest.raises(ValueError, match="fallback_policy"):
+        GRRCVConfig(fallback_policy="anything_goes")
+
+
+def test_modifies_estimand_does_not_bypass_the_quality_checks():
+    # Codex review of the CV-11 fix: the estimand flag alone must not smuggle a
+    # candidate past the ESS floor or any other threshold. When no
+    # target-sensitivity candidate passes the remaining checks, the default
+    # policy halts exactly as for an exact-target generator, and the opt-in
+    # fallback records every violation.
+    X, y = _healthy_sample()
+    gen = SquaredGenerator()
+    gen.modifies_estimand = True  # a stub target-sensitivity generator
+    common = dict(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=30, random_state=0),
+        generator=gen,
+    )
+    with pytest.raises(RuntimeError, match="remaining.*quality checks"):
+        select_grr_hyperparams(
+            config=GRRCVConfig(
+                sigma_grid="auto",
+                cv_folds=2,
+                random_state=0,
+                admissibility_thresholds=_IMPOSSIBLE,
+            ),
+            **common,
+        )
+    with pytest.warns(UserWarning, match="fallback_policy"):
+        res = select_grr_hyperparams(
+            config=GRRCVConfig(
+                sigma_grid="auto",
+                cv_folds=2,
+                random_state=0,
+                admissibility_thresholds=_IMPOSSIBLE,
+                fallback_policy="best_criterion",
+            ),
+            **common,
+        )
+    assert res.used_fallback is True
+    assert res.fallback_reason == "no_admissible_candidate"
+    assert "min_ess_ratio" in res.fallback_violations
+    assert "modifies_estimand" in res.fallback_violations
+    # With sane thresholds the dedicated sensitivity path still works, over
+    # candidates whose only violation is the estimand flag.
+    with pytest.warns(UserWarning, match="modifies the estimand"):
+        ok = select_grr_hyperparams(
+            config=GRRCVConfig(sigma_grid="auto", cv_folds=2, random_state=0),
+            **common,
+        )
+    assert ok.used_fallback is True
+    assert ok.fallback_reason == "modifies_estimand"
+    assert ok.fallback_violations == ["modifies_estimand"]
+
+
+def test_riesz_fallback_policy_reaches_the_estimation_diagnostics():
+    # The estimation entry points must expose the policy and surface the
+    # fallback record per outer fold, so a user of grr_ate can see that a fold's
+    # selection came from the fallback pool and why.
+    X, y = _healthy_sample(n=180)
+    common = dict(
+        X=X,
+        Y=y,
+        treatment_index=0,
+        basis=GaussianRKHSBasis(n_centers=25, random_state=0),
+        generator=SquaredGenerator(),
+        riesz_sigma_grid="auto",
+        riesz_cv_folds=2,
+        riesz_admissibility_thresholds=_IMPOSSIBLE,
+        estimators=("arw",),
+        cross_fit=True,
+        folds=2,
+        random_state=0,
+    )
+    with pytest.raises(RuntimeError, match="admissibility screen"):
+        grr_ate(**common)
+    with pytest.warns(UserWarning, match="fallback_policy"):
+        est = grr_ate(**common, riesz_fallback_policy="best_criterion")
+    selected = est.diagnostics["riesz_cv"]["selected"]
+    assert selected and all(s["used_fallback"] for s in selected)
+    assert all(s["fallback_reason"] == "no_admissible_candidate" for s in selected)
+    assert all("min_ess_ratio" in s["fallback_violations"] for s in selected)
 
 
 def test_outer_refit_reselects_centers_when_n_centers_cv_active(monkeypatch):

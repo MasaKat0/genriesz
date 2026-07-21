@@ -96,7 +96,10 @@ class GRRCVConfig:
         Candidate specs. Each may be ``None`` (do not vary this dimension;
         keep the estimator's fixed value), ``"auto"``, a scalar, or a list.
         ``sigma_grid="auto"`` expands to ``median_pairwise_distance * (0.25, 0.5,
-        1, 2, 4)``; ``lam_grid="auto"`` to :data:`DEFAULT_LAM_GRID`;
+        1, 2, 4)``, with the median measured in the basis's own coordinate
+        system -- standardized features when the basis standardizes (the
+        default), raw features when it was built with ``standardize=False``
+        (audit N-03); ``lam_grid="auto"`` to :data:`DEFAULT_LAM_GRID`;
         ``n_centers_grid="auto"`` to :data:`DEFAULT_N_CENTERS_BASE` (capped at
         ``n``). With ``lam_grid=None`` the single candidate is the caller's
         ``riesz_lam``, so cross-validating ``sigma_grid`` alone leaves the
@@ -163,12 +166,27 @@ class GRRCVConfig:
     # ``__match_args__`` of the previous release intact (a 5th positional still
     # means ``selection_score``, not ``strict_nested``).
     strict_nested: bool = field(default=True, kw_only=True)
+    #: What to do when no exact-target candidate passes the admissibility
+    #: screen (audit CV-11). ``None`` (default) raises: an inadmissible winner
+    #: can carry a deceptively small criterion (a saturated kernel scores near
+    #: zero), so silently returning one is a selection failure, not a selection.
+    #: ``"best_criterion"`` opts into the pre-audit behaviour -- take the best
+    #: finite-criterion candidate among all fitted ones -- with a warning, and
+    #: the result records ``used_fallback``, the reason, and the thresholds the
+    #: chosen candidate violates. A ``modifies_estimand`` generator keeps its
+    #: dedicated target-sensitivity path (section 9-4, until CV-12 separates it
+    #: from exact-target selection), but only over candidates that pass every
+    #: *other* admissibility check; when none does, this policy gates it like
+    #: any other screen wipe-out.
+    fallback_policy: str | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         if self.selection_score not in SELECTION_SCORES:
             raise ValueError(f"selection_score must be one of {SELECTION_SCORES}")
         if int(self.cv_folds) < 2:
             raise ValueError("cv_folds must be >= 2")
+        if self.fallback_policy not in (None, "best_criterion"):
+            raise ValueError("fallback_policy must be None or 'best_criterion'")
 
     @property
     def is_active(self) -> bool:
@@ -213,6 +231,19 @@ class GRRCVResult:
     path: list[dict] = field(default_factory=list)
     modifies_estimand: bool = field(default=False, kw_only=True)
     strict_nested: bool = field(default=True, kw_only=True)
+    #: Whether the winner came from the fallback pool rather than the admissible
+    #: set (audit CV-11). ``fallback_reason`` is ``"no_admissible_candidate"``
+    #: (screen wipe-out, only reachable with
+    #: ``fallback_policy="best_criterion"``) or ``"modifies_estimand"`` (the
+    #: generator's candidates are inadmissible by design, section 9-4, and the
+    #: winner passes every remaining quality check).
+    #: ``fallback_violations`` lists the admissibility thresholds the chosen
+    #: candidate violates, so the caller can see *why* it was inadmissible
+    #: without re-deriving the screen. Inference-status downgrade for fallback
+    #: results lands with audit P0-09 (the status object does not exist yet).
+    used_fallback: bool = field(default=False, kw_only=True)
+    fallback_reason: str | None = field(default=None, kw_only=True)
+    fallback_violations: list[str] = field(default_factory=list, kw_only=True)
     # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
     # would make dataclass equality raise a truth-value ``ValueError``. Provenance
     # is diagnostic metadata, not identity, so two results with equal scalar
@@ -226,6 +257,24 @@ def _effective_sample_size(w: NDArray[np.float64]) -> float:
     if s <= 0:
         return 0.0
     return float(s * s / float(np.sum(w * w)))
+
+
+def _anchor_matrix(X: NDArray[np.float64], basis: Basis) -> NDArray[np.float64]:
+    """The matrix the ``"auto"`` sigma median heuristic must be measured on.
+
+    The median anchors the bandwidth grid of the *kernel*, so it has to be
+    measured in the coordinate system the kernel actually sees. A basis with
+    ``standardize=False`` computes kernel distances on the raw features; a
+    standardized anchor there is off by the feature scale (hundreds of times for
+    unit-heavy covariates), every candidate bandwidth collapses the kernel, and
+    the admissibility screen rejects the whole grid (audit N-03). Bases without a
+    ``standardize`` attribute keep the standardized anchor, matching
+    ``GaussianRKHSBasis``'s own default.
+    """
+
+    if bool(getattr(basis, "standardize", True)):
+        return _standardized(X)
+    return X
 
 
 def _standardized(X: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -566,45 +615,60 @@ def score_grr_candidate(
 
 
 def _is_admissible(row: dict, thr: dict[str, float | None]) -> bool:
+    """A row is admissible exactly when it violates nothing.
+
+    Derived from :func:`_violated_thresholds` so there is a single source of
+    truth for the screen: the two cannot drift apart.
+    """
+
+    return not _violated_thresholds(row, thr)
+
+
+def _violated_thresholds(row: dict, thr: dict[str, float | None]) -> list[str]:
+    """Which admissibility checks ``row`` fails, by name (audit CV-11).
+
+    The single source of truth for the screen: :func:`_is_admissible` is
+    "this list is empty". ``"modifies_estimand"`` reflects design section 9-4
+    (a generator that modifies the estimand is always a target-sensitivity
+    candidate, never an admissible one -- even when its bound happens not to
+    bind on this sample).
+    """
+
+    violations: list[str] = []
     if not row["success"]:
-        return False
-    # Design section 9-4: a generator that modifies the estimand is always a
-    # target-sensitivity candidate, never an admissible one -- even when its
-    # bound happens not to bind on this sample.
+        violations.append("fit_failure")
     if row.get("modifies_estimand", False):
-        return False
+        violations.append("modifies_estimand")
     min_ess = thr.get("min_ess_ratio")
     if min_ess is not None and row["ess_ratio_min"] < float(min_ess):
-        return False
+        violations.append("min_ess_ratio")
     max_bind = thr.get("max_cap_binding_rate")
     if max_bind is not None and row["cap_binding_rate"] > float(max_bind):
-        return False
-    # Kernel-health band (skipped when kernel diagnostics are unavailable, i.e.
-    # kernel_median is NaN for non-kernel bases).
+        violations.append("max_cap_binding_rate")
     kmed = row["kernel_median"]
     if np.isfinite(kmed):
         floor = thr.get("kernel_median_floor")
         if floor is not None and kmed < float(floor):
-            return False
+            violations.append("kernel_median_floor")
         ceil = thr.get("kernel_median_ceil")
         if ceil is not None and kmed > float(ceil):
-            return False
+            violations.append("kernel_median_ceil")
     max_kkt = thr.get("max_kkt_residual")
     if max_kkt is not None and np.isfinite(row["r_hat"]) and row["r_hat"] > float(max_kkt):
-        return False
+        violations.append("max_kkt_residual")
     max_alpha = thr.get("max_abs_alpha")
     if (
         max_alpha is not None
         and np.isfinite(row["max_abs_alpha"])
         and row["max_abs_alpha"] > float(max_alpha)
     ):
-        return False
+        violations.append("max_abs_alpha")
     max_si = thr.get("max_std_imbalance")
     if max_si is not None and np.isfinite(row["std_imbalance"]) and row["std_imbalance"] > float(
         max_si
     ):
-        return False
-    return True
+        violations.append("max_std_imbalance")
+    return violations
 
 
 def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> float:
@@ -731,9 +795,11 @@ def select_grr_hyperparams(
 
     # Global median (full outer-training). It is the reported bandwidth anchor for
     # "auto" candidates and, under the outer-fixed feature map, the anchor shared
-    # across inner folds.
+    # across inner folds. Measured in the basis's own coordinate system: a
+    # standardized anchor under a ``standardize=False`` kernel is off by the
+    # feature scale (audit N-03).
     global_median = _median_pairwise_distance(
-        _standardized(X_tr), random_state=config.random_state
+        _anchor_matrix(X_tr, basis), random_state=config.random_state
     )
 
     sigma_specs = _sigma_candidate_specs(config.sigma_grid, global_median=global_median)
@@ -815,7 +881,7 @@ def select_grr_hyperparams(
         fold_medians = [
             _positive_median(
                 _median_pairwise_distance(
-                    _standardized(X_tr[fold.train]), random_state=config.random_state
+                    _anchor_matrix(X_tr[fold.train], basis), random_state=config.random_state
                 )
             )
             for fold in inner_folds
@@ -906,6 +972,8 @@ def select_grr_hyperparams(
 
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
     pool = admissible
+    used_fallback = False
+    fallback_reason: str | None = None
     if not pool:
         # Fall back before warning: if nothing fitted at all, the failure is the
         # story and a warning about "the selection below" would describe a
@@ -919,7 +987,22 @@ def select_grr_hyperparams(
                 "criterion). Check the basis, generator, grids, and the outcome "
                 "model, or inspect the CV path (return_riesz_cv_path=True)."
             )
-        if modifies_estimand:
+        used_fallback = True
+        # A modifies_estimand generator is inadmissible by design (section 9-4),
+        # but that flag must not bypass the *quality* checks: a target-
+        # sensitivity candidate still has to pass the ESS floor, the
+        # kernel-health band, and every other threshold. The sensitivity pool
+        # therefore keeps only candidates whose sole violation is the estimand
+        # flag; if none qualifies, the fallback policy decides, exactly as for
+        # an exact-target generator.
+        sensitivity = [
+            r
+            for r in pool
+            if _violated_thresholds(r, thr) == ["modifies_estimand"]
+        ]
+        if modifies_estimand and sensitivity:
+            pool = sensitivity
+            fallback_reason = "modifies_estimand"
             warnings.warn(
                 f"Generator {getattr(generator, 'name', type(generator).__name__)} "
                 f"modifies the estimand, so none of its candidates enter the "
@@ -931,13 +1014,38 @@ def select_grr_hyperparams(
                 UserWarning,
                 stacklevel=2,
             )
-        else:
+        elif config.fallback_policy == "best_criterion":
+            fallback_reason = "no_admissible_candidate"
             warnings.warn(
                 "No Riesz candidate passed the admissibility screen on this training "
-                "fold; falling back to the best-criterion candidate among all fitted "
-                "candidates. Inspect the CV path table (return_riesz_cv_path=True).",
+                "fold; fallback_policy='best_criterion' selects the best-criterion "
+                "candidate among all fitted ones. The result records the thresholds "
+                "it violates (fallback_violations). Inspect the CV path table "
+                "(return_riesz_cv_path=True).",
                 UserWarning,
                 stacklevel=2,
+            )
+        else:
+            # Audit CV-11: an inadmissible winner can carry a deceptively small
+            # criterion (a saturated kernel scores near zero while estimating
+            # nothing), so silently returning one is worse than stopping.
+            sensitivity_note = (
+                "The generator modifies the estimand, so this means no "
+                "candidate passed the *remaining* quality checks either. "
+                if modifies_estimand
+                else ""
+            )
+            raise RuntimeError(
+                f"No Riesz candidate passed the admissibility screen on this "
+                f"training fold ({len(path)} candidates scored, 0 admissible). "
+                f"{sensitivity_note}"
+                "An inadmissible candidate is not returned by default because "
+                "its criterion is not trustworthy -- a saturated kernel scores "
+                "near zero while estimating nothing. Inspect the CV path "
+                "(return_riesz_cv_path=True), widen admissibility_thresholds, "
+                "fix the grids (e.g. a sigma anchor mismatched to the feature "
+                "scale), or opt into fallback_policy='best_criterion' to accept "
+                "the best inadmissible candidate with a recorded warning."
             )
 
     best = min(pool, key=lambda r: r["criterion"])
@@ -954,4 +1062,7 @@ def select_grr_hyperparams(
         modifies_estimand=modifies_estimand,
         strict_nested=bool(config.strict_nested),
         fold_provenance=fold_provenance,
+        used_fallback=used_fallback,
+        fallback_reason=fallback_reason,
+        fallback_violations=_violated_thresholds(best, thr) if used_fallback else [],
     )

@@ -324,6 +324,7 @@ def grr_functional(
     riesz_strict_nested: bool = True,
     riesz_selection_score: str = "bias_variance",
     riesz_admissibility_thresholds: dict | None = None,
+    riesz_fallback_policy: str | None = None,
     return_riesz_cv_path: bool = False,
     # Matching-only options (ATE only)
     M: int = 1,
@@ -396,6 +397,14 @@ def grr_functional(
         outer-fixed feature map (centers and median heuristic shared across inner
         folds): cheaper, but it leaks each fold's validation rows into its own
         scoring feature map.
+    riesz_fallback_policy:
+        What the inner Riesz CV does when no candidate passes the admissibility
+        screen (audit CV-11; for a ``modifies_estimand`` generator: when no
+        candidate passes the remaining quality checks). ``None`` (default)
+        raises instead of silently selecting an inadmissible candidate whose
+        criterion is not trustworthy. ``"best_criterion"`` opts into taking the
+        best fitted candidate anyway, with a warning; the per-fold diagnostics
+        then record ``used_fallback``, the reason, and the violated thresholds.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link. An explicit ``'logit'``
@@ -656,6 +665,7 @@ def grr_functional(
         strict_nested=riesz_strict_nested,
         selection_score=riesz_selection_score,
         admissibility_thresholds=riesz_admissibility_thresholds,
+        fallback_policy=riesz_fallback_policy,
         return_path=return_riesz_cv_path,
         random_state=random_state,
     )
@@ -722,6 +732,9 @@ def grr_functional(
                         "n_candidates": sel.n_candidates,
                         "best_score": sel.best_score,
                         "modifies_estimand": sel.modifies_estimand,
+                        "used_fallback": sel.used_fallback,
+                        "fallback_reason": sel.fallback_reason,
+                        "fallback_violations": list(sel.fallback_violations),
                     }
                 )
                 if return_riesz_cv_path:
