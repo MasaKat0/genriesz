@@ -632,7 +632,24 @@ screen は分散の大きい候補を落とすため Wald 長さが 0.208 → 0.
 オーダーなので候補数 $p$ を減らしても $\sqrt{\log}$ でしか効かない。
 **候補集合の削減でこの保守性は解消しない。** 残る選択肢は (b)・(c) と、
 $n_{\mathrm{diag}}$ を増やす fold 構成の変更（未実測、§8 の設計変更になる）である。
-**著者の判断が必要。**
+
+**〔2026-07-21 追記〕(c) を publishable にする長さの分解。** bias $|B|=t\cdot se$ が
+**既知**だとしても、honest な区間の半長は $|B|+z_{0.975}\,se$ を下回れないので、
+Wald 比の下限は $1+t/z_{0.975}$ である（$t=0$ で 1.00、$t=4$ で 3.04）。pilot の実測
+（`followup_probes.txt` probe2 §4）:
+
+| $t$ | 下限（bias 既知の honest CI） | 実測 BA/Wald | **feasibility premium** |
+|---|---|---|---|
+| 0 | 1.00 | 2.59 | 2.59 |
+| 4 | 3.04 | 6.10 | **2.01** |
+
+つまり「6 倍」のうち 3 倍は**いかなる honest 区間も払う分**で、手続きに帰属する超過
+（$q_a+b_r$ の feasibility premium）は **$t$ によらず約 2--2.6 倍で安定**している。
+E6 はこの 3 列で報告するのがよい。「常に被覆するのは広いからだろう」への回答は
+「広さの大半は honest 性の価格であり、feasible にする追加費用は 2 倍」となる。
+残る選択肢 (b) の期待効果は小さい（グループ化しても $q_a$ の critical value は
+$\sqrt{2\log(p/\delta)}$ の $p$ を分母に持つだけで、45 → 9 グループでも 1 割前後）。
+**推奨は (c)＋この分解の明示。著者の判断待ち。**
 
 ### 18.8. 提案規則は裾の重い候補を取り逃すことがある
 
@@ -658,7 +675,7 @@ restrictions"）が想定している事態そのものである。**現在の�
 なお `n_ranked` は全規則で一致した（平均 45.2、範囲 40--50）ので、
 規則ごとに候補集合が違うことによる交絡は $n=3000$ では生じていない。
 
-### 18.9. weight screen は §18.8 を解消するが §18.7 には無力（pilot 実測、2026-07-20）
+### 18.9. weight screen は採用不能（pilot 実測 2026-07-20、追試 2026-07-21 で結論反転）
 
 §18.8 の追加制約を `Numerics.min_ess_ratio` として実装した。候補 $a$ の representer が
 診断 fold で持つ Kish 有効標本サイズ比
@@ -681,17 +698,53 @@ $\mathrm{ESS}_a/n_{\mathrm{diag}}=(\sum_i|\widehat\alpha_a(Z_i)|)^2/(n_{\mathrm{
   （$t=0$ でも median 0.0087 → 0.0063、p99 0.146 → 0.069 と改善する）。
 - 破滅例の正体が特定できた。screen なしのとき `proposed` が選んだ候補の ESS 比は
   最小 **0.0027**、すなわち全 weight が実質 3 観測に集中した representer を選んでいた。
-- 副作用は観測されない。`available` は全条件で 1.000、admissible の最小は 24（$t=0$, 0.55）で
-  全滅する fold は無く、選択される候補の分布もほぼ不変（`SQ|linear|c=4` が 112 → 114 fold）。
+- $s=1.5$ では副作用は観測されなかった。`available` は全条件で 1.000、admissible の
+  最小は 24（$t=0$, 0.55）で全滅する fold は無く、選択候補の分布もほぼ不変。
 - **一方 §18.7 の保守性には効かない**（上記 §18.7 の追記を参照）。
 
-**未確定**: 採用の可否と閾値は**著者の判断待ち**。0.55 は実測値だが、事前指定としては
-丸い 0.5 の方が正当化しやすい。0.40 → 0.55 で p99 が 1.95 → 0.379 と大きく動くため
-補間はできず、0.5 を採るなら追試が要る（$t=4$ のみ 120 rep で約 4 分）。
-実装のデフォルトは `None`（制約なし）であり、本計画書の他の節が記述する挙動は変わらない。
+#### 追補（2026-07-21）: 上の表は screen の採用を正当化しない
 
-- 生データ・サマリ・再実行スクリプト: `notebooks/experiments/results/weight_screen_pilot/`
-  （`.gitignore` 対象。`summary.txt` に全表、`weight_screen_pilot.py` に実行条件）
+翌日の追試（`followup_probes.txt`、probe 3 本）が前日の解釈を覆した。
+
+1. **固定閾値は真値自身を排除する。** 真の representer $\alpha_0$ の ESS 比を
+   診断 fold サイズ（$n=600$、40 標本）で実測すると:
+
+   | design | $s$ | $t$ | p05 | median |
+   |---|---|---|---|---|
+   | low | 0.5 | 0 | 0.90 | 0.93 |
+   | low | 1.5 | 0 | 0.41 | 0.62 |
+   | low | **1.5** | **4** | **0.16** | **0.48** |
+   | low | 2.5 | 0 | 0.05 | 0.31 |
+   | high | 2.0 | 0 | 0.19 | 0.62 |
+
+   閾値 0.55 は、**screen を正当化した当の $t=4$ シナリオで真値の中央値 0.48 を上回る**。
+   hidden 項は $\alpha_0$ 自体を重くする（$t=4$ で median 0.60 → 0.48）ので、bias が
+   大きい regime ほど誤爆する。grid A の弱 overlap（$s=2.5$）と grid C（$s=2.0$）では
+   真値の大半が閾値未満になり、正しく特定された候補ごと排除される。
+2. **破滅候補と正しい候補は ESS では分離できない。** regret $>1$ の全 19 fold は例外なく
+   under-regularized UKL（`UKL|rich|c≤0.5` が 18、`UKL|second_order|c=0` が 1）だが、
+   その ESS 比は 0.31--0.62 に散らばり、**$t=4$ の真値の分布（median 0.48）と同じ範囲**にある。
+   0.40 → 0.55 の p99 改善（1.95 → 0.379）は ESS 0.43--0.52 に偶々座っていた約 7 fold を
+   切れたことによるもので、margin ではなく標本の運である。実際 0.55 でも rep 12 は
+   penalty path の一つ上（`UKL|rich|c=0.25`、ESS 0.61）に移って regret 1.86 を出した。
+   fold 内で reference の ESS を基準に相対化する案も、破滅候補の ESS が reference と
+   同水準である以上、分離できない。
+3. **$s=1.5$ で「副作用なし」に見えたのは grid の冗長性のため。** screen は真値級の候補も
+   切っていたが、より滑らかな正則化候補（ESS ≈ 0.86）が残って選択を引き受けた。
+   oracle の attainable risk が全 screen 条件で一致した（0.1973）のはこの冗長性の帰結で、
+   弱 overlap で冗長性が消えれば admissible 全滅（実装は RuntimeError）に至る。
+
+**結論: realized weight の集中度に基づく screen は、閾値の選び方によらず採用不能。**
+破滅の原因統計量（weight 集中）を、真値が bias の大きい regime で共有するため、
+「破滅候補を切り、真値を残す」閾値は存在しない。§18.8 は screen で消せる実装上の穴では
+なく、**診断 fold が裾を undersample する regime における手法の本質的限界**として
+正直に報告するのが正しい。原稿 §4 の "additional pre-specified restrictions" の一文は
+残してよいが、少なくとも本設計では weight 集中に基づく制約が機能しないことが実測された。
+実装の `Numerics.min_ess_ratio` はデフォルト `None` のまま残す（測って棄却した記録として）。
+
+- 生データ・サマリ・追試・スクリプト: `notebooks/experiments/results/weight_screen_pilot/`
+  （`.gitignore` 対象。`summary.txt` に本表、`followup_probes.txt` に追試 3 本、
+  `weight_screen_pilot.py` / `probe*.py` に実行条件）
 
 ---
 
@@ -721,11 +774,16 @@ $\mathrm{ESS}_a/n_{\mathrm{diag}}=(\sum_i|\widehat\alpha_a(Z_i)|)^2/(n_{\mathrm{
    v1 の設計）だけであり、§12 のとおり v2 は既にこれを参考値に落としている。
    **残る判断は体裁のみ**: 本文の主張を `\begin{theorem}` 環境に格上げするかどうか。
 6. **§7.2 の記述全体** — 結果が出てから書き直す。数値のない段階で主張を先に書かないこと。
-7. **bias-aware 区間の保守性**（§18.7）— 〔2026-07-20 に選択肢 (a) を実測で却下〕
-   候補集合を絞っても解消しない（§18.9）。同時性補正を弱めるか、保守性を正直に報告するか、
-   $n_{\mathrm{diag}}$ を増やす fold 構成に変えるか。**著者の判断待ち。**
-8. **weight 集中の admissibility 制約**（§18.8）— 〔2026-07-20 に実装・実測済み〕
-   `Numerics.min_ess_ratio` として実装し、閾値 0.55 で regret p99 が 250 分の 1 になり
-   副作用は観測されなかった（§18.9）。**採用の可否と閾値は著者の判断待ち。**
-   採用する場合は Main.tex L1131「We report large weights without capping them」も
-   修正対象になる（cap はしないが screen はする、という記述に改める）。
+7. **bias-aware 区間の保守性**（§18.7）— 〔2026-07-20 に (a) を実測で却下、
+   2026-07-21 に (c) の中身を用意〕候補集合を絞っても解消しない（§18.9）。
+   長さの分解（honest 性の価格 $1+t/z$ ＋ feasibility premium ≈2 倍、§18.7 追記）を
+   E6 で明示して正直に報告するのが推奨。(b) グループ化の期待効果は 1 割前後で小さい。
+   **著者の判断待ち**（推奨: (c)＋分解の明示）。
+8. **weight 集中の admissibility 制約**（§18.8）— 〔2026-07-21 の追試で採用不能と判明〕
+   `Numerics.min_ess_ratio` として実装・実測したが、真の representer 自身が bias の
+   大きい regime で同水準の weight 集中を持つため、破滅候補だけを切る閾値は存在しない
+   （§18.9 追補）。screen は採用せず、§18.8 は手法の本質的限界として E3 の regret 裾で
+   正直に報告する。Main.tex L1131「We report large weights without capping them」は
+   **そのまま正しい**ので修正不要。§4 の "additional pre-specified restrictions" の
+   一文も残してよい（本設計で機能しないのは weight 集中に基づく制約という実測事実を
+   限界の段落に書き添える）。**残る著者判断は §7.2 執筆時の文言のみ。**
