@@ -101,7 +101,9 @@ SPLIT_FOLD = 0
 #: Schema of ``run_manifest.json``. Bumped whenever the digest inputs change, so
 #: that a directory written by an earlier schema reports what actually happened
 #: rather than a misleading "different configuration".
-MANIFEST_SCHEMA = 2
+#: 3: ``Numerics.min_ess_ratio`` entered the digest and the candidate table
+#: gained ``ess_ratio``.
+MANIFEST_SCHEMA = 3
 
 
 @dataclass(frozen=True)

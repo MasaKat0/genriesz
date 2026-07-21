@@ -280,10 +280,21 @@ def test_effective_sample_ratio_is_scale_free_and_bracketed() -> None:
     assert np.isclose(ratios[1], 1.0 / n)
     assert np.isclose(ratios[2], 1.0)
     # The Kish ratio is homogeneous of degree zero, so screening on it cannot
-    # depend on the units of the target parameter.
-    scaled = effective_sample_ratio(np.column_stack([uniform, spike]) * 137.0)
-    assert np.allclose(scaled, ratios[:2])
+    # depend on the units of the target parameter. That must hold to the edge of
+    # the floating-point range: without peak normalization, uniform weights of
+    # ``2e307`` make ``(sum |a|)^2`` overflow to ``inf / inf = nan`` and uniform
+    # tiny weights underflow to zero, both of which would silently change
+    # admissibility. (``1e308`` would overflow in the test input itself.)
+    for scale in (137.0, 1e307, 1e-300):
+        scaled = effective_sample_ratio(np.column_stack([uniform, spike]) * scale)
+        assert np.allclose(scaled, ratios[:2]), scale
     assert np.isclose(effective_sample_ratio(np.zeros((n, 1)))[0], 0.0)
+    # A non-finite entry is a failed fit, not a concentrated one.
+    with_inf = np.column_stack([uniform, uniform])
+    with_inf[3, 1] = np.inf
+    ratios_inf = effective_sample_ratio(with_inf)
+    assert np.isclose(ratios_inf[0], 1.0)
+    assert np.isnan(ratios_inf[1])
 
 
 def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:
@@ -302,6 +313,10 @@ def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:
         return admissible
 
     unrestricted = admissible_at(None)
+    # Guard against a degenerate screen: monotonicity alone would also hold for
+    # an implementation that rejects everything at any positive threshold.
+    assert np.sum(unrestricted) > 0
+    assert np.sum(admissible_at(0.05)) > 0
     assert np.array_equal(admissible_at(0.0), unrestricted)
     previous = unrestricted
     for threshold in (0.05, 0.2, 0.5):
@@ -310,6 +325,47 @@ def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:
         previous = current
     # The strictest threshold below one still cannot admit anything new.
     assert np.sum(admissible_at(0.99)) <= np.sum(unrestricted)
+
+
+def test_screened_candidate_keeps_its_diagnostics_but_loses_its_scores() -> None:
+    """The screen must remove a candidate from selection without erasing the record.
+
+    ``scores`` drive selection, so they become ``nan``; ``ess_ratio`` and
+    ``max_abs_alpha`` describe the fit and must survive so that the candidate
+    table can say what was screened and why.
+    """
+
+    data = generate_data(n=600, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=43)
+    specs = candidate_grid()[:20]
+    library = FoldLibrary(data.X, specs, max_iter=1000, tolerance=1e-8)
+    zeros = np.zeros(data.X.shape[0])
+    _, unrestricted, _, ess = candidate_scores(library, data.X, data.y, zeros, zeros)
+    values = ess[unrestricted]
+    assert values.min() < values.max(), "grid too homogeneous for this test"
+    threshold = float((values.min() + values.max()) / 2.0)
+    scores, admissible, max_weight, ess_after = candidate_scores(
+        library, data.X, data.y, zeros, zeros, min_ess_ratio=threshold
+    )
+    screened = unrestricted & ~admissible
+    kept = unrestricted & admissible
+    assert screened.any() and kept.any()
+    assert np.all(np.isnan(scores[:, screened]))
+    assert np.all(np.isfinite(ess_after[screened]))
+    assert np.all(ess_after[screened] < threshold)
+    assert np.all(np.isfinite(max_weight[screened]))
+    assert np.all(np.isfinite(scores[:, kept]))
+
+
+def test_min_ess_ratio_changes_the_configuration_digest() -> None:
+    """A screened run must never silently reuse batches from an unscreened one."""
+
+    from refsel.grids import experiment_config
+    from refsel.runner import Numerics, configuration_digest, configuration_record
+
+    plain = experiment_config("smoke")
+    screened = experiment_config("smoke", numerics=Numerics(min_ess_ratio=0.5))
+    assert configuration_record(screened)["numerics"]["min_ess_ratio"] == 0.5
+    assert configuration_digest(plain) != configuration_digest(screened)
 
 
 def test_weight_screen_rejects_a_threshold_outside_the_unit_interval() -> None:
