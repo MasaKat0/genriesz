@@ -82,6 +82,67 @@ def test_normalize_grid_lam_rejects_none_and_unknown_string():
         normalize_grid("default", kind="lam")
 
 
+# Audit K-19 / CV-03: bad grid values must fail at the entrance with a named
+# error, not deep in the solver ("negative dimensions", "A and b must be
+# finite") and never by silent reinterpretation (True -> one center, 40.7 -> 40,
+# an empty grid -> "no candidate could be fitted").
+@pytest.mark.parametrize(
+    "kind, bad, match",
+    [
+        ("n_centers", [0, 40], "integers >= 1"),
+        ("n_centers", [-5], "integers >= 1"),
+        ("n_centers", [True], "boolean"),
+        ("n_centers", [40.7], "integers >= 1"),
+        ("n_centers", [], "empty list"),
+        ("n_centers", float("nan"), "integers >= 1"),
+        ("lam", [float("nan")], "finite"),
+        ("lam", [-1e-2], ">= 0"),
+        ("lam", [True], "boolean"),
+        ("lam", [], "empty list"),
+        ("sigma", [float("nan")], "finite and positive"),
+        ("sigma", [-1.0], "finite and positive"),
+        ("sigma", [0.0], "finite and positive"),
+        ("sigma", [float("inf")], "finite and positive"),
+        ("sigma", [True], "boolean"),
+        ("sigma", [], "empty list"),
+    ],
+)
+def test_normalize_grid_rejects_garbage_at_the_entrance(kind, bad, match):
+    with pytest.raises(ValueError, match=match):
+        normalize_grid(bad, kind=kind, n=200)
+
+
+def test_normalize_grid_accepts_reasonable_numeric_types():
+    # Integral floats and NumPy scalars are honest spellings of the same
+    # candidate; only value-changing coercions are rejected.
+    assert normalize_grid([np.int64(50), 40.0], kind="n_centers", n=200) == [40, 50]
+    assert normalize_grid([np.float64(0.5)], kind="sigma") == [0.5]
+    assert normalize_grid([0.0, np.float64(1e-2)], kind="lam") == [0.0, 1e-2]
+
+
+def test_select_grr_hyperparams_rejects_garbage_grids_before_fitting():
+    # The same validation must guard the real entry point: the sigma path goes
+    # through _sigma_candidate_specs, not normalize_grid.
+    X, y, _ = _make_ate(n=120)
+    common = dict(
+        X_train=X,
+        y_train=y,
+        m=ATEFunctional(0),
+        basis=GaussianRKHSBasis(n_centers=20, random_state=0),
+        generator=SquaredGenerator(),
+    )
+    for grids, match in [
+        (dict(sigma_grid=[float("nan")], lam_grid=[1e-2]), "finite and positive"),
+        (dict(sigma_grid=[], lam_grid=[1e-2]), "empty list"),
+        (dict(n_centers_grid=[0, 40], lam_grid=[1e-2]), "integers >= 1"),
+        (dict(lam_grid=[float("nan")]), "finite"),
+    ]:
+        with pytest.raises(ValueError, match=match):
+            select_grr_hyperparams(
+                config=GRRCVConfig(cv_folds=2, random_state=0, **grids), **common
+            )
+
+
 # ---------------------------------------------------------------------------
 # No leakage: centers within training, selection is a pure function of X_train
 # ---------------------------------------------------------------------------
