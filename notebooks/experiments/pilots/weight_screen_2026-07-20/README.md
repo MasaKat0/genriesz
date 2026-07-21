@@ -26,10 +26,22 @@ Parquet（約 19MB）は `notebooks/experiments/results/weight_screen_pilot/` �
 同一の数値が得られる。macOS/Windows では `__main__` ガードが必須
 （`ProcessPoolExecutor`、`notebooks/experiments/README.md` 参照）。
 
+固定した `.txt` は pandas 出力の行末空白を除去して保存している。再実行出力と
+比較するときは `diff <(sed 's/[[:space:]]*$//' <再実行出力>) summary.txt` のように
+行末空白を無視すること。
+
 ## 注意
 
 - 結論は「screen 採用不能」（計画書 §18.9 追補）。スクリプトは棄却の記録として残す。
-- 本 pilot（2026-07-20）のスクリプトは `effective_sample_ratio` の peak 正規化
-  （2026-07-21 の Codex 指摘対応）より前のコードで実行された。pilot の ESS 値は
-  オーバーフロー領域に達していないため数値は変わらないが、厳密な再現には当時の
-  コミット（`65d80ab`）を checkout すること。
+- 本 pilot（2026-07-20）は `effective_sample_ratio` の peak 正規化（2026-07-21）より
+  前のコードで実行された。pilot の ESS 値はオーバーフロー領域に達していないため
+  数値は変わらない。当時のコードで厳密に再現するには、本ディレクトリのスクリプトは
+  残したまま `refsel` だけを当時の状態に戻す:
+
+  ```bash
+  git restore --source 65d80ab -- notebooks/experiments/refsel
+  # …実行…
+  git restore -- notebooks/experiments/refsel   # 元に戻す
+  ```
+
+  （コミット `65d80ab` 自体には本ディレクトリが存在しないため、checkout では再現できない。）

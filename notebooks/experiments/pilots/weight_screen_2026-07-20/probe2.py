@@ -1,5 +1,4 @@
-# ruff: noqa -- 実測スクリプトの保存版（README.md 参照）。§4 の床は Codex 指摘を受け
-# 2026-07-21 に bounded-normal critical value（repo の関数）へ修正した。
+# ruff: noqa -- 実測スクリプトの保存版（README.md 参照）
 import sys, pandas as pd, numpy as np, pathlib
 sys.path.insert(0, str(pathlib.Path("notebooks/experiments").resolve()))
 sys.path.insert(0, "src")

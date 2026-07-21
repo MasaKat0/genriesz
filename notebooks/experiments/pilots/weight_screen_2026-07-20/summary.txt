@@ -2,7 +2,7 @@
 A. Admissible set and simultaneous radius (diagnostic fold)
 ==============================================================================
                  n_admissible  median_radius
-target_t screen                             
+target_t screen
 0.0      0.25         40.0967         0.2431
          0.4          38.5917         0.2424
          0.55         36.0717         0.2431
@@ -16,7 +16,7 @@ target_t screen
 B. Section 18.7: bias-aware conservatism (proposed / correct / rho=1)
 ==============================================================================
                    n  wald_cov ba_cov  u_over_se  ba_over_wald  ba_length
-target_t screen                                                          
+target_t screen
 0.0      0.25    120  0.983333    1.0     3.3329        2.5937     1.1325
          0.4     120  0.983333    1.0     3.5132        2.6857     1.1318
          0.55    120  0.983333    1.0     3.6124        2.7363     1.1651
@@ -28,7 +28,7 @@ target_t screen
 
 cross-fit intervals (unconditional coverage over all replications):
                   wald_cf cons_cf  cons_len  wald_len
-target_t screen                                      
+target_t screen
 0.0      0.25        0.95     1.0    1.3518    0.2068
          0.4         0.95     1.0    1.3758    0.2038
          0.55    0.941667     1.0    1.3747    0.1970
@@ -42,7 +42,7 @@ target_t screen
 C. Section 18.8: oracle regret by rule (fold level)
 ==============================================================================
                             n  median     p90      p99        max
-target_t rule     screen                                         
+target_t rule     screen
 0.0      proposed 0.25    600  0.0081  0.0279   0.1341     1.5237
                   0.4     600  0.0076  0.0245   0.1341     1.5237
                   0.55    600  0.0063  0.0179   0.0691     0.1583
@@ -56,7 +56,7 @@ target_t rule     screen
 D. What the screen removed, and whether it ever bit the good candidates
 ==============================================================================
                  n_ranked  available
-target_t screen                     
+target_t screen
 0.0      0.25      40.097        1.0
          0.4       38.592        1.0
          0.55      36.072        1.0
@@ -87,7 +87,7 @@ none    0.0         36
 
 ESS ratio of the candidate `proposed` selected, by screen (t=4):
         ess_min  ess_p05  ess_med
-screen                           
+screen
 0.25     0.2523   0.3736   0.8626
 0.4      0.4023   0.4611   0.8626
 0.55     0.5500   0.5805   0.8644

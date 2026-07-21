@@ -9,7 +9,7 @@ high     2.0   0.0     600  0.190 / 0.618 / 0.705
 === probe2.py（§4 の床は 2026-07-21 修正版）===
 === 1. Did the screen raise the attainable oracle risk itself? (t=4, fold-level mean/max) ===
           mean  median     max
-screen                        
+screen
 0.25    0.1973  0.1989  0.2119
 0.4     0.1973  0.1989  0.2119
 0.55    0.1973  0.1989  0.2119
@@ -59,7 +59,7 @@ screen  repetition  fold            candidate  ess_ratio  oracle_regret
   none          81     3         UKL|rich|c=0   0.314609    2529.176755
 
 === 3. Other rules in oracle table (what reference label do they carry?) ===
-rule          reference   
+rule          reference
 abs_drift     correct         2400
               misspecified    2400
               truth           2400

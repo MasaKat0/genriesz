@@ -285,16 +285,17 @@ def test_effective_sample_ratio_is_scale_free_and_bracketed() -> None:
     # ``2e307`` make ``(sum |a|)^2`` overflow to ``inf / inf = nan`` and uniform
     # tiny weights underflow to zero, both of which would silently change
     # admissibility. (``1e308`` would overflow in the test input itself.)
-    for scale in (137.0, 1e307, 1e-300):
+    for scale in (137.0, 1e307, 1e-300, np.nextafter(0.0, 1.0)):
         scaled = effective_sample_ratio(np.column_stack([uniform, spike]) * scale)
         assert np.allclose(scaled, ratios[:2]), scale
     assert np.isclose(effective_sample_ratio(np.zeros((n, 1)))[0], 0.0)
-    # A non-finite entry is a failed fit, not a concentrated one.
-    with_inf = np.column_stack([uniform, uniform])
-    with_inf[3, 1] = np.inf
-    ratios_inf = effective_sample_ratio(with_inf)
-    assert np.isclose(ratios_inf[0], 1.0)
-    assert np.isnan(ratios_inf[1])
+    # A non-finite entry of any kind is a failed fit, not a concentrated one.
+    for bad in (np.inf, -np.inf, np.nan):
+        with_bad = np.column_stack([uniform, uniform])
+        with_bad[3, 1] = bad
+        ratios_bad = effective_sample_ratio(with_bad)
+        assert np.isclose(ratios_bad[0], 1.0)
+        assert np.isnan(ratios_bad[1])
 
 
 def test_weight_screen_shrinks_the_admissible_set_monotonically() -> None:

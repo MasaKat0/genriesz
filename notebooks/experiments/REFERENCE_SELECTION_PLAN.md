@@ -723,8 +723,9 @@ $\mathrm{ESS}_a/n_{\mathrm{diag}}=(\sum_i|\widehat\alpha_a(Z_i)|)^2/(n_{\mathrm{
 
    閾値 0.55 は、**screen を正当化した当の $t=4$ シナリオで真値の中央値 0.48 を上回る**。
    hidden 項は $\alpha_0$ 自体を重くする（$t=4$ で median 0.60 → 0.48）ので、bias が
-   大きい regime ほど誤爆する。grid A の弱 overlap（$s=2.5$）と grid C（$s=2.0$）では
-   真値の大半が閾値未満になり、正しく特定された候補ごと排除される。
+   大きい regime ほど誤爆する。grid A の弱 overlap（$s=2.5$）では真値の **92.5%**
+   （40 標本中 37）が閾値未満になり、正しく特定された候補ごと排除される。
+   grid C（$s=2.0$）でも 30%・p05 は 0.19 で、無視できない割合の fold で同じ誤爆が起きる。
 2. **破滅候補と正しい候補は ESS では分離できない。** screen なし条件で regret $>1$ は
    **17 fold**、例外なく under-regularized UKL（`UKL|rich|c≤0.5` が 16、
    `UKL|second_order|c=0` が 1）で、選ばれた候補の ESS 比は 0.003--0.62 に散らばる。
@@ -733,8 +734,9 @@ $\mathrm{ESS}_a/n_{\mathrm{diag}}=(\sum_i|\widehat\alpha_a(Z_i)|)^2/(n_{\mathrm{
    0.40 → 0.55 の p99 改善（1.95 → 0.379）は ESS 0.41--0.52 に偶々座っていた 7 fold を
    切れたことによるもので、margin ではなく標本の運である。実際 0.55 でも rep 12 は
    penalty path の一つ上（`UKL|rich|c=0.25`、ESS 0.61）に移って regret 1.86 を出した。
-   fold 内で reference の ESS を基準に相対化する案も、破滅候補の ESS が reference と
-   同水準である以上、分離できない。
+   fold 内で reference の ESS を基準に相対化する案も分離できない: low design の
+   `correct` reference は正しい logistic なので、その ESS は真値の分布に従い
+   （probe3、$t=4$ で median 0.48）、0.40 を生き残る破滅候補（0.41--0.62）と同水準にある。
 3. **$s=1.5$ で「副作用なし」に見えたのは grid の冗長性のため。** screen は真値級の候補も
    切っていたが、より滑らかな正則化候補（ESS ≈ 0.86）が残って選択を引き受けた。
    oracle の attainable risk が全 screen 条件で一致した（0.1973）のはこの冗長性の帰結で、
