@@ -27,13 +27,12 @@ The IHDP notebooks require `ihdp_npci_1-100.train.npz` and `ihdp_npci_1-100.test
 | `09_reference_based_loss_link_selection.ipynb` | Reference-based selection with separate training, diagnostic, and evaluation observations |
 | `10_coverage_decomposition.ipynb` | Coverage decomposition under correct and misspecified dictionaries |
 | `11_numerical_failure_selection.ipynb` | Numerical failure rates and the direct held-out-imbalance selection diagnostic |
-| `12_truncated_model_sensitivity.ipynb` | Truncated (bounded) representer models as a target-sensitivity sweep under weak overlap |
 
 The reference-based selection design is specified in `REFERENCE_SELECTION_PLAN.md`. Its implementation is in `genriesz.experiments.reference_selection`. The notebook always uses the complete publication configuration: 18 scenarios, 24,000 replication jobs, and 10,000 Gaussian multiplier draws for each simultaneous radius. Its opening rescaling table records a held-out dual-domain failure instead of clipping the index or substituting another generator.
 
 ## Numerical status
 
-The experiment functions use exact generator links. A candidate is unavailable when its optimizer fails, its exact dual domain is violated, its KKT residual exceeds the stated tolerance, or its score contains a nonfinite value. The functions return that status and do not replace the candidate with another loss, cap its fitted representer after estimation, or reuse a result from a different specification.
+The default UKL and BKL specifications are truncated models whose links saturate at representer bounds stated before fitting; the binding rates are reported as ordinary diagnostics. The squared and BP links are exact. A candidate is unavailable when its optimizer fails, its exact dual domain is violated, its KKT residual exceeds the stated tolerance, or its score contains a nonfinite value. The functions return that status and do not replace the candidate with another loss, cap its fitted representer after estimation, or reuse a result from a different specification.
 
 The probability bounds in the original simulation designs are part of their data-generating processes. They limit the true propensity before treatment is drawn and do not alter a fitted representer.
 

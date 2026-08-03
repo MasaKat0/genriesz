@@ -4,9 +4,9 @@ Design references:
 - library_improvement_design.md item E and §10.5.1 (only BKL's domain-violation
   clip broke the conjugate identity, exploding alpha to ~2e8).
 - coverage_failure_improvement_design_revised.md "KL系lossとcapの修正設計":
-  方針A (default BKLGenerator: exact uncapped link, raise on domain violation)
-  and 方針B (BoundedBKLGenerator: bounded smooth link, consistent objective and
-  gradient, a target-sensitivity candidate per §9-4).
+  方針A (BKLGenerator: exact uncapped link, raise on domain violation) and
+  方針B (BoundedBKLGenerator: bounded smooth link with a consistent objective
+  and gradient — the truncated model used as the experiment default).
 
 The central invariant these tests protect: the ``alpha`` returned by
 ``conjugate`` must equal ``d g*(v)/d v`` wherever the link is used, so that the
@@ -297,16 +297,19 @@ def test_bounded_bkl_is_optimizable_and_bounded_from_cold_start():
 
 
 # ---------------------------------------------------------------------------
-# §9-4 seam: bounded/capped variants are flagged as modifying the estimand so
-# model selection can keep them out of the admissible set.
+# Truncated models are ordinary candidates: no generator carries an
+# estimand-modification flag, and model selection screens on quality alone.
 # ---------------------------------------------------------------------------
-def test_modifies_estimand_flag():
-    assert BoundedBKLGenerator(C=1.0, alpha_max=10.0, branch_fn=_pos_branch).modifies_estimand
-    assert not BKLGenerator(C=1.0, branch_fn=_pos_branch).modifies_estimand
-    assert not SquaredGenerator(C=0.0).modifies_estimand
-    assert not BregmanGenerator(
-        g=lambda a: a * a,
-        grad=lambda a: 2.0 * a,
-        inv_grad=lambda v: 0.5 * v,
-        grad2=lambda _a: 2.0,
-    ).modifies_estimand
+def test_no_generator_carries_an_estimand_modification_flag():
+    for gen in (
+        BoundedBKLGenerator(C=1.0, alpha_max=10.0, branch_fn=_pos_branch),
+        BKLGenerator(C=1.0, branch_fn=_pos_branch),
+        SquaredGenerator(C=0.0),
+        BregmanGenerator(
+            g=lambda a: a * a,
+            grad=lambda a: 2.0 * a,
+            inv_grad=lambda v: 0.5 * v,
+            grad2=lambda _a: 2.0,
+        ),
+    ):
+        assert not hasattr(gen, "modifies_estimand")

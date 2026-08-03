@@ -1,10 +1,10 @@
 """Contract tests for the truncated (bounded) UKL representer model.
 
 The behavioral contract is documented in ``docs/user_guide.rst`` (truncated
-representer models). The bounded link saturates at stated representer bounds instead of clipping a
-fitted exact model; where a bound binds the estimator targets a modified
-estimand, so the class is a target-sensitivity specification and never an
-admissible candidate.
+representer models). The bounded link saturates at stated representer bounds
+instead of clipping a fitted exact model; the bounds are part of the declared
+model, the truncated class is an ordinary candidate, and the bound-binding
+rate is an ordinary diagnostic reported alongside the estimate.
 """
 
 from __future__ import annotations
@@ -249,7 +249,6 @@ def test_propensity_bounds_construct_the_stated_alpha_interval():
     gen = BoundedUKLGenerator.from_propensity_bounds(0.01, 0.99, branch_fn=_pos_branch)
     assert gen.alpha_min == pytest.approx(1.0 / 0.99)
     assert gen.alpha_max == pytest.approx(100.0)
-    assert gen.modifies_estimand is True
 
 
 @pytest.mark.parametrize(
@@ -284,9 +283,9 @@ def test_exact_ukl_still_refuses_out_of_range_values():
 
 
 # ---------------------------------------------------------------------------
-# Section 9-4 seam in model selection, mirrored from
-# tests/test_generators_compat.py. The flag, not the binding rate, excludes
-# the candidate; and the flag must not mask quality failures.
+# Model-selection seam, mirrored from tests/test_generators_compat.py. The
+# truncated model is an ordinary candidate; the quality screens (ESS floor,
+# binding-rate cap, ...) are what stand between it and selection.
 # ---------------------------------------------------------------------------
 def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None):
     X, Y = _make_ate(n=n, seed=seed)
@@ -307,44 +306,36 @@ def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None)
     )
 
 
-def test_bounded_ukl_sets_the_estimand_flag():
+def test_bounded_ukl_is_an_ordinary_selection_candidate():
     gen = BoundedUKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch)
-    assert gen.modifies_estimand is True
-    assert UKLGenerator(C=1e-2, branch_fn=_treated_branch).modifies_estimand is False
+    res = _select(gen, admissibility_thresholds={"min_ess_ratio": None})
+    assert res.n_admissible >= 1
 
 
-def test_bounded_ukl_is_excluded_from_the_admissible_set():
+def test_a_binding_bound_is_not_an_admissibility_violation_by_default():
+    # The stated bounds are part of the model: a candidate whose bound binds
+    # stays admissible under the default screen (no cap on the binding rate).
+    gen = BoundedUKLGenerator(C=1e-2, alpha_max=1.2, branch_fn=_treated_branch)
+    res = _select(gen)
+    assert res.n_admissible >= 1
+    assert any(r["cap_binding_rate"] > 0.0 for r in res.path)
+
+
+def test_quality_checks_still_screen_the_truncated_candidate():
+    # Audit CV-11: truncation grants no admissibility bypass. An ESS floor no
+    # candidate can meet (the ratio is at most 1) must reject the truncated
+    # candidate exactly as it would any other. The screen's single source of
+    # truth is pinned directly by
+    # test_quality_checks_are_not_removed_from_the_screen.
     gen = BoundedUKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch)
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        _select(gen)
+    with pytest.raises(RuntimeError, match="No Riesz candidate passed"):
+        _select(gen, admissibility_thresholds={"min_ess_ratio": 2.0})
 
 
-def test_ukl_exclusion_holds_even_when_the_bound_never_binds():
-    # A loose bound never binds, yet the candidate is still target-sensitivity
-    # (flag screen, not binding-rate screen). The quality floor is disabled
-    # here so the flag alone is pinned; the no-bypass rule is pinned below.
-    gen = BoundedUKLGenerator(C=1e-2, alpha_max=1e6, branch_fn=_treated_branch)
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        _select(gen, admissibility_thresholds={"min_ess_ratio": None})
-
-
-def test_estimand_flag_does_not_bypass_the_quality_checks_for_ukl():
-    # Audit CV-11: with an effectively-unclipped bound the fit concentrates
-    # weight (max alpha large, small ESS ratio). With the ESS floor active the
-    # candidate must not surface through the sensitivity path as if the flag
-    # were its only violation. The screen's single source of truth is pinned
-    # directly by test_quality_checks_are_not_removed_from_the_screen.
-    gen = BoundedUKLGenerator(C=1e-2, alpha_max=1e6, branch_fn=_treated_branch)
-    with pytest.raises(RuntimeError):
-        _select(gen, admissibility_thresholds={"min_ess_ratio": 0.5})
-
-
-def test_exact_ukl_selection_never_carries_the_estimand_flag():
-    # Selecting among exact UKL candidates must never return a result
-    # whose path or flag claims a modified estimand (no silent substitution).
+def test_selection_results_do_not_carry_the_removed_estimand_flag():
     res = _select(UKLGenerator(C=1e-2, branch_fn=_treated_branch))
-    assert res.modifies_estimand is False
-    assert all(not r["modifies_estimand"] for r in res.path)
+    assert not hasattr(res, "modifies_estimand")
+    assert all("modifies_estimand" not in r for r in res.path)
 
 
 # ---------------------------------------------------------------------------
@@ -462,15 +453,14 @@ def test_fit_result_records_per_side_binding_rates():
 
 
 def test_quality_checks_are_not_removed_from_the_screen():
-    # The screen is a single source of truth: a bounded candidate that also
-    # violates the ESS floor must list BOTH reasons. A selection-level test
-    # cannot see this (any all-inadmissible outcome raises the same error),
-    # so the predicate is pinned directly.
+    # The screen is a single source of truth: a candidate that violates the
+    # ESS floor must list that reason. A selection-level test cannot see this
+    # (any all-inadmissible outcome raises the same error), so the predicate
+    # is pinned directly.
     from genriesz.model_selection import _violated_thresholds
 
     row = {
         "success": True,
-        "modifies_estimand": True,
         "ess_ratio_min": 0.01,
         "cap_binding_rate": 0.0,
         "kernel_median": 1.0,
@@ -479,8 +469,7 @@ def test_quality_checks_are_not_removed_from_the_screen():
         "std_imbalance": 0.1,
     }
     violations = _violated_thresholds(row, {"min_ess_ratio": 0.5})
-    assert "modifies_estimand" in violations
-    assert "min_ess_ratio" in violations
+    assert violations == ["min_ess_ratio"]
 
 
 def test_bounded_bkl_binding_diagnostics_report_each_side():

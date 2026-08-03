@@ -743,7 +743,6 @@ def grr_functional(
                         "n_admissible": sel.n_admissible,
                         "n_candidates": sel.n_candidates,
                         "best_score": sel.best_score,
-                        "modifies_estimand": sel.modifies_estimand,
                     }
                 )
                 if return_riesz_cv_path:
@@ -1083,14 +1082,6 @@ def grr_functional(
     diagnostics["alpha_abs_p95"] = float(np.percentile(alpha_abs, 95))
     diagnostics["alpha_abs_max"] = float(np.max(alpha_abs))
 
-    # Design section 9-4: whether the Riesz generator targets a modified estimand.
-    # Read together with `riesz_clip_binding_rate_max`: the flag says the target
-    # *can* differ, the binding rate says by how much of the sample it does.
-    if riesz_method_ == "grr" and generator is not None:
-        diagnostics["riesz_modifies_estimand"] = bool(
-            getattr(generator, "modifies_estimand", False)
-        )
-
     if riesz_fit_stats["success"]:
         diagnostics["optimizer"] = {k: list(v) for k, v in riesz_fit_stats.items()}
         diagnostics["riesz_fit_success_rate"] = float(np.mean(riesz_fit_stats["success"]))
@@ -1106,15 +1097,29 @@ def grr_functional(
             binding_max = float(np.nanmax(riesz_fit_stats["clip_binding_rate"]))
         diagnostics["riesz_clip_binding_rate_max"] = binding_max
         if np.isfinite(binding_max) and binding_max > 0.0:
-            warnings.warn(
-                f"The generator's internal domain clip was active for up to "
-                f"{binding_max:.1%} of training observations in at least one "
-                f"fold. The fitted Riesz representer then targets a modified "
-                f"(clipped) estimand and weights can be extreme. Consider "
-                f"SquaredGenerator, a different C, or providing branch_fn.",
-                UserWarning,
-                stacklevel=2,
-            )
+            # Truncated links state representer bounds (they define per-side
+            # binding masks); for exact restricted-domain links the same rate
+            # instead measures proximity to the dual-domain boundary.
+            states_bounds = callable(
+                getattr(generator, "lower_binding", None)
+            ) and callable(getattr(generator, "upper_binding", None))
+            if states_bounds:
+                message = (
+                    f"The generator's stated representer bound was active for "
+                    f"up to {binding_max:.1%} of training observations in at "
+                    f"least one fold. The bounds are part of the fitted model; "
+                    f"report this binding rate alongside the estimate and "
+                    f"check that the bounds suit the application."
+                )
+            else:
+                message = (
+                    f"The fitted dual index came within the diagnostic margin "
+                    f"of the generator's exact dual-domain boundary for up to "
+                    f"{binding_max:.1%} of training observations in at least "
+                    f"one fold. The fitted values are exact and nothing was "
+                    f"clamped, but weights can be extreme near the boundary."
+                )
+            warnings.warn(message, UserWarning, stacklevel=2)
 
     # Inner Riesz CV selections (item C), per outer fold.
     if riesz_cv_selected:

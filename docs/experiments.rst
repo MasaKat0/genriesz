@@ -65,13 +65,15 @@ figure commands, including axis labels, legends, and calls to ``plt.show()``.
 A missing empirical data file raises an error; no notebook creates substitute
 observations or downloads a different data set.
 
-The experiment code evaluates exact generator links. If optimization fails, a
-KKT condition is not met, a score is nonfinite, or an exact dual-domain
-condition is violated, the candidate is recorded as unavailable. The code does
-not replace the candidate with another specification and does not cap the
-fitted representer after estimation. Probability bounds that appear in a data-
-generating process act before treatment is drawn and do not modify fitted
-weights.
+The default UKL and BKL specifications are truncated models whose links
+saturate at representer bounds stated before fitting; the binding rates are
+reported as ordinary diagnostics. The squared and BP links are exact. If
+optimization fails, a KKT condition is not met, a score is nonfinite, or an
+exact dual-domain condition is violated, the candidate is recorded as
+unavailable. The code does not replace the candidate with another
+specification and does not cap the fitted representer after estimation.
+Probability bounds that appear in a data-generating process act before
+treatment is drawn and do not modify fitted weights.
 
 The reference-based selection design is described in
 ``notebooks/experiments/REFERENCE_SELECTION_PLAN.md``. Its full configuration

@@ -1,9 +1,12 @@
 """Estimators and data-generating processes used by the manuscript notebooks.
 
-The functions in this module use exact generator links.  They do not clip a
-representer, replace a failed candidate, download substitute data, or continue
-after an unexpected programming error.  Expected numerical outcomes are
-returned through explicit status fields.
+The default UKL and BKL specifications are truncated models whose links
+saturate at representer bounds stated before fitting (see
+:func:`make_compatible_generator`); the squared and BP links are exact. The
+functions in this module do not rewrite a fitted representer, replace a
+failed candidate, download substitute data, or continue after an unexpected
+programming error.  Expected numerical outcomes are returned through explicit
+status fields.
 """
 
 from __future__ import annotations
@@ -34,10 +37,11 @@ from genriesz.basis import (
 from genriesz.functionals import ATEFunctional, ATTFunctional, LinearFunctional
 from genriesz.generators import (
     BKLGenerator,
+    BoundedBKLGenerator,
+    BoundedUKLGenerator,
     BPGenerator,
     BregmanGenerator,
     SquaredGenerator,
-    UKLGenerator,
 )
 from genriesz.glm import GRRGLM, OutcomeGLM
 from genriesz.matching import nn_matching_inverse_propensity_weights
@@ -223,6 +227,20 @@ def make_basis(
     raise ValueError("mode must be 'regressor' or 'covariate'")
 
 
+#: Propensity window stated by the default truncated UKL model for ATE. The
+#: arm-wise representer magnitudes 1/e and 1/(1-e) then lie in
+#: [1/UKL_ATE_E_MAX, 1/UKL_ATE_E_MIN].
+UKL_ATE_E_MIN = 0.01
+UKL_ATE_E_MAX = 0.99
+#: Representer-magnitude cap stated by the default truncated UKL model for
+#: ATT (same cap as the ATE window's upper end 1/UKL_ATE_E_MIN). The control
+#: branch can approach zero for ATT, so only the upper bound is a model
+#: choice; the lower clamp stays at the float64 representability floor.
+UKL_ATT_ALPHA_MAX = 100.0
+#: Representer-magnitude cap stated by the default truncated BKL model.
+BKL_ALPHA_MAX = 50.0
+
+
 def generator_shift_for_estimand(loss: str, estimand: str) -> float:
     loss_ = str(loss).upper()
     estimand_ = str(estimand).upper()
@@ -233,11 +251,10 @@ def generator_shift_for_estimand(loss: str, estimand: str) -> float:
     if estimand_ == "ATT" and loss_ in {"UKL", "BP"}:
         return 0.0
     if estimand_ == "ATT" and loss_ == "BKL":
-        raise ValueError(
-            "The exact BKL branch requires |alpha|>C>0, whereas the ATT control "
-            "branch can approach zero. Use BKL only as an explicitly bounded "
-            "sensitivity specification, not as an exact ATT candidate."
-        )
+        # The BKL generator needs C > 0; the ATT control branch can approach
+        # zero, so the shift is small and the truncated link's lower clamp
+        # (the float64 representability floor above C) absorbs the tail.
+        return 0.05
     raise ValueError(f"Unknown loss or estimand: {loss}, {estimand}")
 
 
@@ -247,14 +264,44 @@ def make_compatible_generator(
     estimand: str,
     omega: float | None = None,
 ) -> BregmanGenerator:
+    """Build the default generator for a loss/estimand pair.
+
+    UKL and BKL are fitted with their truncated links
+    (:class:`~genriesz.BoundedUKLGenerator` / :class:`~genriesz.BoundedBKLGenerator`):
+    the exact links diverge as the dual index approaches the domain boundary,
+    and the stated bounds absorb that numerical instability as part of the
+    model. The bounds are fixed constants of the experimental design
+    (module-level ``UKL_ATE_E_MIN``/``UKL_ATE_E_MAX``, ``UKL_ATT_ALPHA_MAX``
+    and ``BKL_ALPHA_MAX``); binding rates surface in the result diagnostics.
+    SQ and BP keep their exact links: SQ is defined on the whole line, and
+    BP's restricted dual domain is enforced by explicit linear constraints
+    during fitting.
+    """
+
     loss_ = str(loss).upper()
-    C = generator_shift_for_estimand(loss_, estimand)
+    estimand_ = str(estimand).upper()
+    C = generator_shift_for_estimand(loss_, estimand_)
     if loss_ == "SQ":
         return SquaredGenerator(C=C)
     if loss_ == "UKL":
-        return UKLGenerator(C=C, branch_fn=branch_treated)
+        if estimand_ == "ATE":
+            return BoundedUKLGenerator.from_propensity_bounds(
+                UKL_ATE_E_MIN,
+                UKL_ATE_E_MAX,
+                C=C,
+                branch_fn=branch_treated,
+            )
+        return BoundedUKLGenerator(
+            C=C,
+            alpha_max=UKL_ATT_ALPHA_MAX,
+            branch_fn=branch_treated,
+        )
     if loss_ == "BKL":
-        return BKLGenerator(C=C, branch_fn=branch_treated)
+        return BoundedBKLGenerator(
+            C=C,
+            alpha_max=BKL_ALPHA_MAX,
+            branch_fn=branch_treated,
+        )
     if loss_ == "BP":
         return BPGenerator(
             C=C,
@@ -890,7 +937,7 @@ def _recenter_influence(
 
 @dataclass(frozen=True)
 class RieszCoefficientFit:
-    """Coefficient fit for an exact dual-domain optimization."""
+    """Coefficient fit for one Riesz representer optimization."""
 
     beta: FloatArray
     success: bool
@@ -916,7 +963,13 @@ def _fit_riesz_coefficients(
     kkt_tolerance: float,
     dual_margin: float = 1e-10,
 ) -> RieszCoefficientFit:
-    """Fit a linear dual index while enforcing the exact generator domain."""
+    """Fit a linear dual index for one generator.
+
+    Generators whose links are defined for every finite dual coordinate
+    (squared, truncated UKL/BKL) fit unconstrained through ``GRRGLM``. Exact
+    BKL and BP have restricted dual domains, enforced here as explicit linear
+    constraints with the conjugate evaluated as an extended-value function.
+    """
 
     Phi = np.asarray(basis(X), dtype=float)
     M = np.asarray(functional.m_basis_matrix(X, basis), dtype=float)
@@ -936,11 +989,15 @@ def _fit_riesz_coefficients(
         fit = model.fit(X, max_iter=max_iter, tol=tolerance, fit_basis=False)
         beta = np.asarray(fit.beta, dtype=float)
         kkt_residual = float(fit.kkt_residual)
-        success = bool(fit.success) and np.isfinite(kkt_residual)
-        success = success and kkt_residual <= float(kkt_tolerance)
-        status = str(fit.status) if success else "kkt_failure"
+        kkt_ok = np.isfinite(kkt_residual) and kkt_residual <= float(kkt_tolerance)
+        success = bool(fit.success) and kkt_ok
+        # A fit that failed on its own terms keeps its own status; the
+        # experiment's KKT criterion renames only a converged fit whose
+        # gradient residual is too large.
+        status = str(fit.status)
         message = str(fit.message)
-        if not success and bool(fit.success):
+        if bool(fit.success) and not kkt_ok:
+            status = "kkt_failure"
             message = (
                 f"The fitted gradient residual {kkt_residual:.6g} exceeds "
                 f"the tolerance {float(kkt_tolerance):.6g}."
@@ -1266,7 +1323,6 @@ def _fit_functional(
         "held_out_imbalance_max": float(np.max(held_out_max)),
         "riesz_fit_statuses": tuple(fit_statuses),
         "riesz_gradient_norm_max": float(np.max(fit_gradients)),
-        "riesz_modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "riesz_clip_binding_rate_max": float(np.max(fit_binding_rates)),
         "riesz_binding_rate_lower_max": (
             float(np.max(fit_binding_lower))
@@ -1347,16 +1403,6 @@ def fit_one_grr(
         "lambda_riesz": float(lam),
         "penalty": penalty,
     }
-    if str(estimand).upper() == "ATT" and str(loss_spec["loss"]).upper() == "BKL":
-        return _failure_rows(
-            label,
-            ExperimentFailure(
-                "incompatible_exact_domain",
-                "Exact BKL is not an admissible ATT candidate "
-                "because the control branch can approach zero.",
-            ),
-            true_theta(data, estimand),
-        )
     generator = make_compatible_generator(
         loss_spec["loss"],
         estimand=estimand,
@@ -1416,17 +1462,8 @@ def fit_one_grr_with_basis(
     max_iter: int = 500,
     random_state: int = 0,
     label_info: dict[str, Any] | None = None,
-    generator_override: BregmanGenerator | None = None,
 ) -> list[dict[str, Any]]:
-    """Fit one specification with a caller-supplied basis.
-
-    ``generator_override`` replaces the generator built from ``loss_spec``;
-    the caller then states the fitted model explicitly. Truncated sensitivity
-    variants (for example :class:`~genriesz.BoundedBKLGenerator`) are accepted
-    for every estimand, while an exact :class:`~genriesz.BKLGenerator` is
-    rejected for ATT no matter how it is supplied, because the control branch
-    can approach zero.
-    """
+    """Fit one specification with a caller-supplied basis."""
 
     X = np.asarray(data["X"], dtype=float)
     Y = np.asarray(data["Y"], dtype=float)
@@ -1440,23 +1477,9 @@ def fit_one_grr_with_basis(
     }
     if label_info is not None:
         label.update(label_info)
-    incompatible_att_bkl = ExperimentFailure(
-        "incompatible_exact_domain",
-        "Exact BKL is not an admissible ATT candidate "
-        "because the control branch can approach zero.",
+    generator = make_compatible_generator(
+        loss_spec["loss"], estimand=estimand, omega=loss_spec.get("omega")
     )
-    if generator_override is not None:
-        generator = generator_override
-    else:
-        if str(estimand).upper() == "ATT" and str(loss_spec["loss"]).upper() == "BKL":
-            return _failure_rows(label, incompatible_att_bkl, true_theta(data, estimand))
-        generator = make_compatible_generator(
-            loss_spec["loss"], estimand=estimand, omega=loss_spec.get("omega")
-        )
-    if str(estimand).upper() == "ATT" and isinstance(generator, BKLGenerator):
-        # An exact BKL link is inadmissible for ATT no matter how it was
-        # supplied; an override does not bypass the domain argument.
-        return _failure_rows(label, incompatible_att_bkl, true_theta(data, estimand))
     fit = _fit_functional(
         X,
         Y,
@@ -1843,6 +1866,13 @@ def summarize_estimates(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame
     ):
         if name in ok.columns:
             agg[name] = "mean"
+    for name in (
+        "riesz_clip_binding_rate_max",
+        "riesz_binding_rate_lower_max",
+        "riesz_binding_rate_upper_max",
+    ):
+        if name in ok.columns:
+            agg[name] = ["mean", "max"]
     out = ok.groupby(group_cols, dropna=False).agg(agg)
     out.columns = ["_".join(str(x) for x in col if x != "").strip("_") for col in out.columns]
     out = out.reset_index()

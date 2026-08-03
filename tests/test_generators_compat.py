@@ -30,8 +30,8 @@ Three invariants are protected here.
    ``v`` is a logistic logit, not a Bregman dual linear predictor, and
    ``generator.inv_grad`` is never called. It must stay distinguishable
    (``route``) and must never be mixed into the balancing candidates. Bounded
-   links are separated by the same principle for a different reason: they change
-   the estimand (design section 9-4), so they are never admissible.
+   links keep the Bregman route: they are ordinary candidates whose stated
+   bounds are part of the fitted model.
 """
 
 from __future__ import annotations
@@ -302,7 +302,8 @@ def test_route_and_class_prior_ratio_agree():
 
 
 # ---------------------------------------------------------------------------
-# 3b. Section 9-4: estimand-modifying generators are never admissible.
+# 3b. Truncated generators are ordinary selection candidates; the quality
+# screens are what admit or reject them.
 # ---------------------------------------------------------------------------
 def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None):
     X, Y = _make_ate(n=n, seed=seed)
@@ -323,43 +324,20 @@ def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None)
     )
 
 
-def test_bounded_generator_is_excluded_from_the_admissible_set():
+def test_bounded_generator_is_an_ordinary_selection_candidate():
     gen = BoundedBKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch)
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        _select(gen)
-
-
-def test_exclusion_holds_even_when_the_bound_never_binds():
-    """The screen is the flag, not the binding rate: a loose bound is still out.
-
-    A binding-rate-only screen (``max_cap_binding_rate``) would admit this
-    candidate, because ``alpha_max`` is far above any alpha the fit produces.
-    Section 9-4 says bounded links are *always* target-sensitivity.
-
-    The effectively-unclipped fit concentrates its weight on a couple of
-    observations (max alpha ~1e6, ESS ratio ~0.01), which genuinely violates
-    the ESS floor -- a *quality* failure the estimand flag must not mask (audit
-    CV-11). This test pins the flag alone, so it disables that floor; the
-    quality gating itself is covered by
-    ``test_modifies_estimand_does_not_bypass_the_quality_checks``.
-    """
-
-    gen = BoundedBKLGenerator(C=1e-2, alpha_max=1e6, branch_fn=_treated_branch)
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        _select(gen, admissibility_thresholds={"min_ess_ratio": None})
+    res = _select(gen, admissibility_thresholds={"min_ess_ratio": None})
+    assert res.n_admissible >= 1
 
 
 def test_unbounded_generator_stays_admissible():
     res = _select(SquaredGenerator(C=0.0))
-    assert res.modifies_estimand is False
     assert res.n_admissible >= 1
-    assert all(not r["modifies_estimand"] for r in res.path)
+    assert all("modifies_estimand" not in r for r in res.path)
 
 
-def test_all_candidates_failing_raises_without_the_sensitivity_warning():
-    """The warning describes "the selection below"; there must be one to describe."""
-
-    X, Y = _make_ate(n=120, seed=13)
+def test_all_candidates_failing_raises_without_a_sensitivity_note():
+    """The failure names the screen; the removed estimand framing stays gone."""
 
     gen = BregmanGenerator(
         g=lambda alpha: alpha * alpha,
@@ -367,28 +345,27 @@ def test_all_candidates_failing_raises_without_the_sensitivity_warning():
         inv_grad=lambda _value: float("nan"),
         grad2=lambda _alpha: 2.0,
     )
-    gen.modifies_estimand = True
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(
             RuntimeError, match="No Riesz candidate passed the admissibility screen"
-        ):
+        ) as excinfo:
             _select(gen, n=120, seed=13)
 
-    assert not [w for w in caught if "modifies the estimand" in str(w.message)]
+    assert "estimand" not in str(excinfo.value)
     assert not [w for w in caught if "admissibility screen" in str(w.message)]
 
 
 @pytest.mark.parametrize(
-    "make_gen, expected",
+    "make_gen",
     [
-        (lambda: SquaredGenerator(C=0.0), False),
-        (lambda: BoundedBKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch), True),
+        lambda: SquaredGenerator(C=0.0),
+        lambda: BoundedBKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch),
     ],
     ids=["sq", "bounded_bkl"],
 )
-def test_grr_functional_reports_the_estimand_flag(make_gen, expected):
+def test_grr_functional_does_not_report_a_removed_estimand_flag(make_gen):
     X, Y = _make_ate(n=250, seed=12)
     with warnings.catch_warnings():
         # A bounded link may legitimately bind; that warning is not under test.
@@ -402,12 +379,12 @@ def test_grr_functional_reports_the_estimand_flag(make_gen, expected):
             folds=3,
             random_state=0,
         )
-    assert res.diagnostics["riesz_modifies_estimand"] is expected
+    assert "riesz_modifies_estimand" not in res.diagnostics
 
 
 def test_grrcvresult_keeps_its_positional_signature():
-    """`modifies_estimand` is keyword-only, so old positional callers still work."""
+    """Added fields are keyword-only, so old positional callers still work."""
 
     assert "modifies_estimand" not in GRRCVResult.__match_args__
     res = GRRCVResult(None, 1e-2, None, "bias_variance", 0.5, 1, 1, [])
-    assert res.modifies_estimand is False
+    assert not hasattr(res, "modifies_estimand")

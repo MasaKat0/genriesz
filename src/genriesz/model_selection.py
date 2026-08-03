@@ -20,11 +20,6 @@ Design principles (see ``doc/coverage_failure_improvement_design_revised.md``):
   sample size, cap binding, ...) followed by a *criterion* minimization
   (default ``bias_variance``: ``B^2 + V/n + tau_R R + tau_K K``).
 - Neither coverage nor any true nuisance/effect is used for selection.
-- Generators that modify the estimand (``generator.modifies_estimand``, e.g.
-  :class:`~genriesz.generators.BoundedBKLGenerator`) are never admissible
-  (design section 9-4). A bound that binds changes the target functional, so
-  such candidates are a *target-sensitivity* analysis and must not compete on a
-  criterion against candidates that target the original estimand.
 """
 
 from __future__ import annotations
@@ -64,7 +59,10 @@ def default_admissibility_thresholds() -> dict[str, float | None]:
 
     return {
         "min_ess_ratio": 0.05,
-        "max_cap_binding_rate": 0.0,
+        # Bound binding is an ordinary diagnostic of a truncated model, not an
+        # admissibility violation: the stated bounds are part of the candidate.
+        # Callers who want to reject high-binding candidates can set a cap.
+        "max_cap_binding_rate": None,
         # Kernel-health band (scale-free). A collapsed kernel (median ~0) is the
         # small-bandwidth underfitting trap flagged in the design; a saturated
         # kernel (median ~1) is the large-bandwidth trap that yields near-constant
@@ -118,12 +116,11 @@ class GRRCVConfig:
         same scale for every generator, so paths obtained from separate calls
         with different generators -- e.g. ``SquaredGenerator`` vs. a
         ``BPGenerator`` with varying ``omega``/``C`` -- are directly comparable
-        (each call still fits one generator). Caveat: a small LSIF risk does not
-        undo an estimand modification. The risk always measures distance to the
-        *original* estimand's Riesz representer, so for a ``modifies_estimand``
-        generator, or a ``BPGenerator`` whose clip binds, a finite risk is scored
-        against a clipped/bounded representer -- check the bound-binding rate and
-        admissibility separately. Functionals whose ``m(alpha)`` needs a
+        (each call still fits one generator). Caveat: the risk is evaluated at
+        the *fitted* representer, so for a truncated (bounded-link) generator,
+        or a ``BPGenerator`` whose clip binds, a finite risk is scored against
+        a representer pinned at its stated bounds -- read the bound-binding
+        rate alongside it. Functionals whose ``m(alpha)`` needs a
         representer derivative (e.g. ``AMEFunctional``) do not support this score
         and raise a clear ``ValueError`` before any candidate is scored.
     admissibility_thresholds:
@@ -177,10 +174,6 @@ class GRRCVConfig:
 class GRRCVResult:
     """Selected Riesz hyper-parameters and the candidate path table.
 
-    ``modifies_estimand`` records that the generator targets a modified estimand
-    (design section 9-4). Such candidates are excluded from exact-target
-    selection and must be analyzed separately as a sensitivity specification.
-
     ``strict_nested`` is always ``True`` and records that the inner CV used
     fold-specific preprocessing. ``fold_provenance`` holds, for each inner fold,
     the validation rows, the rows used to fit preprocessing, and the selected
@@ -197,7 +190,6 @@ class GRRCVResult:
     n_admissible: int
     n_candidates: int
     path: list[dict] = field(default_factory=list)
-    modifies_estimand: bool = field(default=False, kw_only=True)
     strict_nested: bool = field(default=True, kw_only=True)
     # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
     # would make dataclass equality raise a truth-value ``ValueError``. Provenance
@@ -603,7 +595,6 @@ def score_grr_candidate(
         "lam": float(lam),
         "n_centers": rep_ncenters,
         "success": bool(all_success and imbalances),
-        "modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "bregman_validation": _nanmean(risks),
         "squared_loss_validation": sq_val,
         "held_out_imbalance": b_imb,
@@ -635,17 +626,12 @@ def _violated_thresholds(row: dict, thr: dict[str, float | None]) -> list[str]:
     """Which admissibility checks ``row`` fails, by name (audit CV-11).
 
     The single source of truth for the screen: :func:`_is_admissible` is
-    "this list is empty". ``"modifies_estimand"`` reflects design section 9-4
-    (a generator that modifies the estimand is always a target-sensitivity
-    candidate, never an admissible one -- even when its bound happens not to
-    bind on this sample).
+    "this list is empty".
     """
 
     violations: list[str] = []
     if not row["success"]:
         violations.append("fit_failure")
-    if row.get("modifies_estimand", False):
-        violations.append("modifies_estimand")
     min_ess = thr.get("min_ess_ratio")
     if min_ess is not None and row["ess_ratio_min"] < float(min_ess):
         violations.append("min_ess_ratio")
@@ -958,21 +944,13 @@ def select_grr_hyperparams(
                 )
                 path.append(row)
 
-    modifies_estimand = bool(getattr(generator, "modifies_estimand", False))
-
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
     if not admissible:
         fitted = sum(bool(r["success"]) and np.isfinite(r["criterion"]) for r in path)
-        modifies_note = (
-            " The generator is marked as modifying the estimand, so its candidates "
-            "belong in a separate sensitivity analysis."
-            if modifies_estimand
-            else ""
-        )
         raise RuntimeError(
             "No Riesz candidate passed the admissibility screen on this training "
-            f"sample ({len(path)} candidates scored, {fitted} had finite criteria)."
-            f"{modifies_note} Inspect the returned path by setting return_path=True, "
+            f"sample ({len(path)} candidates scored, {fitted} had finite criteria). "
+            "Inspect the returned path by setting return_path=True, "
             "or revise the candidate grid and admissibility thresholds."
         )
 
@@ -989,7 +967,6 @@ def select_grr_hyperparams(
         n_admissible=len(admissible),
         n_candidates=len(path),
         path=path if config.return_path else [],
-        modifies_estimand=modifies_estimand,
         strict_nested=True,
         fold_provenance=fold_provenance,
     )

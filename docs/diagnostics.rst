@@ -132,11 +132,11 @@ held-out finite-sample diagnostics rather than exact constraints.
 The current public result class stores aggregate out-of-fold diagnostics. It does
 not store per-fold ``FunctionalEstimate`` objects.
 
-Optimizer and clip diagnostics
-------------------------------
+Optimizer and binding diagnostics
+---------------------------------
 
 For ``riesz_method="grr"`` the per-fold Riesz optimizer state is surfaced so that
-failures and internal domain clipping are visible rather than swallowed:
+failures and representer-bound binding are visible rather than swallowed:
 
 .. list-table::
    :header-rows: 1
@@ -151,9 +151,13 @@ failures and internal domain clipping are visible rather than swallowed:
    * - ``"riesz_kkt_residual_max"``
      - Largest KKT residual across folds.
    * - ``"riesz_clip_binding_rate_max"``
-     - Largest fraction of training rows on which the generator's internal
-       domain clip was active. A positive value means at least one candidate
-       targeted a clipped (modified) estimand; a warning is also emitted.
+     - Largest fraction of training rows on which the generator's binding
+       diagnostic was active. For truncated links this is a stated representer
+       bound: the bounds are part of the fitted model, so report a positive
+       rate alongside the estimate. For exact restricted-domain links it
+       instead flags proximity to the dual-domain boundary; the fitted values
+       are exact and nothing is clamped. A warning distinguishing the two
+       cases is also emitted.
    * - ``"optimizer"``
      - Per-fold lists (``success``, ``status``, ``gradient_norm``,
        ``kkt_residual``, ``clip_binding_rate``).
