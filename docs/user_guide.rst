@@ -366,6 +366,35 @@ constructing them without it raises a :class:`ValueError`, because the
 representer branch must be fixed by the estimand rather than inferred from the
 fitted value.
 
+Truncated (bounded) representer models
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+:class:`~genriesz.BoundedBKLGenerator` and
+:class:`~genriesz.BoundedUKLGenerator` saturate the fitting link at stated
+representer bounds instead of clipping a fitted exact model. Where a bound
+binds, :math:`\alpha` is pinned at the bound, so the envelope identity
+:math:`d g^*(v)/dv = \alpha` holds exactly and the objective and gradient stay
+mutually consistent; fitted values are never rewritten afterwards. Where a
+bound binds the estimator targets a modified (bounded) estimand, so both
+classes carry ``modifies_estimand=True``: hyperparameter selection always
+excludes them from the admissible set, and they are reported as separate
+sensitivity specifications.
+
+``BoundedUKLGenerator.from_propensity_bounds(e_min, e_max)`` states the ATE
+parameterization in which the implied propensity stays inside
+``[e_min, e_max]``. The window must be symmetric (``e_max = 1 - e_min``): the
+treated arm has :math:`|\alpha| = 1/e` and the control arm
+:math:`|\alpha| = 1/(1-e)`, so a single magnitude interval covers both arms
+only in that case. For an asymmetric window, state the representer bounds
+directly via ``alpha_min`` and ``alpha_max``. There is no default range; the
+bounds are part of the model and must be stated explicitly.
+
+Per-side binding diagnostics are available through ``lower_binding``,
+``upper_binding``, and ``binding_diagnostics`` (stated bounds and per-side
+counts), and each fit records ``binding_rate_lower`` and
+``binding_rate_upper`` in its :class:`~genriesz.glm.FitResult`. Where the
+bounded link is pinned, ``GRRGLM.derivative_alpha`` returns exactly zero.
+
 
 Estimators, cross fitting, and outcome models
 ---------------------------------------------

@@ -468,6 +468,20 @@ class SquaredGenerator(BregmanGenerator):
         return np.full_like(a, 2.0, dtype=float)
 
 
+def _ukl_positive_distance(
+    alpha: NDArray[np.float64], C: float, *, name: str
+) -> NDArray[np.float64]:
+    t = np.abs(alpha) - C
+    valid = np.isfinite(alpha) & np.isfinite(t) & (t > 0.0)
+    if not np.all(valid):
+        n_bad = int(np.sum(~valid))
+        raise DomainError(
+            f"{name} alpha-domain violation for {n_bad}/{len(alpha)} "
+            "observation(s): |alpha| must be strictly greater than C."
+        )
+    return t
+
+
 class UKLGenerator(BregmanGenerator):
     """Unnormalized KL generator (UKL-Riesz).
 
@@ -551,15 +565,7 @@ class UKLGenerator(BregmanGenerator):
         return ~self.dual_domain_mask(X, v)
 
     def _positive_distance(self, alpha: NDArray[np.float64]) -> NDArray[np.float64]:
-        t = np.abs(alpha) - self.C
-        valid = np.isfinite(alpha) & np.isfinite(t) & (t > 0.0)
-        if not np.all(valid):
-            n_bad = int(np.sum(~valid))
-            raise DomainError(
-                f"UKLGenerator alpha-domain violation for {n_bad}/{len(alpha)} "
-                "observation(s): |alpha| must be strictly greater than C."
-            )
-        return t
+        return _ukl_positive_distance(alpha, self.C, name="UKLGenerator")
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -945,7 +951,7 @@ class BKLGenerator(BregmanGenerator):
 
 
 class BoundedBKLGenerator(BregmanGenerator):
-    """Bounded-representer BKL variant (方針B; target-sensitivity candidate).
+    """Bounded-representer BKL variant (target-sensitivity candidate).
 
     The BKL generator function ``g`` is the same as :class:`BKLGenerator`, but
     the inverse link is **bounded and smooth** instead of exact-and-raising::
@@ -979,6 +985,9 @@ class BoundedBKLGenerator(BregmanGenerator):
     """
 
     modifies_estimand = True
+    #: The link is pinned at the bound where ``domain_binding`` is True, so
+    #: ``d alpha / d v = 0`` there. ``GRRGLM.derivative_alpha`` uses this.
+    link_is_constant_where_binding = True
 
     def __init__(
         self,
@@ -987,8 +996,12 @@ class BoundedBKLGenerator(BregmanGenerator):
         alpha_max: float = 50.0,
         branch_fn: BranchFn | None = None,
     ):
-        if float(C) <= 0:
-            raise ValueError("C must be > 0 for BoundedBKLGenerator")
+        if not (np.isfinite(float(C)) and float(C) > 0):
+            raise ValueError("C must be finite and > 0 for BoundedBKLGenerator")
+        if not np.isfinite(float(alpha_max)):
+            raise ValueError(
+                f"alpha_max must be finite. Got alpha_max={alpha_max}."
+            )
         if float(alpha_max) <= float(C):
             raise ValueError(
                 f"alpha_max must be > C. Got alpha_max={alpha_max}, C={C}."
@@ -1048,17 +1061,39 @@ class BoundedBKLGenerator(BregmanGenerator):
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         return np.isfinite(v_)
 
-    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        """Mask where the bound binds (``u = s*v > u_min`` -> ``|alpha| = alpha_max``).
-
-        These are the observations at which the bounded variant departs from the
-        exact BKL-Riesz representer, i.e. the modified-estimand region.
-        """
-
+    def _signed_u(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-        u = self._branch_sign(X_, v_) * v_
-        return (u > self._u_min) | (u < self._u_floor)
+        return self._branch_sign(X_, v_) * v_
+
+    def lower_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where ``|alpha|`` is pinned at the representability floor."""
+
+        return self._signed_u(X, v) < self._u_floor
+
+    def upper_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where ``|alpha|`` is pinned at ``alpha_max``."""
+
+        return self._signed_u(X, v) > self._u_min
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where the bound binds, i.e. the modified-estimand region.
+
+        A point exactly on a pre-image boundary is not binding: the clamp is
+        inactive there and the interior derivative applies.
+        """
+
+        return self.lower_binding(X, v) | self.upper_binding(X, v)
+
+    def binding_diagnostics(self, X: ArrayLike, v: ArrayLike) -> dict[str, float]:
+        """Stated bounds and per-side binding counts (audit GEN-07)."""
+
+        return {
+            "alpha_lower_bound": self.alpha_floor,
+            "alpha_upper_bound": self.alpha_max,
+            "n_lower_binding": int(np.sum(self.lower_binding(X, v))),
+            "n_upper_binding": int(np.sum(self.upper_binding(X, v))),
+        }
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -1074,6 +1109,225 @@ class BoundedBKLGenerator(BregmanGenerator):
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad2(a, self.C)
+
+
+class BoundedUKLGenerator(BregmanGenerator):
+    """Bounded-representer UKL variant (target-sensitivity candidate).
+
+    The UKL generator function is unchanged, but the fitted model is
+    truncated: with ``z = s v`` the inverse link ``|alpha| = C + e^z`` is
+    clamped to the pre-image interval ``[log(alpha_min - C),
+    log(alpha_max - C)]``, so the representer satisfies
+    ``alpha_min <= |alpha| <= alpha_max`` by construction. Where the clamp
+    binds, ``alpha`` is pinned at the stated bound; ``d alpha / d v = 0``
+    there, so the envelope identity ``d g*(v)/d v = alpha`` holds exactly and
+    the objective and gradient stay mutually consistent everywhere. Values
+    are never rewritten after fitting.
+
+    Where a bound binds the estimator no longer targets the exact UKL-Riesz
+    representer: it targets a modified (bounded) estimand. Report
+    :meth:`domain_binding` and treat this class as a *target-sensitivity*
+    specification, never an admissible candidate (design section 9-4).
+
+    Parameters
+    ----------
+    C:
+        Generator shift (domain ``|alpha| > C``), ``C >= 0``.
+    alpha_max:
+        Finite upper bound on ``|alpha|`` (must exceed ``alpha_min``).
+    alpha_min:
+        Optional lower bound on ``|alpha|`` (must exceed ``C``). ``None``
+        uses the smallest float64 value strictly above ``C``, which makes the
+        lower clamp a pure representability floor rather than a model choice.
+    branch_fn:
+        Branch selector fixed by the estimand (required).
+    """
+
+    modifies_estimand = True
+    #: The link is pinned at the bound where ``domain_binding`` is True, so
+    #: ``d alpha / d v = 0`` there. ``GRRGLM.derivative_alpha`` uses this.
+    link_is_constant_where_binding = True
+
+    def __init__(
+        self,
+        C: float = 1.0,
+        *,
+        alpha_max: float,
+        alpha_min: float | None = None,
+        branch_fn: BranchFn | None = None,
+    ):
+        if not (np.isfinite(float(C)) and float(C) >= 0):
+            raise ValueError("C must be finite and >= 0 for BoundedUKLGenerator")
+        if not np.isfinite(float(alpha_max)):
+            raise ValueError(
+                f"alpha_max must be finite. Got alpha_max={alpha_max}."
+            )
+        if alpha_min is None:
+            alpha_min_ = float(np.nextafter(float(C), np.inf))
+        else:
+            if not np.isfinite(float(alpha_min)):
+                raise ValueError(
+                    f"alpha_min must be finite. Got alpha_min={alpha_min}."
+                )
+            alpha_min_ = float(alpha_min)
+        if alpha_min_ <= float(C):
+            raise ValueError(
+                f"alpha_min must be > C. Got alpha_min={alpha_min_}, C={C}."
+            )
+        if not float(alpha_max) > alpha_min_:
+            raise ValueError(
+                "alpha_max must be > alpha_min. "
+                f"Got alpha_max={alpha_max}, alpha_min={alpha_min_}."
+            )
+        if branch_fn is None:
+            raise ValueError(
+                "BoundedUKLGenerator requires branch_fn because the representer "
+                "branch must be fixed by the estimand rather than inferred from v."
+            )
+        self.alpha_max = float(alpha_max)
+        self.alpha_min = alpha_min_
+        # Pre-images of the representer bounds under the UKL link.
+        self._z_hi = float(np.log(self.alpha_max - float(C)))
+        self._z_lo = float(np.log(self.alpha_min - float(C)))
+        super().__init__(
+            name=f"BoundedUKL(alpha_min={self.alpha_min:g}, alpha_max={self.alpha_max:g})",
+            C=float(C),
+            branch_fn=branch_fn,
+        )
+
+    @classmethod
+    def from_propensity_bounds(
+        cls,
+        e_min: float,
+        e_max: float,
+        *,
+        C: float = 1.0,
+        branch_fn: BranchFn | None = None,
+    ) -> BoundedUKLGenerator:
+        """Build the ATE parameterization from propensity bounds.
+
+        The treated arm has representer magnitude ``1/e`` and the control arm
+        ``1/(1-e)``. For a symmetric window (``e_max = 1 - e_min``) both arms
+        share the magnitude interval ``[1/e_max, 1/e_min]``, which is what
+        this constructor states; an asymmetric window is rejected because a
+        single magnitude interval cannot represent it -- state the representer
+        bounds directly via ``alpha_min`` and ``alpha_max`` instead. Other estimands map
+        differently; supply ``alpha_min``/``alpha_max`` directly there. There
+        is no default range: the bounds are part of the model and must be
+        stated explicitly.
+        """
+
+        e_min_ = float(e_min)
+        e_max_ = float(e_max)
+        if not 0.0 < e_min_ < 1.0:
+            raise ValueError(
+                f"e_min must be strictly inside (0, 1). Got e_min={e_min}."
+            )
+        if not 0.0 < e_max_ < 1.0:
+            raise ValueError(
+                f"e_max must be strictly inside (0, 1). Got e_max={e_max}."
+            )
+        if e_min_ >= e_max_:
+            raise ValueError(
+                f"e_min must be smaller than e_max. Got e_min={e_min}, e_max={e_max}."
+            )
+        if abs((1.0 - e_min_) - e_max_) > 1e-12:
+            raise ValueError(
+                "e_max must equal 1 - e_min: the treated arm has |alpha| = 1/e "
+                "and the control arm has |alpha| = 1/(1 - e), so one magnitude "
+                "interval covers both arms only for a symmetric propensity "
+                f"window. Got e_min={e_min}, e_max={e_max}. For an asymmetric "
+                "window, do not use this classmethod; state the representer "
+                "bounds directly via alpha_min and alpha_max."
+            )
+        return cls(
+            C=C,
+            alpha_max=1.0 / e_min_,
+            alpha_min=1.0 / e_max_,
+            branch_fn=branch_fn,
+        )
+
+    def _branch_sign(
+        self, X: NDArray[np.float64], v: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        return self._sign(X, v)
+
+    def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._branch_sign(X_, v_)
+        raw_z = s * v_
+        lower_binding = raw_z < self._z_lo
+        upper_binding = raw_z > self._z_hi
+        z = np.minimum(np.maximum(raw_z, self._z_lo), self._z_hi)
+        alpha_abs = self.C + np.exp(z)
+        alpha_abs[lower_binding] = self.alpha_min
+        alpha_abs[upper_binding] = self.alpha_max
+        representable = np.isfinite(alpha_abs) & (alpha_abs > self.C)
+        if not np.all(representable):
+            n_bad = int(np.sum(~representable))
+            raise DomainError(
+                f"BoundedUKLGenerator cannot represent the bounded link for "
+                f"{n_bad}/{len(v_)} observation(s) in float64."
+            )
+        return s * alpha_abs
+
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+    def _signed_z(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return self._branch_sign(X_, v_) * v_
+
+    def lower_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where ``|alpha|`` is pinned at ``alpha_min``."""
+
+        return self._signed_z(X, v) < self._z_lo
+
+    def upper_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where ``|alpha|`` is pinned at ``alpha_max``."""
+
+        return self._signed_z(X, v) > self._z_hi
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask where a representer bound binds (the modified-estimand region).
+
+        A point exactly on a pre-image boundary is not binding: the clamp is
+        inactive there and the interior derivative applies.
+        """
+
+        return self.lower_binding(X, v) | self.upper_binding(X, v)
+
+    def binding_diagnostics(self, X: ArrayLike, v: ArrayLike) -> dict[str, float]:
+        """Stated bounds and per-side binding counts (audit GEN-07)."""
+
+        return {
+            "alpha_lower_bound": self.alpha_min,
+            "alpha_upper_bound": self.alpha_max,
+            "n_lower_binding": int(np.sum(self.lower_binding(X, v))),
+            "n_upper_binding": int(np.sum(self.upper_binding(X, v))),
+        }
+
+    def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = _ukl_positive_distance(a, self.C, name="BoundedUKLGenerator")
+        return t * np.log(t) - np.abs(a)
+
+    def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = _ukl_positive_distance(a, self.C, name="BoundedUKLGenerator")
+        return np.sign(a) * np.log(t)
+
+    def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = _ukl_positive_distance(a, self.C, name="BoundedUKLGenerator")
+        return 1.0 / t
 
 
 class PUGenerator(BregmanGenerator):

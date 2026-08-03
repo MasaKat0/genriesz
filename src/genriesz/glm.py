@@ -292,6 +292,10 @@ class FitResult:
         margin of an exact open dual domain is active (``nan`` when not
         applicable). The field name is retained for API compatibility; an
         exact-domain fit does not replace an invalid link value by a cap.
+    binding_rate_lower, binding_rate_upper:
+        Per-side binding rates for generators whose link saturates at stated
+        representer bounds (``lower_binding``/``upper_binding``); ``nan`` for
+        other generators. Their sum equals ``clip_binding_rate`` there.
     fit_time:
         Wall-clock seconds spent in ``fit``.
     """
@@ -306,6 +310,8 @@ class FitResult:
     kkt_residual: float = field(default=float("nan"))
     clip_binding_rate: float = field(default=float("nan"))
     fit_time: float = field(default=float("nan"))
+    binding_rate_lower: float = field(default=float("nan"))
+    binding_rate_upper: float = field(default=float("nan"))
 
 
 class _Penalty:
@@ -617,6 +623,8 @@ class GRRGLM:
         gradient_norm = float("nan")
         kkt = float("nan")
         binding = float("nan")
+        binding_lower = float("nan")
+        binding_upper = float("nan")
         v = Phi @ beta_hat
         evaluated = self.generator.conjugate_status(X_, v)
         if bool(np.all(evaluated.valid)):
@@ -646,6 +654,13 @@ class GRRGLM:
             if callable(binding_fn):
                 bind = np.asarray(binding_fn(X_, v), dtype=bool)
                 binding = float(np.mean(bind)) if bind.size else 0.0
+            lower_fn = getattr(self.generator, "lower_binding", None)
+            upper_fn = getattr(self.generator, "upper_binding", None)
+            if callable(lower_fn) and callable(upper_fn):
+                low = np.asarray(lower_fn(X_, v), dtype=bool)
+                high = np.asarray(upper_fn(X_, v), dtype=bool)
+                binding_lower = float(np.mean(low)) if low.size else 0.0
+                binding_upper = float(np.mean(high)) if high.size else 0.0
         else:
             success = False
             status = "domain_error_at_solution"
@@ -665,6 +680,8 @@ class GRRGLM:
             gradient_norm=gradient_norm,
             kkt_residual=kkt,
             clip_binding_rate=binding,
+            binding_rate_lower=binding_lower,
+            binding_rate_upper=binding_upper,
             fit_time=time.perf_counter() - t0,
         )
         # Only a successful fit is allowed to predict (audit P0-07): an
@@ -732,6 +749,11 @@ class GRRGLM:
         out = np.full_like(dv, np.nan, dtype=float)
         ok = ~bad
         out[ok] = dv[ok] / g2[ok]
+        if getattr(self.generator, "link_is_constant_where_binding", False):
+            # Bounded links pin alpha at the stated bound, so d alpha/d v = 0
+            # there and the inverse-function identity above does not apply.
+            v = np.asarray(self.basis(X_), dtype=float) @ self.beta_
+            out[self.generator.domain_binding(X_, v)] = 0.0
         return out
 
 
