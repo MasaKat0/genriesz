@@ -20,6 +20,7 @@ We solve the resulting convex (often smooth) problem with L-BFGS-B.
 from __future__ import annotations
 
 import contextlib
+import re
 import time
 import warnings
 from contextlib import AbstractContextManager
@@ -31,8 +32,11 @@ from scipy import optimize
 
 from .basis import Basis
 from .functionals import LinearFunctional
-from .generators import BregmanGenerator, DomainError, SquaredGenerator
-from .utils import as_1d_of_length, as_2d, sigmoid, solve_stationarity
+from .generators import BregmanGenerator, SquaredGenerator
+from .generators import (
+    DomainError as DomainError,  # noqa: F401  # re-exported: public API kept after the move to generators
+)
+from .utils import as_1d_of_length, as_2d, sigmoid
 
 
 def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
@@ -46,19 +50,210 @@ def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
 # it, so ``from genriesz.glm import DomainError`` keeps working.
 
 
-def _ensure_basis_fitted(basis: Basis, X: NDArray[np.float64]) -> None:
-    """Fit ``basis`` on the training data if it has not been fit yet.
+def _ensure_basis_fitted(
+    basis: Basis,
+    X: NDArray[np.float64],
+    y: NDArray[np.float64] | None = None,
+    *,
+    fit_basis: bool = True,
+) -> None:
+    """Fit ``basis`` on the solver's training observations when requested."""
 
-    Stateful bases raise when ``n_features`` is accessed before ``fit``; in
-    that case fitting on the solver's own training sample is the correct
-    (leakage-free) default. Already-fitted bases are left untouched so that
-    cross-fitting callers keep control over what data the basis sees.
+    if not fit_basis:
+        return
+    if y is None:
+        basis.fit(X)
+    else:
+        basis.fit(X, y)
+
+
+@dataclass(frozen=True)
+class _StationaritySolution:
+    beta: NDArray[np.float64]
+    success: bool
+    message: str
+
+
+def _solve_squared_stationarity(
+    matrix: NDArray[np.float64], right_hand_side: NDArray[np.float64]
+) -> _StationaritySolution:
+    """Solve a positive-semidefinite stationarity equation without substitution."""
+
+    A = np.asarray(matrix, dtype=float)
+    b = np.asarray(right_hand_side, dtype=float).reshape(-1)
+    if A.ndim != 2 or A.shape[0] != A.shape[1] or A.shape[0] != b.size:
+        raise ValueError("The stationarity system has incompatible dimensions.")
+    if not np.all(np.isfinite(A)) or not np.all(np.isfinite(b)):
+        raise ValueError("The stationarity system must contain finite values.")
+
+    symmetric = 0.5 * (A + A.T)
+    eigenvalues, eigenvectors = np.linalg.eigh(symmetric)
+    spectral_scale = max(float(np.max(np.abs(eigenvalues))), 1.0)
+    negative_tolerance = 100.0 * np.finfo(float).eps * spectral_scale
+    if float(np.min(eigenvalues)) < -negative_tolerance:
+        return _StationaritySolution(
+            beta=np.zeros_like(b),
+            success=False,
+            message="The squared-loss stationarity matrix is not positive semidefinite.",
+        )
+
+    rank_tolerance = 1e-10 * max(float(np.max(eigenvalues)), np.finfo(float).tiny)
+    keep = eigenvalues > rank_tolerance
+    coordinates = eigenvectors.T @ b
+    null_coordinates = coordinates[~keep]
+    null_tolerance = 1e-10 * max(float(np.linalg.norm(b)), 1.0)
+    if null_coordinates.size and float(np.linalg.norm(null_coordinates)) > null_tolerance:
+        return _StationaritySolution(
+            beta=np.zeros_like(b),
+            success=False,
+            message=(
+                "The unpenalized squared-loss objective is unbounded below: "
+                "the right-hand side has a component outside the range of the "
+                "stationarity matrix."
+            ),
+        )
+
+    beta = np.zeros_like(b)
+    if np.any(keep):
+        beta = eigenvectors[:, keep] @ (coordinates[keep] / eigenvalues[keep])
+    residual = symmetric @ beta - b
+    residual_tolerance = 1e-8 * max(float(np.linalg.norm(b)), 1.0)
+    if not np.all(np.isfinite(beta)) or float(np.linalg.norm(residual)) > residual_tolerance:
+        return _StationaritySolution(
+            beta=np.zeros_like(b),
+            success=False,
+            message="The squared-loss stationarity equation could not be solved reliably.",
+        )
+    return _StationaritySolution(
+        beta=np.asarray(beta, dtype=float), success=True, message="closed_form"
+    )
+
+
+@dataclass(frozen=True)
+class _LinearDualDomain:
+    """Observationwise linear bounds for a generator's exact dual domain."""
+
+    lower: NDArray[np.float64]
+    upper: NDArray[np.float64]
+    initial_beta: NDArray[np.float64]
+
+
+def _exact_linear_dual_domain(
+    generator: BregmanGenerator,
+    X: NDArray[np.float64],
+    Phi: NDArray[np.float64],
+    *,
+    margin: float,
+) -> _LinearDualDomain | None:
+    """Return linear bounds that keep an exact branchwise link representable.
+
+    Let ``u_i = s_i v_i``, where ``s_i`` is fixed by the estimand. The exact
+    UKL, BKL, BP, and PU links impose an interval on ``u_i``. Since
+    ``v = Phi beta``, the interval gives observationwise linear constraints on
+    ``beta``. The numerical margin moves the constraints into the open domain;
+    it does not replace an invalid link value.
     """
 
-    try:
-        _ = basis.n_features
-    except Exception:
-        basis.fit(X)
+    if generator.branch_fn is None:
+        return None
+    interval = generator.signed_dual_interval(margin=margin)
+    if interval is None:
+        return None
+
+    sign = np.asarray(generator._sign(X, np.zeros(X.shape[0])), dtype=float)
+    lower_u, upper_u, target_u = interval
+
+    if not lower_u < upper_u:
+        return _LinearDualDomain(
+            lower=np.full(X.shape[0], np.nan),
+            upper=np.full(X.shape[0], np.nan),
+            initial_beta=np.full(Phi.shape[1], np.nan),
+        )
+
+    lower = np.where(sign > 0.0, lower_u, -upper_u).astype(float)
+    upper = np.where(sign > 0.0, upper_u, -lower_u).astype(float)
+    target = sign * target_u
+
+    initial_beta = np.linalg.lstsq(Phi, target, rcond=None)[0]
+    values = Phi @ initial_beta
+    feasible = bool(np.all(values >= lower) and np.all(values <= upper))
+    if not feasible:
+        rows: list[NDArray[np.float64]] = []
+        bounds: list[float] = []
+        finite_upper = np.isfinite(upper)
+        if np.any(finite_upper):
+            rows.extend(Phi[finite_upper])
+            bounds.extend(upper[finite_upper])
+        finite_lower = np.isfinite(lower)
+        if np.any(finite_lower):
+            rows.extend(-Phi[finite_lower])
+            bounds.extend(-lower[finite_lower])
+        phase = optimize.linprog(
+            np.zeros(Phi.shape[1], dtype=float),
+            A_ub=np.asarray(rows, dtype=float),
+            b_ub=np.asarray(bounds, dtype=float),
+            bounds=[(None, None)] * Phi.shape[1],
+            method="highs",
+        )
+        if not phase.success or phase.x is None:
+            return _LinearDualDomain(
+                lower=lower,
+                upper=upper,
+                initial_beta=np.full(Phi.shape[1], np.nan),
+            )
+        initial_beta = np.asarray(phase.x, dtype=float)
+
+    return _LinearDualDomain(lower=lower, upper=upper, initial_beta=initial_beta)
+
+
+def _linear_constraint_kkt_residual(
+    gradient: NDArray[np.float64],
+    beta: NDArray[np.float64],
+    matrix: NDArray[np.float64],
+    lower: NDArray[np.float64],
+    upper: NDArray[np.float64],
+    *,
+    tolerance: float,
+) -> float:
+    """KKT residual for ``lower <= matrix @ beta <= upper``."""
+
+    values = matrix @ beta
+    finite_lower = np.isfinite(lower)
+    finite_upper = np.isfinite(upper)
+    lower_slack = values[finite_lower] - lower[finite_lower]
+    upper_slack = upper[finite_upper] - values[finite_upper]
+    primal = 0.0
+    if lower_slack.size:
+        primal = max(primal, float(np.max(np.maximum(-lower_slack, 0.0))))
+    if upper_slack.size:
+        primal = max(primal, float(np.max(np.maximum(-upper_slack, 0.0))))
+
+    active_tolerance = max(1e-7, 10.0 * float(tolerance))
+    normals: list[NDArray[np.float64]] = []
+    slacks: list[float] = []
+    lower_rows = matrix[finite_lower]
+    for row, slack in zip(lower_rows, lower_slack, strict=True):
+        if slack <= active_tolerance:
+            normals.append(-row)
+            slacks.append(float(slack))
+    upper_rows = matrix[finite_upper]
+    for row, slack in zip(upper_rows, upper_slack, strict=True):
+        if slack <= active_tolerance:
+            normals.append(row)
+            slacks.append(float(slack))
+
+    if normals:
+        normal_matrix = np.asarray(normals, dtype=float)
+        multipliers, _ = optimize.nnls(normal_matrix.T, -gradient)
+        stationarity = gradient + normal_matrix.T @ multipliers
+        complementarity = float(
+            np.max(np.abs(multipliers * np.asarray(slacks, dtype=float)))
+        )
+    else:
+        stationarity = gradient
+        complementarity = 0.0
+    stationarity_residual = float(np.max(np.abs(stationarity))) if stationarity.size else 0.0
+    return max(primal, complementarity, stationarity_residual)
 
 
 @dataclass
@@ -93,8 +288,10 @@ class FitResult:
         Stationarity residual. Equal to ``gradient_norm`` for smooth
         penalties; for l1 it is the exact subgradient residual.
     clip_binding_rate:
-        Fraction of observations for which the generator's internal domain
-        clip was active at the solution (``nan`` when not applicable).
+        Fraction of observations at which a bounded link or the numerical
+        margin of an exact open dual domain is active (``nan`` when not
+        applicable). The field name is retained for API compatibility; an
+        exact-domain fit does not replace an invalid link value by a cap.
     fit_time:
         Wall-clock seconds spent in ``fit``.
     """
@@ -120,19 +317,13 @@ class _Penalty:
             raise ValueError("lam must be >= 0")
 
         # Convenience shorthand: allow strings like "l1.5" to mean an l_p penalty.
-        # This keeps the public API concise while still supporting general l_p.
         if (
             self.penalty is not None
-            and self.penalty.startswith("l")
-            and self.penalty not in {"l1", "l2", "lp", "l_p"}
+            and re.fullmatch(r"l(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)", self.penalty)
+            and self.penalty not in {"l1", "l2"}
         ):
-            try:
-                p = float(self.penalty[1:])
-                self.penalty = "lp"
-                self.p_norm = p
-            except Exception:
-                # Fall through to the standard parser below.
-                pass
+            self.p_norm = float(self.penalty[1:])
+            self.penalty = "lp"
         if self.penalty in {"l1", "lasso"}:
             self.p_norm = 1.0
         elif self.penalty in {"l2", "ridge"}:
@@ -198,10 +389,11 @@ class GRRGLM:
         max_iter: int = 500,
         tol: float = 1e-8,
         verbose: bool = False,
+        fit_basis: bool = True,
     ) -> FitResult:
         t0 = time.perf_counter()
         X_ = as_2d(X)
-        _ensure_basis_fitted(self.basis, X_)
+        _ensure_basis_fitted(self.basis, X_, fit_basis=fit_basis)
         Phi = np.asarray(self.basis(X_), dtype=float)
         M = np.asarray(self.functional.m_basis_matrix(X_, self.basis), dtype=float)
 
@@ -259,20 +451,16 @@ class GRRGLM:
             # need not lie in the range of A, so an unpenalized rank-deficient
             # fit can have no stationary point at all. Report that as a failure
             # instead of passing off lstsq's finite non-solution as a fit.
-            try:
-                beta_hat = solve_stationarity(A, b)
-            except np.linalg.LinAlgError as exc:
+            stationarity = _solve_squared_stationarity(A, b)
+            if not stationarity.success:
                 out = FitResult(
                     beta=beta0_,
                     success=False,
-                    message=str(exc),
+                    message=stationarity.message,
                     n_iter=0,
                     status="singular",
                     fit_time=time.perf_counter() - t0,
                 )
-                # No solution was ever computed: leave the model unpredictable
-                # rather than letting predict_alpha() silently evaluate the
-                # (meaningless) initial point. The failure lives in fit_result_.
                 self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
@@ -282,7 +470,7 @@ class GRRGLM:
                 X_,
                 Phi,
                 M,
-                np.asarray(beta_hat, dtype=float),
+                stationarity.beta,
                 success=True,
                 message="closed_form",
                 status="closed_form",
@@ -290,60 +478,104 @@ class GRRGLM:
                 t0=t0,
             )
 
-        # Objective and gradient. Generator failures are raised (and turned
-        # into an explicit FitResult failure below), never converted into a
-        # huge objective value with a zero gradient.
+
+        # Invalid generator evaluations return NaN, so the optimizer reports
+        # failure. No finite objective or gradient is substituted for an
+        # undefined link.
         def fun(beta: NDArray[np.float64]) -> float:
             v = Phi @ beta
-            try:
-                g_star, _ = self.generator.conjugate(X_, v)
-            except Exception as exc:
-                raise DomainError(
-                    f"generator '{self.generator.name}' failed to evaluate its "
-                    f"conjugate during optimization: {exc}"
-                ) from exc
-            loss = float(np.mean(g_star - (M @ beta)))
+            evaluated = self.generator.conjugate_status(X_, v)
+            if not bool(np.all(evaluated.valid)):
+                return float("nan")
+            loss = float(np.mean(evaluated.conjugate - (M @ beta)))
             return loss + self.penalty.value(beta)
 
         def jac(beta: NDArray[np.float64]) -> NDArray[np.float64]:
             v = Phi @ beta
-            try:
-                _, alpha = self.generator.conjugate(X_, v)
-            except Exception as exc:
-                raise DomainError(
-                    f"generator '{self.generator.name}' failed to evaluate its "
-                    f"link during optimization: {exc}"
-                ) from exc
-            grad = (alpha[:, None] * Phi - M).mean(axis=0)
+            evaluated = self.generator.conjugate_status(X_, v)
+            if not bool(np.all(evaluated.valid)):
+                return np.full(Phi.shape[1], np.nan, dtype=float)
+            grad = (evaluated.alpha[:, None] * Phi - M).mean(axis=0)
             return grad + self.penalty.grad(beta)
 
         opts: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
         if verbose:
-            opts["iprint"] = 1
+            opts["disp"] = True
 
-        # The branch signs depend on X only, but fun/jac are evaluated many
-        # times on the same X. Memoize them for the duration of the fit.
+        # The branch signs depend on X only. The same signs determine the
+        # exact linear dual domain and enter every objective evaluation, so one
+        # cache must cover both operations.
         with _branch_cache_of(self.generator):
-            try:
-                res = optimize.minimize(
-                    fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts
-                )
-            except DomainError as exc:
+            dual_domain = _exact_linear_dual_domain(
+                self.generator,
+                X_,
+                Phi,
+                margin=max(1e-10, 10.0 * float(tol)),
+            )
+            if dual_domain is not None:
+                if not np.all(np.isfinite(dual_domain.initial_beta)):
+                    out = FitResult(
+                        beta=beta0_,
+                        success=False,
+                        message=(
+                            "The fixed branch and the fitted basis have no common "
+                            "linear predictor inside the exact generator domain."
+                        ),
+                        n_iter=0,
+                        status="domain_infeasible",
+                        fit_time=time.perf_counter() - t0,
+                    )
+                    self.beta_ = None
+                    self.fit_result_ = out
+                    self._Phi = None
+                    self._M = None
+                    return out
+                if beta0 is None:
+                    beta0_ = dual_domain.initial_beta
+                else:
+                    values0 = Phi @ beta0_
+                    if np.any(values0 < dual_domain.lower) or np.any(
+                        values0 > dual_domain.upper
+                    ):
+                        raise ValueError("beta0 lies outside the exact generator domain.")
+
+            initial_evaluation = self.generator.conjugate_status(X_, Phi @ beta0_)
+            if not bool(np.all(initial_evaluation.valid)):
                 out = FitResult(
                     beta=beta0_,
                     success=False,
-                    message=str(exc),
+                    message=(
+                        f"generator '{self.generator.name}' is undefined at beta0; "
+                        "no optimizer step was taken"
+                    ),
                     n_iter=0,
                     status="domain_error",
                     fit_time=time.perf_counter() - t0,
                 )
-                # Same as the singular closed-form path: no solution exists, so
-                # do not leave the initial point behind as a predictable state.
                 self.beta_ = None
                 self.fit_result_ = out
                 self._Phi = None
                 self._M = None
                 return out
+
+            if dual_domain is None:
+                res = optimize.minimize(
+                    fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts
+                )
+            else:
+                constraint = optimize.LinearConstraint(
+                    Phi,
+                    dual_domain.lower,
+                    dual_domain.upper,
+                )
+                res = optimize.minimize(
+                    fun=fun,
+                    x0=beta0_,
+                    jac=jac,
+                    method="SLSQP",
+                    constraints=(constraint,),
+                    options=opts,
+                )
 
             beta_hat = np.asarray(res.x, dtype=float)
             return self._finalize_fit(
@@ -356,6 +588,10 @@ class GRRGLM:
                 status="converged" if bool(res.success) else "optimizer_failure",
                 n_iter=int(getattr(res, "nit", -1)),
                 t0=t0,
+                constraint_matrix=Phi if dual_domain is not None else None,
+                constraint_lower=dual_domain.lower if dual_domain is not None else None,
+                constraint_upper=dual_domain.upper if dual_domain is not None else None,
+                tolerance=tol,
             )
 
     def _finalize_fit(
@@ -370,6 +606,10 @@ class GRRGLM:
         status: str,
         n_iter: int,
         t0: float,
+        constraint_matrix: NDArray[np.float64] | None = None,
+        constraint_lower: NDArray[np.float64] | None = None,
+        constraint_upper: NDArray[np.float64] | None = None,
+        tolerance: float = 1e-8,
     ) -> FitResult:
         """Compute solution diagnostics and store the fit result."""
 
@@ -378,21 +618,42 @@ class GRRGLM:
         kkt = float("nan")
         binding = float("nan")
         v = Phi @ beta_hat
-        try:
-            g_star, alpha = self.generator.conjugate(X_, v)
-            objective = float(np.mean(g_star - (M @ beta_hat))) + self.penalty.value(beta_hat)
-            grad_loss = (alpha[:, None] * Phi - M).mean(axis=0)
+        evaluated = self.generator.conjugate_status(X_, v)
+        if bool(np.all(evaluated.valid)):
+            objective = float(np.mean(evaluated.conjugate - (M @ beta_hat)))
+            objective += self.penalty.value(beta_hat)
+            grad_loss = (evaluated.alpha[:, None] * Phi - M).mean(axis=0)
             grad_total = grad_loss + self.penalty.grad(beta_hat)
-            gradient_norm = float(np.max(np.abs(grad_total))) if grad_total.size else 0.0
-            kkt = self._kkt_residual(grad_loss, beta_hat)
+            gradient_norm = (
+                float(np.max(np.abs(grad_total))) if grad_total.size else 0.0
+            )
+            if (
+                constraint_matrix is not None
+                and constraint_lower is not None
+                and constraint_upper is not None
+            ):
+                kkt = _linear_constraint_kkt_residual(
+                    grad_total,
+                    beta_hat,
+                    constraint_matrix,
+                    constraint_lower,
+                    constraint_upper,
+                    tolerance=tolerance,
+                )
+            else:
+                kkt = self._kkt_residual(grad_loss, beta_hat)
             binding_fn = getattr(self.generator, "domain_binding", None)
             if callable(binding_fn):
                 bind = np.asarray(binding_fn(X_, v), dtype=bool)
                 binding = float(np.mean(bind)) if bind.size else 0.0
-        except Exception as exc:
+        else:
             success = False
             status = "domain_error_at_solution"
-            message = f"{message} | diagnostics failed at solution: {exc}"
+            message = (
+                f"{message} | generator '{self.generator.name}' is undefined "
+                "at the reported solution"
+            )
+
 
         out = FitResult(
             beta=beta_hat,
@@ -503,12 +764,15 @@ class OutcomeGLM:
         max_iter: int = 500,
         tol: float = 1e-8,
         verbose: bool = False,
+        fit_basis: bool = True,
     ) -> FitResult:
         X_ = as_2d(X)
-        _ensure_basis_fitted(self.basis, X_)
+        y_ = as_1d_of_length(y, n=X_.shape[0], name="y")
+        _ensure_basis_fitted(self.basis, X_, y_, fit_basis=fit_basis)
         Phi = np.asarray(self.basis(X_), dtype=float)
         n, p = Phi.shape
-        y_ = as_1d_of_length(y, n=n, name="y")
+        if y_.shape[0] != n:
+            raise ValueError(f"y must have length {n}. Got {y_.shape}.")
 
         if theta0 is None:
             theta0_ = np.zeros(p, dtype=float)

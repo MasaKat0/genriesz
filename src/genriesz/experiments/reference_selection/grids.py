@@ -14,6 +14,7 @@ inside each job, so none of them multiplies the job count.
 from __future__ import annotations
 
 from .calibration import calibration_key, load_calibration
+from .candidates import CandidateSpec
 from .runner import ExperimentConfig, Numerics, Scenario
 
 #: Grid A: overlap sweep with a correctly approximable design.
@@ -110,51 +111,35 @@ def publication_grid(calibration: dict[str, float] | None = None) -> tuple[Scena
     return tuple(scenarios)
 
 
-def smoke_grid() -> tuple[Scenario, ...]:
-    """A two-scenario grid used by the tests and by the smoke tier."""
-
-    return (
-        Scenario(
-            grid="A",
-            design="low",
-            sample_size=400,
-            overlap_scale=1.5,
-            target_t=0.0,
-            hidden_scale=0.0,
-        ),
-        Scenario(
-            grid="B",
-            design="low",
-            sample_size=400,
-            overlap_scale=1.5,
-            target_t=1.0,
-            hidden_scale=1.0,
-        ),
-    )
-
-
 def experiment_config(
-    tier: str = "publication",
     *,
     name: str = "reference_selection",
     scenarios: tuple[Scenario, ...] | None = None,
     numerics: Numerics | None = None,
     batch_size: int = 20,
     max_workers: int | None = None,
+    replications_by_grid: dict[str, int] | None = None,
+    candidate_specs: tuple[CandidateSpec, ...] | None = None,
 ) -> ExperimentConfig:
-    """Build a configuration for a tier.
+    """Build the publication configuration or a test-specific configuration.
 
-    Only the replication count differs across tiers; the candidate library, the
-    selection rules, the designs, and the seed construction are identical.
+    The manuscript notebook calls this function without overriding the scenario
+    grid or replication counts. Unit tests may supply a small explicit scenario
+    set and matching replication counts; that does not define an alternative
+    experiment mode.
     """
 
-    if scenarios is None:
-        scenarios = smoke_grid() if tier == "smoke" else publication_grid()
+    selected_scenarios = publication_grid() if scenarios is None else scenarios
+    kwargs: dict[str, object] = {}
+    if replications_by_grid is not None:
+        kwargs["replications_by_grid"] = replications_by_grid
+    if candidate_specs is not None:
+        kwargs["candidate_specs"] = candidate_specs
     return ExperimentConfig(
         name=name,
-        tier=tier,
-        scenarios=scenarios,
+        scenarios=selected_scenarios,
         numerics=numerics or Numerics(),
         batch_size=batch_size,
         max_workers=max_workers,
+        **kwargs,
     )

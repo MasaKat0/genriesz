@@ -23,7 +23,6 @@ from genriesz.generators import (
     BKLGenerator,
     BPGenerator,
     BregmanGenerator,
-    DomainError,
     SquaredGenerator,
     UKLGenerator,
 )
@@ -34,8 +33,8 @@ from .dgp import Design, FloatArray
 Dictionary = Literal["linear", "second_order", "rich"]
 Loss = Literal["SQ", "UKL", "BKL", "BP"]
 
-#: Gradient infinity-norm above which a converged fit is still rejected.
-GRADIENT_TOLERANCE = 1e-2
+#: KKT residual above which a converged fit is rejected.
+KKT_TOLERANCE = 1e-2
 
 
 class ScaledGenerator(BregmanGenerator):
@@ -71,6 +70,18 @@ class ScaledGenerator(BregmanGenerator):
 
     def inv_grad(self, X, v):  # type: ignore[override]
         return self.inner.inv_grad(X, np.asarray(v, dtype=float) / self.kappa)
+
+    def dual_domain_mask(self, X, v):  # type: ignore[override]
+        return self.inner.dual_domain_mask(X, np.asarray(v, dtype=float) / self.kappa)
+
+    def signed_dual_interval(  # type: ignore[override]
+        self, *, margin: float
+    ) -> tuple[float, float, float] | None:
+        interval = self.inner.signed_dual_interval(margin=float(margin) / self.kappa)
+        if interval is None:
+            return None
+        lower, upper, target = interval
+        return self.kappa * lower, self.kappa * upper, self.kappa * target
 
     def domain_binding(self, X, v):  # type: ignore[override]
         return self.inner.domain_binding(X, np.asarray(v, dtype=float) / self.kappa)
@@ -324,7 +335,7 @@ def fit_candidate_beta(
     *,
     max_iter: int,
     tolerance: float,
-    gradient_tolerance: float = GRADIENT_TOLERANCE,
+    kkt_tolerance: float = KKT_TOLERANCE,
 ) -> RepresenterFit:
     """Fit one candidate on a pre-built, already standardized basis."""
 
@@ -338,8 +349,11 @@ def fit_candidate_beta(
         lam=lam,
         p_norm=1.0,
     )
-    fit = model.fit(X_train, max_iter=max_iter, tol=tolerance)
+    fit = model.fit(
+        X_train, max_iter=max_iter, tol=tolerance, fit_basis=False
+    )
     gradient = float(fit.gradient_norm)
+    kkt = float(fit.kkt_residual)
     binding = float(fit.clip_binding_rate)
     if not np.isfinite(binding):
         # A generator without a domain clip never reports a rate. Treat the
@@ -352,8 +366,8 @@ def fit_candidate_beta(
         fit.success
         and beta is not None
         and np.all(np.isfinite(beta))
-        and np.isfinite(gradient)
-        and gradient <= gradient_tolerance
+        and np.isfinite(kkt)
+        and kkt <= kkt_tolerance
         and binding_ok
     )
     status = fit.status if not fit.success else (fit.status if ok else "diagnostic_failure")
@@ -364,7 +378,7 @@ def fit_candidate_beta(
         status=status,
         objective=float(fit.objective_value),
         gradient_norm=gradient,
-        kkt_residual=float(fit.kkt_residual),
+        kkt_residual=kkt,
         binding_rate=binding,
     )
 
@@ -372,8 +386,8 @@ def fit_candidate_beta(
 class FoldLibrary:
     """The ninety fitted candidates of one fold, with shared dictionaries.
 
-    Every selection rule in :mod:`refsel.selection` reads this object, so adding
-    a rule costs no additional fitting.
+    Every selection rule in :mod:`genriesz.experiments.reference_selection.selection` reads
+    this object, so adding a rule costs no additional fitting.
     """
 
     def __init__(
@@ -383,7 +397,7 @@ class FoldLibrary:
         *,
         max_iter: int,
         tolerance: float,
-        gradient_tolerance: float = GRADIENT_TOLERANCE,
+        kkt_tolerance: float = KKT_TOLERANCE,
     ):
         self.specs = tuple(specs)
         self.bases: dict[Dictionary, ExperimentBasis] = {}
@@ -410,7 +424,7 @@ class FoldLibrary:
                 generator,
                 max_iter=max_iter,
                 tolerance=tolerance,
-                gradient_tolerance=gradient_tolerance,
+                kkt_tolerance=kkt_tolerance,
             )
             for spec, generator in zip(self.specs, self.generators, strict=True)
         )
@@ -449,19 +463,12 @@ class FoldLibrary:
             yield
 
     def _safe_inv_grad(self, index: int, X: FloatArray, v: FloatArray) -> FloatArray | None:
-        """Evaluate one candidate's link, returning ``None`` on a domain error.
+        """Evaluate one candidate's exact link and return ``None`` when invalid."""
 
-        ``BKLGenerator.inv_grad`` raises rather than clipping when the linear
-        predictor leaves its domain, and the forced-branch evaluations used by
-        the squared held-out risk make that likely. This is an expected numerical
-        status, not a programming error, so it is recorded as a missing value
-        instead of aborting the batch.
-        """
-
-        try:
-            alpha = np.asarray(self.generators[index].inv_grad(X, v), dtype=float)
-        except DomainError:
+        evaluation = self.generators[index].inv_grad_status(X, v)
+        if not np.all(evaluation.valid):
             return None
+        alpha = np.asarray(evaluation.values, dtype=float)
         return alpha if np.all(np.isfinite(alpha)) else None
 
     def _linear_predictors(
@@ -516,11 +523,12 @@ class FoldLibrary:
                     fit = self.fits[j]
                     if not fit.success or fit.beta is None:
                         continue
-                    try:
-                        g_star, _ = self.generators[j].conjugate(X, V[:, i])
-                    except DomainError:
+                    evaluation = self.generators[j].conjugate_status(X, V[:, i])
+                    if not np.all(evaluation.valid):
                         continue
-                    value = float(np.mean(np.asarray(g_star, dtype=float) - M @ fit.beta))
+                    value = float(
+                        np.mean(np.asarray(evaluation.conjugate, dtype=float) - M @ fit.beta)
+                    )
                     out[j] = value if np.isfinite(value) else np.nan
         return out
 

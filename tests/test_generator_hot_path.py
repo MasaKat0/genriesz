@@ -9,13 +9,10 @@ constant while ``v`` changes on every L-BFGS ``fun``/``jac`` call. The old
 called ``branch_fn`` 24,000 times. ``BregmanGenerator.branch_cache()`` memoizes
 the signs for the duration of a fit, taking that to exactly ``n``.
 
-**W-2: a data-dependent exception permanently demoted a vectorized callable.**
-``_RowwiseScalarFn`` probed the vectorized call inside ``except Exception`` and,
-on *any* failure, set ``_vectorized = False`` forever. A generator that raises
-:class:`DomainError` on a bad ``alpha`` is still vectorized; demoting it turned
-every later evaluation into a Python loop. The probe now distinguishes the two
-causes by *retrying the same inputs rowwise*: if rowwise also fails, the data was
-bad and the error propagates with the verdict left undecided.
+**W-2: custom generator callables have an explicit scalar contract.**
+``_RowwiseScalarFn`` accepts ``f(alpha)`` or ``f(x, alpha)`` and evaluates the
+callable once per observation. It does not probe a vectorized call and does not
+change execution paths after an exception.
 
 Both fixes are output-invariant;
 ``test_fit_results_are_bit_identical_with_and_without_the_cache`` pins that by
@@ -237,134 +234,72 @@ def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monk
 
 
 # ---------------------------------------------------------------------------
-# W-2: the vectorization probe separates "bad signature" from "bad data".
+# W-2: custom generator callables are evaluated row by row without probing.
 # ---------------------------------------------------------------------------
-def _vectorized_with_domain(a):
-    """Vectorized, and rejects alpha < 0 -- as a real generator would."""
-
-    arr = np.asarray(a, dtype=float)
-    if np.any(arr < 0.0):
+def _scalar_with_domain(a):
+    if a < 0.0:
         raise DomainError("alpha must be nonnegative")
-    return arr * arr
+    return a * a
 
 
 def _scalar_only(a):
-    """Cannot take an array: math.exp raises TypeError on ndarray."""
-
     return math.log1p(math.exp(-abs(a)))
 
 
-def test_scalar_only_callable_degrades_to_rowwise():
-    fn = _RowwiseScalarFn(_scalar_only)
+def test_scalar_callable_is_evaluated_rowwise():
+    calls = {"n": 0}
+
+    def scalar(a):
+        calls["n"] += 1
+        return a * a
+
+    fn = _RowwiseScalarFn(scalar)
     X = np.zeros((4, 2))
     out = fn(X, np.array([0.5, 1.0, 1.5, 2.0]))
 
     assert fn._vectorized is False
-    assert np.allclose(out, [_scalar_only(a) for a in (0.5, 1.0, 1.5, 2.0)])
+    assert calls["n"] == 4
+    assert np.allclose(out, [0.25, 1.0, 2.25, 4.0])
 
 
-def test_domain_error_does_not_demote_a_vectorized_callable():
-    """The regression: a bad alpha must not cost O(n) Python calls forever."""
-
-    fn = _RowwiseScalarFn(_vectorized_with_domain)
+def test_domain_error_propagates_without_changing_the_execution_path():
+    fn = _RowwiseScalarFn(_scalar_with_domain)
     X = np.zeros((3, 2))
-
-    assert np.allclose(fn(X, np.array([1.0, 2.0, 3.0])), [1.0, 4.0, 9.0])
-    assert fn._vectorized is True
 
     with pytest.raises(DomainError):
         fn(X, np.array([1.0, -2.0, 3.0]))
-
-    # Still vectorized: the failure was the data, not the signature.
-    assert fn._vectorized is True
+    assert fn._vectorized is False
     assert np.allclose(fn(X, np.array([2.0, 2.0, 2.0])), [4.0, 4.0, 4.0])
 
 
-def test_domain_error_on_the_very_first_call_leaves_the_verdict_undecided():
-    fn = _RowwiseScalarFn(_vectorized_with_domain)
-    X = np.zeros((3, 2))
-
-    with pytest.raises(DomainError):
-        fn(X, np.array([-1.0, -2.0, -3.0]))
-    # Not demoted to rowwise on the strength of one bad batch.
-    assert fn._vectorized is None
-
-    assert np.allclose(fn(X, np.array([1.0, 2.0, 3.0])), [1.0, 4.0, 9.0])
-    assert fn._vectorized is True
-
-
-def test_single_row_call_does_not_decide_vectorization():
-    """One row cannot separate "returns a scalar" from "returns one per row"."""
-
-    fn = _RowwiseScalarFn(lambda a: 7.0)  # constant: looks vectorized at n = 1
-    out = fn(np.zeros((1, 2)), np.array([3.0]))
-
-    assert fn._vectorized is None
-    assert np.allclose(out, [7.0])
-
-    # With two rows the constant is exposed and the callable goes rowwise.
-    out2 = fn(np.zeros((2, 2)), np.array([3.0, 4.0]))
-    assert fn._vectorized is False
-    assert np.allclose(out2, [7.0, 7.0])
-
-
-def test_single_row_call_still_serves_a_vectorized_only_callable():
-    """Undecided must not mean "rowwise": a vectorized-only f(X, a) has no
-    rowwise form, and used to work at n = 1."""
-
+def test_vectorized_only_callable_is_outside_the_scalar_contract():
     fn = _RowwiseScalarFn(lambda Xv, av: Xv[:, 0] + av)
-    out = fn(np.ones((1, 2)), np.array([2.0]))
-
-    assert np.allclose(out, [3.0])
-    assert fn._vectorized is None  # one row still decides nothing
-
-    # Two rows: now the verdict is recorded and the vectorized path is used.
-    assert np.allclose(fn(np.ones((2, 2)), np.array([2.0, 3.0])), [3.0, 4.0])
-    assert fn._vectorized is True
+    with pytest.raises(IndexError):
+        fn(np.ones((2, 2)), np.array([2.0, 3.0]))
+    assert fn._vectorized is False
 
 
-def test_empty_input_is_handled_without_deciding():
-    fn = _RowwiseScalarFn(lambda a: np.asarray(a, dtype=float) ** 2)
-    out = fn(np.zeros((0, 2)), np.zeros(0))
-
-    assert out.shape == (0,)
-    assert fn._vectorized is None
-
-
-def test_vectorized_callable_is_used_without_a_python_loop():
-    calls = {"n": 0}
-
-    def g(a):
-        calls["n"] += 1
-        return np.asarray(a, dtype=float) ** 2
-
-    fn = _RowwiseScalarFn(g)
-    fn(np.zeros((100, 2)), np.arange(100.0))
-    # One probe (2 rows) plus one full vectorized call -- not 100 calls.
-    assert calls["n"] == 2
-    assert fn._vectorized is True
+def test_single_row_and_empty_inputs_keep_the_rowwise_contract():
+    fn = _RowwiseScalarFn(lambda a: 7.0)
+    assert np.allclose(fn(np.zeros((1, 2)), np.array([3.0])), [7.0])
+    assert fn(np.zeros((0, 2)), np.zeros(0)).shape == (0,)
+    assert fn._vectorized is False
 
 
-def test_custom_generator_with_a_scalar_g_matches_its_closed_form():
-    """End-to-end: the rowwise path stays correct after the probe change.
-
-    ``g(alpha) = alpha^2`` has link ``alpha = v / 2``; the generic generator
-    reaches it by finite differences and Newton, so this exercises ``g`` through
-    ``_RowwiseScalarFn`` many times over.
-    """
-
+def test_custom_generator_with_explicit_derivatives_matches_closed_form():
     X = _make_ate(n=120, seed=4)
     v = np.linspace(-1.0, 1.0, len(X))
 
-    # math.pow refuses an ndarray, so this g really is scalar-only. (`a * a`
-    # would not be: numpy broadcasts it.)
-    scalar = BregmanGenerator(g=lambda a: math.pow(a, 2.0), name="scalar-g")
-    vector = BregmanGenerator(g=lambda a: np.asarray(a, dtype=float) ** 2, name="vector-g")
+    generator = BregmanGenerator(
+        g=lambda a: math.pow(a, 2.0),
+        grad=lambda a: 2.0 * a,
+        inv_grad=lambda value: 0.5 * value,
+        grad2=lambda _a: 2.0,
+        name="scalar-g",
+    )
+    alpha = generator.inv_grad(X, v)
 
-    alpha_scalar = scalar.inv_grad(X, v)
-    alpha_vector = vector.inv_grad(X, v)
-
-    assert scalar._g._vectorized is False
-    assert vector._g._vectorized is True
-    assert np.allclose(alpha_scalar, v / 2.0, atol=1e-6)
-    assert np.allclose(alpha_scalar, alpha_vector, atol=1e-9)
+    assert generator._g._vectorized is False
+    assert np.allclose(alpha, v / 2.0, atol=0.0)
+    assert np.allclose(generator.grad(X, alpha), 2.0 * alpha, atol=0.0)
+    assert np.allclose(generator.grad2(X, alpha), 2.0, atol=0.0)

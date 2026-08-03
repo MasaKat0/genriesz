@@ -336,20 +336,17 @@ You can also define a completely custom generator:
 Custom generator call signatures
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A custom generator can be regressor-dependent:
+A custom generator can be regressor-dependent. It must provide all four
+rowwise scalar functions:
 
 - ``g(x, alpha)``
-- optional: ``grad_g(x, alpha)`` (first derivative w.r.t. ``alpha``)
-- optional: ``inv_grad_g(x, v)``  (inverse derivative map)
-- optional: ``grad2_g(x, alpha)`` (second derivative w.r.t. ``alpha``)
+- ``grad_g(x, alpha)`` (first derivative with respect to ``alpha``)
+- ``inv_grad_g(x, v)`` (exact inverse derivative map)
+- ``grad2_g(x, alpha)`` (second derivative with respect to ``alpha``)
 
-If derivatives are omitted, the package falls back to finite differences and a
-Newton solver.
-
-.. important::
-
-   For speed and numerical stability, providing ``inv_grad_g`` (and ideally
-   ``grad_g`` and ``grad2_g``) is strongly recommended for custom generators.
+The package does not replace a missing derivative with finite differences and
+does not construct an inverse link with a numerical root solver. The four
+functions therefore define the custom fitting specification.
 
 Branch functions for UKL and BP
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -364,9 +361,10 @@ for control in ATE/ATT/DID), pass a ``branch_fn`` to avoid ambiguity:
    branch = lambda x: int(x[0] == 1.0)   # 1 = positive branch (treated), 0 = negative
    gen    = UKLGenerator(C=1.0, branch_fn=branch).as_generator()
 
-Without ``branch_fn``, :math:`\text{sign}(v)` is used, which is correct only when
-:math:`|\alpha| > C + 1`.  A :class:`UserWarning` is raised if ``branch_fn`` is
-omitted.
+``branch_fn`` is required for the branchwise generators (UKL, BKL, BP, PU):
+constructing them without it raises a :class:`ValueError`, because the
+representer branch must be fixed by the estimand rather than inferred from the
+fitted value.
 
 
 Estimators, cross fitting, and outcome models
@@ -460,21 +458,17 @@ behaviour:
    )
    print(res.diagnostics["riesz_cv"]["selected"])   # per-fold sigma/lambda/centers
 
-The inner CV is a **strict nested** CV by default (``riesz_strict_nested=True``):
-inside each inner fold the standardization, the ``"auto"`` bandwidth median
-heuristic and the kernel-center pool are all fit on that fold's *inner-training*
-rows only, so no inner-validation observation ever enters the feature map that
-scores it.  The selected candidate is then refit on the whole outer-training fold
-(its bandwidth reported at the outer-training median, its centers reselected from
-the outer-training rows).  Set ``riesz_strict_nested=False`` for the cheaper
-*outer-fixed feature map*, which fits the centers and median heuristic once on the
-whole outer-training fold and shares them across the inner folds — faster, but it
-leaks each inner fold's validation rows into its own scoring feature map; the
-choice is recorded on :attr:`genriesz.GRRCVResult.strict_nested`.  The guarantee
-covers the CV-selected centers and the standardization / median heuristic; *fixed*
-centers you pass explicitly on the basis (``GaussianRKHSBasis(centers=...)``) are
-your own choice and are used as given when ``riesz_n_centers_grid`` is not
-cross-validated.
+The inner CV is strictly nested. Inside each inner fold, standardization,
+the ``"auto"`` bandwidth median heuristic, and the kernel-center pool are fit
+only on that fold's *inner-training* rows. No inner-validation observation enters
+the feature map used to score it. The selected candidate is then refit on the
+whole outer-training fold, where its bandwidth and centers are recomputed from
+those rows. The argument covers centers selected by CV and the standardization
+and median heuristic. Fixed centers supplied explicitly through
+``GaussianRKHSBasis(centers=...)`` remain the user's specification when
+``riesz_n_centers_grid`` is not cross-validated. The compatibility argument
+``riesz_strict_nested=False`` is rejected because it would use inner-validation
+rows to construct their own scoring map.
 
 Selection is two-stage.  A candidate must first pass an **admissibility screen**
 (optimizer success, an effective-sample-size floor, a scale-free *kernel-health
@@ -485,13 +479,11 @@ nor any true nuisance is used for selection.
 The ``"auto"`` bandwidth anchor is measured in the basis's own coordinate
 system: standardized features for a standardizing basis (the default), raw
 features for ``GaussianRKHSBasis(standardize=False)``.
-If *no* candidate passes the screen, the selection **stops with an error** by
-default — an inadmissible candidate's criterion is not trustworthy (a saturated
-kernel scores near zero while estimating nothing).  Pass
-``riesz_fallback_policy="best_criterion"`` to accept the best fitted candidate
-anyway; the per-fold entries of ``diagnostics["riesz_cv"]["selected"]`` then
-record ``used_fallback``, the reason, and the thresholds the chosen candidate
-violates.
+If *no* candidate passes the screen, selection stops with an error. An
+inadmissible candidate is not substituted for the missing selection because its
+criterion need not measure the target risk; for example, a saturated kernel can
+have a small validation criterion while estimating an almost constant function.
+The diagnostics retain every candidate's fit status and violated thresholds.
 ``riesz_sigma_grid``/``riesz_n_centers_grid`` require a kernel basis
 with ``copy_with_params`` (e.g. :class:`~genriesz.GaussianRKHSBasis`); with any
 other basis you can still cross-validate ``riesz_lam_grid`` alone.

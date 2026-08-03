@@ -63,7 +63,13 @@ def test_custom_bregman_generator_quadratic_link_matches_identity():
     psi = PolynomialBasis(degree=1, include_bias=True)
     basis = TreatmentInteractionBasis(base_basis=psi, treatment_index=0)
 
-    gen = BregmanGenerator(g=g, grad=grad, inv_grad=inv_grad, name="quad")
+    gen = BregmanGenerator(
+        g=g,
+        grad=grad,
+        inv_grad=inv_grad,
+        grad2=lambda _x, _a: 1.0,
+        name="quad",
+    )
 
     model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
     model.fit(X, max_iter=150, tol=1e-9)
@@ -265,34 +271,12 @@ def test_singular_closed_form_fails_even_when_numpy_solve_does_not_raise():
     assert res.status == "singular"
 
 
-def test_domain_violation_yields_explicit_failure_not_silent_success():
-    # A generator with a bounded domain and no analytic inv_grad: starting
-    # far outside the domain used to return success=True with beta unchanged
-    # (zero gradient was reported at the infeasible start).
+def test_custom_generator_requires_exact_derivatives_at_construction():
     def g_dom(a: float) -> float:
-        if abs(a) >= 1.0:
-            return float("nan")
         return -float(np.log(1.0 - a * a))
 
-    X = _make_synthetic_ate(n=60, d_z=2, seed=5)
-    m = ATEFunctional(treatment_index=0)
-    basis = TreatmentInteractionBasis(
-        base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
-    ).fit(X)
-    gen = BregmanGenerator(g=g_dom, name="bounded-domain")
-    model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
-
-    bad_start = np.full(basis.n_features, 50.0)
-    res = model.fit(X, beta0=bad_start)
-
-    assert not res.success
-    assert res.status == "domain_error"
-
-    # Same contract as the singular closed form: a fit that never produced a
-    # solution must not leave a predictable state behind.
-    assert model.beta_ is None
-    with pytest.raises(RuntimeError, match="not fit"):
-        model.predict_alpha(X)
+    with pytest.raises(ValueError, match="requires explicit grad, inv_grad, grad2"):
+        BregmanGenerator(g=g_dom, name="bounded-domain")
 
 
 def test_all_zero_functional_matrix_is_a_loud_failure_not_a_zero_fit():

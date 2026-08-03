@@ -1,12 +1,13 @@
 PYTHON ?= python3
+TEST_ENV ?= OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1
 
 .PHONY: lint test verify notebooks-strip notebooks-check large-files-check install-hooks
 
 lint:
-	ruff check src tests tools notebooks/experiments/refsel notebooks/experiments/pilots
+	ruff check src tests tools
 
 test:
-	$(PYTHON) -m pytest tests/ -q
+	$(TEST_ENV) PYTHONPATH=src $(PYTHON) -m pytest tests/ -q
 
 # Drop the NumPy RuntimeWarning spam that notebook re-runs write into stderr
 # outputs. Run this after re-executing notebooks/experiments/.

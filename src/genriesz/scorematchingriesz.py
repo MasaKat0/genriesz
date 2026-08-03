@@ -23,38 +23,22 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
 
 from .utils import kfold_splits
 
-try:  # optional dependency
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-    from torch import Tensor
-except Exception as exc:  # pragma: no cover - exercised only without optional dependency
-    torch = None  # type: ignore[assignment]
-    nn = None  # type: ignore[assignment]
-    F = None  # type: ignore[assignment]
-    Tensor = object  # type: ignore[assignment,misc]
-    _TORCH_IMPORT_ERROR = exc
-else:
-    _TORCH_IMPORT_ERROR = None
-
 
 def _torch_no_grad():
-    if torch is None:
-        def decorator(func):
-            return func
-        return decorator
     return torch.no_grad()
 
 
 def _require_torch() -> None:
-    if torch is None:  # pragma: no cover
-        raise ImportError(
-            "genriesz.scorematchingriesz requires PyTorch. "
-            "Install it with `pip install -e .[scorematchingriesz]`."
-        ) from _TORCH_IMPORT_ERROR
+    """Retained for API-local readability; importing this module requires PyTorch."""
+
+    return None
 
 
 def _as_2d_float_array(x: np.ndarray | Sequence[Sequence[float]], *, name: str) -> np.ndarray:
@@ -92,10 +76,9 @@ def set_seed(seed: int = 0) -> None:
 
     random.seed(int(seed))
     np.random.seed(int(seed))
-    if torch is not None:
-        torch.manual_seed(int(seed))
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(int(seed))
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 def _seed_torch(seed: int) -> None:
@@ -110,232 +93,200 @@ def _seed_torch(seed: int) -> None:
     the RNGs the fits actually use.
     """
 
-    if torch is not None:
-        torch.default_generator.manual_seed(int(seed))
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(int(seed))
+    torch.default_generator.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
 
 
 def _keeps_global_torch_rng(fit_fn):
-    """Run a fit with the CPU and CUDA PyTorch RNGs saved on entry, restored on exit.
-
-    The fit functions seed the torch RNG (via :func:`_seed_torch`) so their
-    output is reproducible from ``seed`` alone. Without this wrapper that seeding
-    would also leave the caller's *global* torch RNG mutated on return: every fit
-    would reset it to ``seed`` and then advance it by however many draws training
-    consumed. Saving the state before the fit and restoring it afterwards keeps
-    the seeding local -- the fit's weight init and every batch draw are
-    byte-for-byte identical, but the caller's global torch RNG is untouched, just
-    as the fit functions already leave the global NumPy and Python RNGs untouched.
-
-    Only the CPU and CUDA RNGs are saved and restored; that is sufficient because
-    :func:`_seed_torch` seeds only those (never MPS/XPU) and the fits only ever
-    run on CPU or CUDA (:func:`get_device`). If ``_seed_torch`` is ever changed to
-    seed another accelerator, that device's state must be saved and restored here
-    too, or the fit would leak it.
-    """
+    """Run a fit without changing the caller's CPU or CUDA PyTorch RNG state."""
 
     @functools.wraps(fit_fn)
     def wrapper(*args, **kwargs):
-        if torch is None:
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        with torch.random.fork_rng(devices=devices, enabled=True):
             return fit_fn(*args, **kwargs)
-        cpu_state = torch.get_rng_state()
-        cuda_states = (
-            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-        )
-        try:
-            return fit_fn(*args, **kwargs)
-        finally:
-            torch.set_rng_state(cpu_state)
-            if cuda_states is not None:
-                torch.cuda.set_rng_state_all(cuda_states)
 
     return wrapper
 
 
-if torch is not None:
 
-    class MLP(nn.Module):
-        """Small fully connected network used by the score models."""
+class MLP(nn.Module):
+    """Small fully connected network used by the score models."""
 
-        def __init__(
-            self,
-            in_dim: int,
-            out_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            dims = [int(in_dim), *[int(h) for h in hidden_dims], int(out_dim)]
-            layers: list[nn.Module] = []
-            for i in range(len(dims) - 2):
-                layers.append(nn.Linear(dims[i], dims[i + 1]))
-                if layer_norm:
-                    layers.append(nn.LayerNorm(dims[i + 1]))
-                layers.append(nn.SiLU())
-            layers.append(nn.Linear(dims[-2], dims[-1]))
-            self.net = nn.Sequential(*layers)
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        dims = [int(in_dim), *[int(h) for h in hidden_dims], int(out_dim)]
+        layers: list[nn.Module] = []
+        for i in range(len(dims) - 2):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if layer_norm:
+                layers.append(nn.LayerNorm(dims[i + 1]))
+            layers.append(nn.SiLU())
+        layers.append(nn.Linear(dims[-2], dims[-1]))
+        self.net = nn.Sequential(*layers)
 
-        def forward(self, x: Tensor) -> Tensor:
-            return self.net(x)
-
-
-    class TimeEmbedding(nn.Module):
-        """Fourier embedding for scalar bridge time ``t``."""
-
-        def __init__(self, emb_dim: int = 32, max_freq: int = 10) -> None:
-            super().__init__()
-            if emb_dim % 2 != 0:
-                raise ValueError("emb_dim must be even.")
-            freqs = torch.linspace(1.0, float(max_freq), emb_dim // 2)
-            self.register_buffer("freqs", freqs)
-
-        def forward(self, t: Tensor) -> Tensor:
-            tt = t * self.freqs.view(1, -1) * 2.0 * math.pi
-            return torch.cat([torch.sin(tt), torch.cos(tt)], dim=1)
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
 
 
-    class TimeScoreNet(nn.Module):
-        """Time-score network ``s_t(x,t)`` for DRE-infinity."""
+class TimeEmbedding(nn.Module):
+    """Fourier embedding for scalar bridge time ``t``."""
 
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            t_emb_dim: int = 32,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
-            self.net = MLP(
-                in_dim=int(x_dim) + int(t_emb_dim),
-                out_dim=1,
-                hidden_dims=hidden_dims,
-                layer_norm=layer_norm,
-            )
+    def __init__(self, emb_dim: int = 32, max_freq: int = 10) -> None:
+        super().__init__()
+        if emb_dim % 2 != 0:
+            raise ValueError("emb_dim must be even.")
+        freqs = torch.linspace(1.0, float(max_freq), emb_dim // 2)
+        self.register_buffer("freqs", freqs)
 
-        def forward(self, x: Tensor, t: Tensor) -> Tensor:
-            return self.net(torch.cat([x, self.t_embed(t)], dim=1))
+    def forward(self, t: Tensor) -> Tensor:
+        tt = t * self.freqs.view(1, -1) * 2.0 * math.pi
+        return torch.cat([torch.sin(tt), torch.cos(tt)], dim=1)
 
 
-    class JointScoreNet(nn.Module):
-        """Joint data-score and time-score network.
+class TimeScoreNet(nn.Module):
+    """Time-score network ``s_t(x,t)`` for DRE-infinity."""
 
-        ``forward`` returns ``(s_x(x,t), s_t(x,t))``.
-        """
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        t_emb_dim: int = 32,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
+        self.net = MLP(
+            in_dim=int(x_dim) + int(t_emb_dim),
+            out_dim=1,
+            hidden_dims=hidden_dims,
+            layer_norm=layer_norm,
+        )
 
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            t_emb_dim: int = 32,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
-            in_dim = int(x_dim) + int(t_emb_dim)
-            self.data_net = MLP(
-                in_dim=in_dim, out_dim=int(x_dim), hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
-            self.time_net = MLP(
-                in_dim=in_dim, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
-
-        def forward(self, x: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
-            inp = torch.cat([x, self.t_embed(t)], dim=1)
-            return self.data_net(inp), self.time_net(inp)
+    def forward(self, x: Tensor, t: Tensor) -> Tensor:
+        return self.net(torch.cat([x, self.t_embed(t)], dim=1))
 
 
-    class DataScoreDNet(nn.Module):
-        """Denoising score matching network for one coordinate score."""
+class JointScoreNet(nn.Module):
+    """Joint data-score and time-score network.
 
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.treatment_index: int = 0
-            self.net = MLP(
-                in_dim=int(x_dim) + 1, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
+    ``forward`` returns ``(s_x(x,t), s_t(x,t))``.
+    """
 
-        def forward(self, x: Tensor, sigma: Tensor) -> Tensor:
-            return self.net(torch.cat([x, sigma], dim=1))
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        t_emb_dim: int = 32,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.t_embed = TimeEmbedding(emb_dim=t_emb_dim)
+        in_dim = int(x_dim) + int(t_emb_dim)
+        self.data_net = MLP(
+            in_dim=in_dim, out_dim=int(x_dim), hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
+        self.time_net = MLP(
+            in_dim=in_dim, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
 
-
-    class ScalarNet(nn.Module):
-        """Scalar network used for AME Riesz-regression baselines."""
-
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.net = MLP(
-                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
-
-        def forward(self, x: Tensor) -> Tensor:
-            return self.net(x)
+    def forward(self, x: Tensor, t: Tensor) -> tuple[Tensor, Tensor]:
+        inp = torch.cat([x, self.t_embed(t)], dim=1)
+        return self.data_net(inp), self.time_net(inp)
 
 
-    class RatioNet(nn.Module):
-        """Scalar network used for direct density-ratio baselines."""
+class DataScoreDNet(nn.Module):
+    """Denoising score matching network for one coordinate score."""
 
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.objective: str = ""
-            self.net = MLP(
-                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.treatment_index: int = 0
+        self.net = MLP(
+            in_dim=int(x_dim) + 1, out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
 
-        def forward(self, x: Tensor) -> Tensor:
-            return self.net(x)
+    def forward(self, x: Tensor, sigma: Tensor) -> Tensor:
+        return self.net(torch.cat([x, sigma], dim=1))
 
 
-    class OutcomeNet(nn.Module):
-        """Outcome regression network."""
+class ScalarNet(nn.Module):
+    """Scalar network used for AME Riesz-regression baselines."""
 
-        def __init__(
-            self,
-            x_dim: int,
-            hidden_dims: Sequence[int] = (256, 256, 256),
-            *,
-            layer_norm: bool = False,
-        ) -> None:
-            super().__init__()
-            self.loss_history: list[float] = []
-            self.net = MLP(
-                in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
-            )
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.net = MLP(
+            in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
 
-        def forward(self, x: Tensor) -> Tensor:
-            return self.net(x)
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
 
-else:  # pragma: no cover
-    MLP = TimeEmbedding = TimeScoreNet = JointScoreNet = None  # type: ignore[misc,assignment]
-    DataScoreDNet = ScalarNet = RatioNet = OutcomeNet = None  # type: ignore[misc,assignment]
 
+class RatioNet(nn.Module):
+    """Scalar network used for direct density-ratio baselines."""
+
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.objective: str = ""
+        self.net = MLP(
+            in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
+
+
+class OutcomeNet(nn.Module):
+    """Outcome regression network."""
+
+    def __init__(
+        self,
+        x_dim: int,
+        hidden_dims: Sequence[int] = (256, 256, 256),
+        *,
+        layer_norm: bool = False,
+    ) -> None:
+        super().__init__()
+        self.loss_history: list[float] = []
+        self.net = MLP(
+            in_dim=int(x_dim), out_dim=1, hidden_dims=hidden_dims, layer_norm=layer_norm
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.net(x)
 
 @dataclass(frozen=True)
 class PointEstimate:

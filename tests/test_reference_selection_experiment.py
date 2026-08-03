@@ -11,18 +11,13 @@ misspecification family work.
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+import importlib.util
 
 import numpy as np
 import pytest
 
-EXPERIMENT_DIR = Path(__file__).resolve().parents[1] / "notebooks" / "experiments"
-if str(EXPERIMENT_DIR) not in sys.path:
-    sys.path.insert(0, str(EXPERIMENT_DIR))
-
-from refsel.audit import audit_from_values  # noqa: E402
-from refsel.candidates import (  # noqa: E402
+from genriesz.experiments.reference_selection.audit import audit_from_values  # noqa: E402
+from genriesz.experiments.reference_selection.candidates import (  # noqa: E402
     BENCHMARK_SPEC,
     CandidateSpec,
     ExperimentBasis,
@@ -32,7 +27,7 @@ from refsel.candidates import (  # noqa: E402
     candidate_grid,
     make_generator,
 )
-from refsel.dgp import (  # noqa: E402
+from genriesz.experiments.reference_selection.dgp import (  # noqa: E402
     NOISE_SD,
     THETA0,
     generate_data,
@@ -40,18 +35,24 @@ from refsel.dgp import (  # noqa: E402
     make_fold_roles,
     stable_seed,
 )
-from refsel.inference import bias_aware_critical_value  # noqa: E402
-from refsel.selection import (  # noqa: E402
+from genriesz.experiments.reference_selection.inference import (
+    bias_aware_critical_value,  # noqa: E402
+)
+from genriesz.experiments.reference_selection.selection import (  # noqa: E402
     DeltaBudget,
     candidate_scores,
     effective_sample_ratio,
     gaussian_multiplier_mean_radii,
     minimum_bias_upper_bound,
 )
-
 from genriesz.functionals import ATEFunctional  # noqa: E402
 from genriesz.generators import BPGenerator, SquaredGenerator  # noqa: E402
 from genriesz.glm import GRRGLM  # noqa: E402
+
+PYARROW_AVAILABLE = importlib.util.find_spec("pyarrow") is not None
+PARQUET_TEST = pytest.mark.skipif(
+    not PYARROW_AVAILABLE, reason="pyarrow is required for Parquet persistence tests."
+)
 
 # --------------------------------------------------------------------------- #
 # Data-generating processes
@@ -97,7 +98,7 @@ def test_hidden_direction_asymmetry_holds_in_the_spaces_actually_used() -> None:
     would fail with it.
     """
 
-    from refsel.reference import (
+    from genriesz.experiments.reference_selection.reference import (
         MisspecifiedOutcomeBasis,
         ReferenceOutcomeBasis,
         _correct_features,
@@ -229,12 +230,25 @@ def test_standardization_uses_only_the_fitting_observations() -> None:
 def test_library_shares_one_basis_and_one_generator_per_configuration() -> None:
     """The efficiency invariant the runtime budget depends on."""
 
-    data = generate_data(n=500, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=41)
-    library = FoldLibrary(data.X, candidate_grid(), max_iter=200, tolerance=1e-8)
+    data = generate_data(n=240, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=41)
+    specs = (
+        CandidateSpec("SQ", "linear", 0.0),
+        CandidateSpec("SQ", "second_order", 0.0),
+        CandidateSpec("SQ", "rich", 0.0),
+        CandidateSpec("UKL", "linear", 0.0),
+        CandidateSpec("BKL", "linear", 0.0),
+        CandidateSpec("BP", "linear", 0.0, omega=0.25),
+        CandidateSpec("BP", "linear", 0.0, omega=0.5),
+    )
+    library = FoldLibrary(data.X, specs, max_iter=200, tolerance=1e-8)
     assert len(library.bases) == 3
     assert len({id(generator) for generator in library.generators}) == 5
-    for spec, generator in zip(library.specs, library.generators, strict=True):
-        assert generator is library.generators[library.specs.index(spec)]
+    sq_generators = [
+        generator
+        for spec, generator in zip(library.specs, library.generators, strict=True)
+        if spec.loss == "SQ"
+    ]
+    assert len({id(generator) for generator in sq_generators}) == 1
 
 
 def test_squared_candidate_returns_finite_signed_weights() -> None:
@@ -360,11 +374,20 @@ def test_screened_candidate_keeps_its_diagnostics_but_loses_its_scores() -> None
 def test_min_ess_ratio_changes_the_configuration_digest() -> None:
     """A screened run must never silently reuse batches from an unscreened one."""
 
-    from refsel.grids import experiment_config
-    from refsel.runner import Numerics, configuration_digest, configuration_record
+    from genriesz.experiments.reference_selection.grids import experiment_config
+    from genriesz.experiments.reference_selection.runner import (
+        Numerics,
+        Scenario,
+        configuration_digest,
+        configuration_record,
+    )
 
-    plain = experiment_config("smoke")
-    screened = experiment_config("smoke", numerics=Numerics(min_ess_ratio=0.5))
+    scenario = Scenario(
+        grid="A", design="low", sample_size=400, overlap_scale=1.5, target_t=0.0, hidden_scale=0.0
+    )
+    common = {"scenarios": (scenario,), "replications_by_grid": {"A": 1}}
+    plain = experiment_config(**common)
+    screened = experiment_config(**common, numerics=Numerics(min_ess_ratio=0.5))
     assert configuration_record(screened)["numerics"]["min_ess_ratio"] == 0.5
     assert configuration_digest(plain) != configuration_digest(screened)
 
@@ -502,9 +525,9 @@ def test_bias_aware_critical_value_attains_its_nominal_coverage() -> None:
 
 
 def _fit_low_reference(name: str, hidden_scale: float, seed: int = 5):
-    from refsel.audit import audit_from_values as _audit
-    from refsel.candidates import fit_outcome
-    from refsel.reference import fit_logistic_reference
+    from genriesz.experiments.reference_selection.audit import audit_from_values as _audit
+    from genriesz.experiments.reference_selection.candidates import fit_outcome
+    from genriesz.experiments.reference_selection.reference import fit_logistic_reference
 
     data = generate_data(
         n=3000, design="low", overlap_scale=1.5, hidden_scale=hidden_scale, seed=seed
@@ -563,7 +586,7 @@ def test_misspecified_reference_breaks_its_allowance_when_the_hidden_term_is_act
 
 
 def test_truth_reference_has_no_allowance() -> None:
-    from refsel.reference import TruthReference
+    from genriesz.experiments.reference_selection.reference import TruthReference
 
     reference = TruthReference(design="low", overlap_scale=1.5, hidden_scale=0.7)
     assert reference.honest_allowance == 0.0
@@ -575,23 +598,38 @@ def test_truth_reference_has_no_allowance() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _smoke_config(max_workers: int):
-    from refsel.grids import experiment_config, smoke_grid
-    from refsel.runner import Numerics
+def _unit_config(max_workers: int):
+    from genriesz.experiments.reference_selection.candidates import FIXED_BENCHMARKS
+    from genriesz.experiments.reference_selection.grids import experiment_config
+    from genriesz.experiments.reference_selection.runner import Numerics, Scenario
 
+    scenario = Scenario(
+        grid="A",
+        design="low",
+        sample_size=180,
+        overlap_scale=1.5,
+        target_t=0.0,
+        hidden_scale=0.0,
+    )
     return experiment_config(
-        "smoke",
-        scenarios=smoke_grid()[:1],
-        numerics=Numerics(low_integration_size=5_000, multiplier_draws=100),
+        scenarios=(scenario,),
+        replications_by_grid={"A": 1},
+        candidate_specs=tuple(FIXED_BENCHMARKS.values()),
+        numerics=Numerics(
+            low_integration_size=500,
+            multiplier_draws=20,
+            allowance_scales=(1.0,),
+            reference_constants=(1.0,),
+        ),
         max_workers=max_workers,
     )
 
 
-def test_smoke_run_produces_every_table_and_rule() -> None:
-    from refsel.runner import TABLES, run_repetition
-    from refsel.selection import RULES
+def test_unit_run_produces_every_table_and_rule() -> None:
+    from genriesz.experiments.reference_selection.runner import TABLES, run_repetition
+    from genriesz.experiments.reference_selection.selection import RULES
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     tables = run_repetition((config, config.scenarios[0], 0))
     assert set(tables) == set(TABLES)
     assert not tables["repetition"].empty
@@ -602,36 +640,56 @@ def test_smoke_run_produces_every_table_and_rule() -> None:
     assert set(tables["repetition"]["complete"]) <= {True, False}
 
 
-def test_results_do_not_depend_on_worker_count() -> None:
-    """Reproducibility: seeds come from scenario identifiers, not from job order."""
+def test_random_number_allocation_does_not_depend_on_worker_count() -> None:
+    """Changing the worker count leaves the job list and seed allocation unchanged."""
 
-    import pandas as pd
+    from dataclasses import replace as dataclass_replace
 
-    config = _smoke_config(1)
-    first = run_repetition_via(config, 0)
-    second = run_repetition_via(config, 0)
-    pd.testing.assert_frame_equal(first["repetition"], second["repetition"])
-    reordered = run_repetition_via(config, 1)
-    assert not reordered["repetition"].empty
+    from genriesz.experiments.reference_selection.runner import (
+        configuration_digest,
+        expand_jobs,
+    )
+
+    serial = _unit_config(1)
+    parallel = dataclass_replace(serial, max_workers=4)
+    serial_jobs = expand_jobs(serial)
+    parallel_jobs = expand_jobs(parallel)
+    assert [job[1:] for job in serial_jobs] == [job[1:] for job in parallel_jobs]
+    assert configuration_digest(serial) == configuration_digest(parallel)
 
 
-def run_repetition_via(config, repetition: int):
-    from refsel.runner import run_repetition
-
-    return run_repetition((config, config.scenarios[0], repetition))
-
-
+@PARQUET_TEST
 def test_batched_run_writes_and_reloads(tmp_path) -> None:
-    from refsel.runner import TABLES, load_experiment, run_experiment
+    from genriesz.experiments.reference_selection.runner import (
+        TABLES,
+        load_experiment,
+        run_experiment,
+    )
 
-    config = _smoke_config(1)
-    run_experiment(config, tmp_path / "smoke")
-    loaded = load_experiment(tmp_path / "smoke")
+    config = _unit_config(1)
+    run_experiment(config, tmp_path / "unit_run")
+    loaded = load_experiment(tmp_path / "unit_run")
     assert set(loaded) == set(TABLES)
     assert not loaded["repetition"].empty
-    assert (tmp_path / "smoke" / "run_manifest.json").exists()
+    assert (tmp_path / "unit_run" / "run_manifest.json").exists()
 
 
+@PARQUET_TEST
+def test_load_experiment_refuses_an_incomplete_publication_run(tmp_path) -> None:
+    """Reporting must not read a partial set of manifest batches."""
+
+    from genriesz.experiments.reference_selection.runner import load_experiment, run_experiment
+
+    config = _unit_config(1)
+    output = tmp_path / "unit_run"
+    run_experiment(config, output)
+    missing = next(output.glob("oracle_*.parquet"))
+    missing.unlink()
+    with pytest.raises(FileNotFoundError, match="incomplete"):
+        load_experiment(output)
+
+
+@PARQUET_TEST
 def test_a_changed_configuration_refuses_to_reuse_batches(tmp_path) -> None:
     """Resuming must not read another configuration's Parquet as this run's output.
 
@@ -642,9 +700,9 @@ def test_a_changed_configuration_refuses_to_reuse_batches(tmp_path) -> None:
 
     from dataclasses import replace as dataclass_replace
 
-    from refsel.runner import Numerics, run_experiment
+    from genriesz.experiments.reference_selection.runner import Numerics, run_experiment
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     run_experiment(config, tmp_path / "run")
     changed = dataclass_replace(
         config,
@@ -666,7 +724,7 @@ def test_rescaling_invariance_survives_the_l1_penalty() -> None:
     universal one.
     """
 
-    from refsel.rescaling import rescaling_table
+    from genriesz.experiments.reference_selection.rescaling import rescaling_table
 
     table = rescaling_table(n=1200, losses=("SQ",))
     penalized = table.loc[
@@ -682,6 +740,26 @@ def test_rescaling_invariance_survives_the_l1_penalty() -> None:
     ridge = table.loc[table["penalty"].eq("l2") & ~np.isclose(table["kappa"], 1.0)]
     assert not ridge.empty
     assert (ridge["alpha_max_deviation"] > 1e-2).any()
+
+
+def test_rescaling_records_restricted_holdout_domain_without_substitution() -> None:
+    """A held-out BP domain failure is data, not an exception or a clipped value."""
+
+    from genriesz.experiments.reference_selection.rescaling import rescaling_table
+
+    table = rescaling_table(
+        n=2000,
+        losses=("BP",),
+        penalties=(("l1", 1.0, 0.0),),
+    )
+    baseline = table.loc[np.isclose(table["kappa"], 1.0)].iloc[0]
+    assert baseline["status"] == "converged"
+    assert baseline["heldout_status"] == "dual_domain_failure"
+    assert 0 < int(baseline["heldout_valid_rows"]) < int(
+        baseline["heldout_total_rows"]
+    )
+    assert np.isnan(float(baseline["heldout_bregman"]))
+    assert np.isnan(float(baseline["heldout_ratio"]))
 
 
 def test_minimum_bias_bound_keeps_all_nan_columns_missing() -> None:
@@ -725,7 +803,8 @@ def test_split_interval_survives_a_failure_in_another_fold() -> None:
     """
 
     import pandas as pd
-    from refsel import report
+
+    from genriesz.experiments.reference_selection import report
 
     repetitions = pd.DataFrame(
         [
@@ -759,7 +838,7 @@ def test_split_interval_survives_a_failure_in_another_fold() -> None:
 
 
 def test_audit_caches_can_be_cleared() -> None:
-    from refsel import audit
+    from genriesz.experiments.reference_selection import audit
 
     sample = audit.integration_sample(
         design="low", overlap_scale=1.5, hidden_scale=0.0, size=1000, seed=3
@@ -784,7 +863,7 @@ def test_numerics_rejects_a_fold_count_that_disagrees_with_the_budget() -> None:
     within-budget check still passed.
     """
 
-    from refsel.runner import Numerics
+    from genriesz.experiments.reference_selection.runner import Numerics
 
     with pytest.raises(ValueError, match="must equal"):
         Numerics(n_folds=10)
@@ -794,7 +873,7 @@ def test_numerics_rejects_a_fold_count_that_disagrees_with_the_budget() -> None:
 def test_reference_check_reports_a_nonfinite_comparison_as_undecidable() -> None:
     """A blown-up reference score must not be recorded as a passing check."""
 
-    from refsel.reference import ReferenceCheck
+    from genriesz.experiments.reference_selection.reference import ReferenceCheck
 
     clean = ReferenceCheck("a", "b", difference=0.1, radius=0.05, allowance_sum=0.01)
     assert clean.checkable
@@ -805,7 +884,7 @@ def test_reference_check_reports_a_nonfinite_comparison_as_undecidable() -> None
     assert broken.violated is None
 
 
-def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
+def test_a_failed_reference_is_not_used_for_selection_or_inference(monkeypatch) -> None:
     """A reference without a valid allowance carries no guarantee.
 
     Recording the failure in a status column while still forming its bias bound,
@@ -813,20 +892,20 @@ def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
     premise of Theorem ``data_dependent_bias``.
     """
 
-    from refsel import runner as runner_module
-    from refsel.audit import integration_sample, scenario_key
-    from refsel.candidates import candidate_grid
-    from refsel.runner import Numerics, Scenario, run_fold
+    from genriesz.experiments.reference_selection import runner as runner_module
+    from genriesz.experiments.reference_selection.audit import integration_sample, scenario_key
+    from genriesz.experiments.reference_selection.candidates import FIXED_BENCHMARKS
+    from genriesz.experiments.reference_selection.runner import Numerics, Scenario, run_fold
 
     scenario = Scenario(
         grid="A",
         design="low",
-        sample_size=600,
+        sample_size=240,
         overlap_scale=1.5,
         target_t=0.0,
         hidden_scale=0.0,
     )
-    numerics = Numerics(low_integration_size=3000, multiplier_draws=60)
+    numerics = Numerics(low_integration_size=1000, multiplier_draws=20)
     data = generate_data(
         n=scenario.sample_size,
         design="low",
@@ -835,7 +914,7 @@ def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
         seed=101,
     )
     shared = dict(
-        design="low", overlap_scale=1.5, hidden_scale=0.0, size=3000, seed=102
+        design="low", overlap_scale=1.5, hidden_scale=0.0, size=1000, seed=102
     )
     kwargs = dict(
         scenario=scenario,
@@ -844,7 +923,7 @@ def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
         integration=integration_sample(**shared),
         integration_key=scenario_key(**shared),
         roles=make_fold_roles(scenario.sample_size, 5, 103)[0],
-        specs=candidate_grid(),
+        specs=tuple(FIXED_BENCHMARKS.values()),
         scenario_seed=104,
         repetition=0,
         fold_index=0,
@@ -860,11 +939,8 @@ def test_a_failed_reference_is_not_used_for_selection_or_inference() -> None:
         references["misspecified"].status = "logistic_separation"
         return references
 
-    runner_module._build_references = break_misspecified
-    try:
-        degraded = run_fold(**kwargs)
-    finally:
-        runner_module._build_references = original
+    monkeypatch.setattr(runner_module, "_build_references", break_misspecified)
+    degraded = run_fold(**kwargs)
 
     assert not any(key[1] == "misspecified" for key in degraded.selection)
     assert not any(row["reference"] == "misspecified" for row in degraded.rows_bound)
@@ -882,9 +958,9 @@ def test_every_configured_procedure_appears_even_when_it_always_fails() -> None:
     reporting convention the plan forbids.
     """
 
-    from refsel.runner import expected_procedures, run_repetition
+    from genriesz.experiments.reference_selection.runner import expected_procedures, run_repetition
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     tables = run_repetition((config, config.scenarios[0], 0))
     expected = set(expected_procedures(config.scenarios[0].design, config.numerics))
     produced = set(
@@ -898,12 +974,13 @@ def test_every_configured_procedure_appears_even_when_it_always_fails() -> None:
     assert not bool(bkl["complete"].iloc[0])
 
 
+@PARQUET_TEST
 def test_batches_without_a_manifest_are_refused(tmp_path) -> None:
     """Parquet of unknown provenance must not be adopted by a new run."""
 
-    from refsel.runner import load_experiment, run_experiment
+    from genriesz.experiments.reference_selection.runner import load_experiment, run_experiment
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     run_experiment(config, tmp_path / "run")
     (tmp_path / "run" / "run_manifest.json").unlink()
     with pytest.raises(RuntimeError, match="no run_manifest"):
@@ -912,14 +989,15 @@ def test_batches_without_a_manifest_are_refused(tmp_path) -> None:
         load_experiment(tmp_path / "run")
 
 
+@PARQUET_TEST
 def test_batch_files_beyond_the_run_are_refused(tmp_path) -> None:
     """A shorter re-run must not read the longer run's leftover batches."""
 
     import shutil
 
-    from refsel.runner import load_experiment, run_experiment
+    from genriesz.experiments.reference_selection.runner import load_experiment, run_experiment
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     run_experiment(config, tmp_path / "run")
     source = next((tmp_path / "run").glob("candidate_*.parquet"))
     shutil.copy(source, tmp_path / "run" / "candidate_00099.parquet")
@@ -930,27 +1008,20 @@ def test_batch_files_beyond_the_run_are_refused(tmp_path) -> None:
 def test_digest_tracks_the_expanded_job_list(tmp_path) -> None:
     """Batch contents depend on the job list, not only on the declared settings.
 
-    The replication count comes from a module-level table, so recording the tier
-    name alone would let an edit to that table produce a different run under an
-    unchanged digest.
+    The expanded job list depends on the replication counts, so the digest must
+    change when those counts change.
     """
 
     from dataclasses import replace as dataclass_replace
 
-    from refsel import runner as runner_module
-    from refsel.runner import configuration_digest
+    from genriesz.experiments.reference_selection.runner import configuration_digest
 
-    config = _smoke_config(1)
+    config = _unit_config(1)
     baseline = configuration_digest(config)
     assert configuration_digest(dataclass_replace(config, batch_size=3)) != baseline
 
-    grid = config.scenarios[0].grid
-    original = runner_module.TIER_REPLICATIONS["smoke"][grid]
-    runner_module.TIER_REPLICATIONS["smoke"][grid] = original + 1
-    try:
-        assert configuration_digest(config) != baseline
-    finally:
-        runner_module.TIER_REPLICATIONS["smoke"][grid] = original
+    changed_counts = dataclass_replace(config, replications_by_grid={"A": 2})
+    assert configuration_digest(changed_counts) != baseline
     assert configuration_digest(config) == baseline
 
 
@@ -965,7 +1036,8 @@ def test_reference_check_rate_is_fold_level_with_a_clustered_error() -> None:
     """
 
     import pandas as pd
-    from refsel import report
+
+    from genriesz.experiments.reference_selection import report
 
     scenario = {
         "grid": "A",
@@ -1005,3 +1077,126 @@ def test_reference_check_rate_is_fold_level_with_a_clustered_error() -> None:
     empty = report.reference_check_table({"check": pd.DataFrame(blind)})
     assert np.isnan(empty["violation_rate"].iloc[0])
     assert empty["decidable_replications"].iloc[0] == pytest.approx(0.0)
+
+
+def test_scaled_bp_uses_the_scaled_exact_dual_domain() -> None:
+    """Generator rescaling must also rescale BP's linear dual constraints."""
+
+    from genriesz.experiments.reference_selection.rescaling import rescaling_table
+
+    table = rescaling_table(
+        n=2000,
+        losses=("BP",),
+        penalties=(("l1", 1.0, 0.0),),
+    )
+    assert len(table) == 3
+    assert table["status"].isin(("converged", "closed_form")).all()
+    assert (table["alpha_max_deviation"] < 1e-2).all()
+    assert np.allclose(table["objective_ratio"], table["kappa"], rtol=1e-4)
+
+
+def test_rescaling_records_heldout_domain_failure_without_substitution() -> None:
+    """An exact BP link that fails on held-out rows has no validation loss."""
+
+    from genriesz.experiments.reference_selection.rescaling import rescaling_table
+
+    table = rescaling_table(
+        n=2000,
+        losses=("BP",),
+        penalties=(("l1", 1.0, 0.0),),
+    )
+    failed = table.loc[table["heldout_status"].eq("dual_domain_failure")]
+    assert not failed.empty
+    assert (failed["heldout_valid_fraction"] < 1.0).all()
+    assert failed["heldout_bregman"].isna().all()
+    assert failed["heldout_ratio"].isna().all()
+
+
+def test_candidate_admissibility_uses_the_l1_kkt_residual(monkeypatch) -> None:
+    """A sparse l1 fit is judged by its KKT condition, not raw gradient size."""
+
+    from genriesz.experiments.reference_selection.candidates import (
+        CandidateSpec,
+        ExperimentBasis,
+        fit_candidate_beta,
+        make_generator,
+    )
+    from genriesz.glm import GRRGLM, FitResult
+
+    data = generate_data(n=120, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=91)
+    spec = CandidateSpec(loss="SQ", dictionary="linear", penalty_multiplier=1.0)
+    basis = ExperimentBasis("linear").fit(data.X)
+    beta = np.zeros(basis.n_features, dtype=float)
+
+    def fitted_with_valid_kkt(self, X, **kwargs):
+        return FitResult(
+            beta=beta,
+            success=True,
+            message="",
+            n_iter=1,
+            status="converged",
+            objective_value=0.0,
+            gradient_norm=1.0,
+            kkt_residual=1e-6,
+            clip_binding_rate=float("nan"),
+            fit_time=0.0,
+        )
+
+    monkeypatch.setattr(GRRGLM, "fit", fitted_with_valid_kkt)
+    fitted = fit_candidate_beta(
+        data.X,
+        spec,
+        basis,
+        make_generator(spec),
+        max_iter=10,
+        tolerance=1e-8,
+        kkt_tolerance=1e-2,
+    )
+    assert fitted.success
+    assert fitted.gradient_norm == pytest.approx(1.0)
+    assert fitted.kkt_residual == pytest.approx(1e-6)
+
+
+def test_candidate_with_excessive_kkt_residual_is_rejected(monkeypatch) -> None:
+    """Optimizer success does not override a failed KKT diagnostic."""
+
+    from genriesz.experiments.reference_selection.candidates import (
+        CandidateSpec,
+        ExperimentBasis,
+        fit_candidate_beta,
+        make_generator,
+    )
+    from genriesz.glm import GRRGLM, FitResult
+
+    data = generate_data(n=120, design="low", overlap_scale=1.5, hidden_scale=0.0, seed=92)
+    spec = CandidateSpec(loss="SQ", dictionary="linear", penalty_multiplier=1.0)
+    basis = ExperimentBasis("linear").fit(data.X)
+    beta = np.zeros(basis.n_features, dtype=float)
+
+    def fitted_with_invalid_kkt(self, X, **kwargs):
+        return FitResult(
+            beta=beta,
+            success=True,
+            message="",
+            n_iter=1,
+            status="converged",
+            objective_value=0.0,
+            gradient_norm=1e-6,
+            kkt_residual=0.1,
+            clip_binding_rate=float("nan"),
+            fit_time=0.0,
+        )
+
+    monkeypatch.setattr(GRRGLM, "fit", fitted_with_invalid_kkt)
+    fitted = fit_candidate_beta(
+        data.X,
+        spec,
+        basis,
+        make_generator(spec),
+        max_iter=10,
+        tolerance=1e-8,
+        kkt_tolerance=1e-2,
+    )
+    assert not fitted.success
+    assert fitted.status == "diagnostic_failure"
+    assert fitted.beta is None

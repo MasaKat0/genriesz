@@ -494,10 +494,7 @@ def local_polynomial_nn_lsif_density_ratio(
             ridge_scale = ridge * (np.trace(H) / max(q, 1)) if np.isfinite(np.trace(H)) else ridge
         H_reg = H + ridge_scale * np.eye(q)
 
-        try:
-            beta = np.linalg.solve(H_reg, h)
-        except np.linalg.LinAlgError:
-            beta = np.linalg.lstsq(H_reg, h, rcond=None)[0]
+        beta = np.linalg.solve(H_reg, h)
 
         r_hat[i] = float(beta[0])  # intercept
 
@@ -523,7 +520,7 @@ def local_polynomial_nn_lsif_inverse_propensity_weights(
     kernel: KernelKind = "ball",
     exclude_self: bool = True,
     ridge: float = 1e-8,
-    clip_min: float | None = 1e-8,
+    clip_min: float | None = None,
     metric: str = "euclidean",
     algorithm: str = "auto",
     n_jobs: int | None = None,

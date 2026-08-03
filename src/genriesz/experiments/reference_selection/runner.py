@@ -14,7 +14,6 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from hashlib import blake2b
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -72,25 +71,10 @@ from .selection import (
     theorem_upper_slack,
 )
 
-Tier = Literal["smoke", "pilot", "publication"]
-
-#: Replication counts per tier and grid. Only this number changes across tiers;
-#: the candidate library, selection rules, designs, and seed construction do not.
-#:
-#: Grid B carries the uniform-coverage claim and gets the most replications
-#: (coverage Monte Carlo standard error 0.0049 at the nominal level). Grid A is
-#: supporting evidence on overlap, at 1,000 (0.0069). Grid C is the
-#: high-dimensional check and is by far the most expensive per replication, so it
-#: runs at 500 (0.0097), which is adequate for a secondary design.
-#:
-#: Measured single-core costs per replication: 7.6 s at n=1000, 12.7 s at
-#: n=3000, and 57.5 s in the high-dimensional design. The publication tier is
-#: therefore about 94 core-hours.
-TIER_REPLICATIONS: dict[str, dict[str, int]] = {
-    "smoke": {"A": 2, "B": 2, "C": 2},
-    "pilot": {"A": 25, "B": 50, "C": 25},
-    "publication": {"A": 1000, "B": 2000, "C": 500},
-}
+#: Replication counts for the publication experiment. Grid B carries the
+#: uniform-coverage comparison and therefore uses the largest number of
+#: replications.
+PUBLICATION_REPLICATIONS: dict[str, int] = {"A": 1000, "B": 2000, "C": 500}
 
 #: Tables written per batch.
 TABLES = ("candidate", "selection", "repetition", "bound", "check", "oracle")
@@ -103,7 +87,9 @@ SPLIT_FOLD = 0
 #: rather than a misleading "different configuration".
 #: 3: ``Numerics.min_ess_ratio`` entered the digest and the candidate table
 #: gained ``ess_ratio``.
-MANIFEST_SCHEMA = 3
+#: 4: candidate admissibility uses the reported KKT residual, and the numerical
+#: setting is named ``kkt_tolerance``.
+MANIFEST_SCHEMA = 4
 
 
 @dataclass(frozen=True)
@@ -113,13 +99,11 @@ class Numerics:
     n_folds: int = 5
     max_iter: int = 1000
     tolerance: float = 1e-8
-    gradient_tolerance: float = 1e-2
-    #: Draws for the simultaneous multiplier bootstrap. The mean radius is a
-    #: ``1 - delta/(2K) = 0.999`` quantile, so 2,000 draws put the critical value
-    #: at roughly the third-largest observation: measured coefficient of
-    #: variation 3.5 percent with a 0.7 percent downward bias against 50,000
-    #: draws. Since the radius is the dominant term of the bias bound, that noise
-    #: is not worth saving.
+    kkt_tolerance: float = 1e-2
+    #: Draws for the simultaneous multiplier bootstrap. The mean radius uses
+    #: a high quantile, so the publication configuration uses 10,000 draws to
+    #: keep Monte Carlo variation in the critical value small relative to the
+    #: bias bound.
     multiplier_draws: int = 10000
     low_integration_size: int = 100_000
     high_integration_size: int = 50_000
@@ -172,17 +156,39 @@ class Scenario:
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    """A full run: a set of scenarios at one tier."""
+    """Configuration for the reference-based selection experiment."""
 
     name: str
-    tier: str
     scenarios: tuple[Scenario, ...]
     numerics: Numerics = field(default_factory=Numerics)
     batch_size: int = 20
     max_workers: int | None = None
+    replications_by_grid: dict[str, int] = field(
+        default_factory=lambda: dict(PUBLICATION_REPLICATIONS)
+    )
+    candidate_specs: tuple[CandidateSpec, ...] = field(default_factory=candidate_grid)
+
+    def __post_init__(self) -> None:
+        missing = {scenario.grid for scenario in self.scenarios} - set(self.replications_by_grid)
+        if missing:
+            raise ValueError(f"Missing replication counts for grids: {sorted(missing)}")
+        invalid = {
+            grid: count
+            for grid, count in self.replications_by_grid.items()
+            if int(count) < 1
+        }
+        if invalid:
+            raise ValueError(f"Replication counts must be positive: {invalid}")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be positive.")
+        if not self.candidate_specs:
+            raise ValueError("candidate_specs must contain at least one specification.")
+        labels = [spec.label for spec in self.candidate_specs]
+        if len(labels) != len(set(labels)):
+            raise ValueError("candidate_specs must have unique labels.")
 
     def replications(self, scenario: Scenario) -> int:
-        return TIER_REPLICATIONS[self.tier][scenario.grid]
+        return int(self.replications_by_grid[scenario.grid])
 
 
 def primary_reference(design: Design) -> str:
@@ -317,7 +323,7 @@ def run_fold(
         specs,
         max_iter=numerics.max_iter,
         tolerance=numerics.tolerance,
-        gradient_tolerance=numerics.gradient_tolerance,
+        kkt_tolerance=numerics.kkt_tolerance,
     )
     references = _build_references(
         X_train,
@@ -669,7 +675,7 @@ def run_repetition(job: tuple[ExperimentConfig, Scenario, int]) -> dict[str, pd.
         numerics.n_folds,
         stable_seed(scenario_seed, repetition, "folds"),
     )
-    specs = candidate_grid()
+    specs = config.candidate_specs
 
     fold_outcomes = [
         run_fold(
@@ -689,7 +695,6 @@ def run_repetition(job: tuple[ExperimentConfig, Scenario, int]) -> dict[str, pd.
 
     identifiers: dict[str, object] = {
         "experiment": config.name,
-        "tier": config.tier,
         "grid": scenario.grid,
         "design": scenario.design,
         "sample_size": scenario.sample_size,
@@ -900,12 +905,9 @@ def configuration_record(config: ExperimentConfig) -> dict[str, object]:
     numerics["budget"] = asdict(config.numerics.budget)
     return {
         "name": config.name,
-        "tier": config.tier,
         "batch_size": config.batch_size,
         "scenarios": [asdict(scenario) for scenario in config.scenarios],
-        # Resolved rather than implied by the tier name: TIER_REPLICATIONS is a
-        # module-level table, so recording only the tier would let an edit to it
-        # produce a different run under an unchanged record.
+        "candidate_specs": [asdict(spec) for spec in config.candidate_specs],
         "replications": {
             scenario.label: config.replications(scenario) for scenario in config.scenarios
         },
@@ -1017,11 +1019,11 @@ def _reject_batches_beyond(output: Path, n_batches: int) -> None:
 
 
 def load_experiment(output_dir: str | Path) -> dict[str, pd.DataFrame]:
-    """Load every completed batch of an experiment directory.
+    """Load a complete experiment directory.
 
-    Refuses a directory without a manifest, or one holding batch files outside
-    the manifest's range, either of which would mix another run's output into
-    these tables.
+    Refuses a directory without a manifest, a directory with missing batches,
+    or one holding batch files outside the manifest's range. A report therefore
+    cannot present a partial run as the publication experiment.
     """
 
     output = Path(output_dir)
@@ -1031,14 +1033,31 @@ def load_experiment(output_dir: str | Path) -> dict[str, pd.DataFrame]:
             f"{output} has no run_manifest.json, so the provenance of its batch "
             "files cannot be checked. Re-run the experiment into this directory."
         )
-    _reject_batches_beyond(
-        output, int(json.loads(manifest_path.read_text(encoding="utf-8"))["n_batches"])
-    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    n_batches = int(manifest["n_batches"])
+    _reject_batches_beyond(output, n_batches)
+
+    missing = [
+        output / f"{table}_{batch_index:05d}.parquet"
+        for batch_index in range(n_batches)
+        for table in TABLES
+        if not (output / f"{table}_{batch_index:05d}.parquet").exists()
+    ]
+    if missing:
+        first = missing[0].name
+        raise FileNotFoundError(
+            f"The experiment in {output} is incomplete: {len(missing)} expected "
+            f"batch file(s) are missing, starting with {first}. Run "
+            "run_experiment with the same configuration to resume before "
+            "constructing tables or figures."
+        )
+
     loaded: dict[str, pd.DataFrame] = {}
     for table in TABLES:
-        frames = [pd.read_parquet(path) for path in sorted(output.glob(f"{table}_*.parquet"))]
+        paths = [output / f"{table}_{batch_index:05d}.parquet" for batch_index in range(n_batches)]
+        frames = [pd.read_parquet(path) for path in paths]
         frames = [frame for frame in frames if not frame.empty]
         loaded[table] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if loaded["repetition"].empty:
-        raise FileNotFoundError(f"No completed batches were found in {output}.")
+        raise FileNotFoundError(f"No completed repetitions were found in {output}.")
     return loaded

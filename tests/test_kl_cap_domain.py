@@ -78,18 +78,41 @@ def test_bkl_raises_on_domain_violation_instead_of_clipping():
         gen.conjugate(X, np.full(4, 0.5))
 
 
-def test_bkl_grrglm_fit_fails_honestly_from_cold_start():
-    # beta0 = 0 -> v = 0 sits exactly on the BKL boundary (g*(0) = +inf). The fit
-    # must report an explicit domain_error failure, not a silent broken success.
+def test_bkl_grrglm_constructs_a_feasible_start_without_clipping():
+    # The default zero vector lies on the BKL boundary. GRRGLM therefore solves
+    # a linear feasibility problem before optimization instead of evaluating or
+    # clipping the invalid link at zero.
     X = _make_ate(n=150, seed=1)
     m = ATEFunctional(treatment_index=0)
     basis = TreatmentInteractionBasis(
         base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
     ).fit(X)
     gen = BKLGenerator(C=1e-2, branch_fn=lambda x: int(x[0] == 1.0))
-    res = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3).fit(X)
-    assert not res.success
-    assert res.status == "domain_error"
+    model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
+    res = model.fit(X, max_iter=2000, tol=1e-12)
+
+    assert res.success
+    assert res.status == "converged"
+    Phi = np.asarray(basis(X), dtype=float)
+    v = Phi @ model.beta_
+    assert np.all(gen.dual_domain_mask(X, v))
+    assert not np.any(gen.domain_binding(X, v))
+    assert np.all(np.isfinite(gen.inv_grad(X, v)))
+    assert res.kkt_residual < 1e-5
+
+
+def test_bkl_grrglm_rejects_a_user_start_on_the_domain_boundary():
+    X = _make_ate(n=100, seed=11)
+    m = ATEFunctional(treatment_index=0)
+    basis = TreatmentInteractionBasis(
+        base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
+    ).fit(X)
+    gen = BKLGenerator(C=1e-2, branch_fn=lambda x: int(x[0] == 1.0))
+    p = basis(X).shape[1]
+    model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
+
+    with pytest.raises(ValueError, match="outside the exact generator domain"):
+        model.fit(X, beta0=np.zeros(p))
 
 
 # ---------------------------------------------------------------------------
@@ -134,33 +157,28 @@ def _bkl_g_exact(a: np.ndarray, C: float) -> np.ndarray:
 
 
 @pytest.mark.parametrize("C", [1.0, 1e-6, 1e-13])
-def test_bkl_g_rewrite_is_an_identity_off_the_floor(C):
-    """The cancellation-free form is the same function, floor aside.
+def test_bkl_g_rewrite_is_an_identity_on_the_open_domain(C):
+    """The cancellation-free expression equals the original BKL generator.
 
-    ``_bkl_g`` floors ``t1 = |alpha| - C`` at 1e-12, and the rewrite is an identity
-    only where that floor is inactive -- everywhere the link is actually evaluated,
-    since the domain is the open ``|alpha| > C``. Small ``C`` is the case to pin
-    down: ``C`` is not otherwise bounded below, and the rewrite reorganises the
-    expression precisely around ``2C / t1``.
-
-    The naive difference cannot serve as the reference here, because it is what
-    breaks: at ``C = 1e-13`` its two ``O(t1 log t1)`` terms agree to more than
-    16 digits and their difference is noise (0.0, at ``|alpha| ~ 1e12``, for a
-    value of -5.7e-12). The reference is the same expression in 60-digit decimal.
+    The comparison uses the same floating-point alpha values in a 60-digit
+    decimal evaluation. It includes the first float64 number strictly above C,
+    so no artificial floor is needed near the open boundary.
     """
-    t1 = np.array([1e-11, 1e-8, 1e-3, 1.0, 1e3, 1e12])  # distance past the boundary
-    a = C + t1  # strictly inside the domain, floor inactive
-    assert np.all(np.abs(a) - C >= 1e-12)
-
-    assert _bkl_g(a, C) == pytest.approx(_bkl_g_exact(a, C), rel=1e-12)
-
-    # In the floored sliver the rewrite is no longer that identity: t2 != t1 + 2C
-    # once t1 is clamped. Both forms are then surrogates of a value the floor has
-    # already made arbitrary, and they stay within ~1e-11 of each other.
-    edge = np.array([C + 1e-14, C + 1e-13])
-    floored = np.maximum(np.abs(edge) - C, 1e-12)
-    naive_edge = floored * np.log(floored) - (edge + C) * np.log(edge + C)
-    assert _bkl_g(edge, C) == pytest.approx(naive_edge, abs=1e-10)
+    a = np.array(
+        [
+            np.nextafter(C, np.inf),
+            C + 1e-14,
+            C + 1e-13,
+            C + 1e-11,
+            C + 1e-8,
+            C + 1e-3,
+            C + 1.0,
+            C + 1e3,
+            C + 1e12,
+        ]
+    )
+    a = np.unique(a[a > C])
+    assert _bkl_g(a, C) == pytest.approx(_bkl_g_exact(a, C), rel=1e-12, abs=1e-15)
 
 
 @pytest.mark.parametrize("u", [-1e-17, -1e-13, -1e-9, -1e-5, -1e-1, -1.0, -5.0])
@@ -286,4 +304,9 @@ def test_modifies_estimand_flag():
     assert BoundedBKLGenerator(C=1.0, alpha_max=10.0, branch_fn=_pos_branch).modifies_estimand
     assert not BKLGenerator(C=1.0, branch_fn=_pos_branch).modifies_estimand
     assert not SquaredGenerator(C=0.0).modifies_estimand
-    assert not BregmanGenerator(g=lambda a: a * a).modifies_estimand
+    assert not BregmanGenerator(
+        g=lambda a: a * a,
+        grad=lambda a: 2.0 * a,
+        inv_grad=lambda v: 0.5 * v,
+        grad2=lambda _a: 2.0,
+    ).modifies_estimand

@@ -227,9 +227,25 @@ def _coerce_functional(m: LinearFunctional | Callable) -> LinearFunctional:
     raise TypeError("m must be a LinearFunctional or a callable m(x_row, gamma)->float")
 
 
-def _logit(p: NDArray[np.float64], eps: float = 1e-6) -> NDArray[np.float64]:
-    p = np.clip(p, eps, 1.0 - eps)
-    return np.log(p / (1.0 - p))
+def _open_unit_interval(
+    values: NDArray[np.float64], *, name: str
+) -> NDArray[np.float64]:
+    """Validate probabilities without changing their values."""
+
+    array = np.asarray(values, dtype=float)
+    valid = np.isfinite(array) & (array > 0.0) & (array < 1.0)
+    if not bool(np.all(valid)):
+        n_bad = int(np.sum(~valid))
+        raise ValueError(
+            f"{name} must lie strictly inside (0, 1); {n_bad}/{array.size} "
+            "value(s) are nonfinite or on the boundary."
+        )
+    return array
+
+
+def _logit(p: NDArray[np.float64]) -> NDArray[np.float64]:
+    probability = _open_unit_interval(p, name="Probability")
+    return np.log(probability) - np.log1p(-probability)
 
 
 def _tmle_epsilon_gaussian(
@@ -237,11 +253,17 @@ def _tmle_epsilon_gaussian(
     y: NDArray[np.float64],
     mu: NDArray[np.float64],
 ) -> float:
-    resid = y - mu
-    denom = float(np.sum(H * H))
-    if denom <= 0 or not np.isfinite(denom):
+    H_ = np.asarray(H, dtype=float)
+    resid = np.asarray(y, dtype=float) - np.asarray(mu, dtype=float)
+    denom = float(np.sum(H_ * H_))
+    numerator = float(np.sum(H_ * resid))
+    if not np.isfinite(denom) or not np.isfinite(numerator):
+        raise ValueError("Gaussian TMLE received a nonfinite targeting equation.")
+    if denom < 0.0:
+        raise ValueError("Gaussian TMLE direction norm cannot be negative.")
+    if denom == 0.0:
         return 0.0
-    return float(np.sum(H * resid) / denom)
+    return numerator / denom
 
 
 def _tmle_epsilon_bernoulli(
@@ -249,42 +271,46 @@ def _tmle_epsilon_bernoulli(
     y: NDArray[np.float64],
     mu: NDArray[np.float64],
 ) -> float:
-    mu = np.clip(mu, 1e-6, 1.0 - 1e-6)
-    offset = _logit(mu)
+    H_ = np.asarray(H, dtype=float)
+    y_ = np.asarray(y, dtype=float)
+    mu_ = _open_unit_interval(np.asarray(mu, dtype=float), name="Bernoulli prediction")
+    if not bool(np.all(np.isfinite(H_))) or not bool(np.all(np.isfinite(y_))):
+        raise ValueError("Bernoulli TMLE received nonfinite observations or directions.")
+    if bool(np.all(H_ == 0.0)):
+        return 0.0
+    offset = _logit(mu_)
 
-    def score(eps: float) -> float:
-        mu_eps = sigmoid(offset + eps * H)
-        return float(np.mean(H * (y - mu_eps)))
+    def score(epsilon: float) -> float:
+        mu_epsilon = sigmoid(offset + float(epsilon) * H_)
+        value = float(np.mean(H_ * (y_ - mu_epsilon)))
+        if not np.isfinite(value):
+            raise ValueError("Bernoulli TMLE score is nonfinite.")
+        return value
 
-    # Newton with derivative (monotone score)
-    eps = 0.0
-    for _ in range(60):
-        s = score(eps)
-        if abs(s) < 1e-10:
-            return float(eps)
-        mu_eps = sigmoid(offset + eps * H)
-        deriv = -float(np.mean((H * H) * mu_eps * (1.0 - mu_eps)))
-        if deriv == 0 or not np.isfinite(deriv):
-            break
-        step = s / deriv
-        eps_new = eps - step
-        if abs(eps_new - eps) < 1e-10:
-            return float(eps_new)
-        eps = eps_new
+    zero_score = score(0.0)
+    if abs(zero_score) <= 1e-12:
+        return 0.0
 
-    # Fallback: root_scalar with a bracket (if possible)
-    left, right = -1.0, 1.0
-    s_left, s_right = score(left), score(right)
-    for _ in range(20):
-        if s_left * s_right <= 0:
-            res = optimize.root_scalar(score, bracket=[left, right], method="brentq")
-            if getattr(res, "converged", False):
-                return float(res.root)
-            break
+    left = -1.0
+    right = 1.0
+    left_score = score(left)
+    right_score = score(right)
+    for _ in range(64):
+        if left_score >= 0.0 and right_score <= 0.0:
+            result = optimize.root_scalar(
+                score, bracket=(left, right), method="brentq", xtol=1e-12, rtol=1e-12
+            )
+            if not bool(result.converged):
+                raise RuntimeError("Bernoulli TMLE root solver did not converge.")
+            return float(result.root)
         left *= 2.0
         right *= 2.0
-        s_left, s_right = score(left), score(right)
-    return float(eps)
+        left_score = score(left)
+        right_score = score(right)
+    raise RuntimeError(
+        "Bernoulli TMLE has no finite fluctuation parameter within the searched "
+        "range; the targeting equation is separated or numerically degenerate."
+    )
 
 
 def _raise_if_fit_failed(*, result, what: str, fold_id: int, tag: str | None = None) -> None:
@@ -324,7 +350,6 @@ def grr_functional(
     riesz_strict_nested: bool = True,
     riesz_selection_score: str = "bias_variance",
     riesz_admissibility_thresholds: dict | None = None,
-    riesz_fallback_policy: str | None = None,
     return_riesz_cv_path: bool = False,
     # Matching-only options (ATE only)
     M: int = 1,
@@ -390,21 +415,9 @@ def grr_functional(
         runs only when at least one grid is supplied, and only on the outer
         training fold.
     riesz_strict_nested:
-        If True (default), the inner Riesz CV standardizes, resolves the
-        ``"auto"`` bandwidth and picks kernel centers on each inner fold's
-        inner-training rows only, so no inner-validation observation enters the
-        feature map that scores it (audit P0-05). If False, use the older
-        outer-fixed feature map (centers and median heuristic shared across inner
-        folds): cheaper, but it leaks each fold's validation rows into its own
-        scoring feature map.
-    riesz_fallback_policy:
-        What the inner Riesz CV does when no candidate passes the admissibility
-        screen (audit CV-11; for a ``modifies_estimand`` generator: when no
-        candidate passes the remaining quality checks). ``None`` (default)
-        raises instead of silently selecting an inadmissible candidate whose
-        criterion is not trustworthy. ``"best_criterion"`` opts into taking the
-        best fitted candidate anyway, with a warning; the per-fold diagnostics
-        then record ``used_fallback``, the reason, and the violated thresholds.
+        Retained as a compatibility argument and required to be ``True``. The
+        inner Riesz CV fits standardization, the ``"auto"`` bandwidth, and kernel
+        centers on each inner fold's training observations only.
     outcome_link:
         If None, inferred as 'logit' for outcomes bounded in [0, 1], else 'identity'.
         TMLE likelihood is inferred from this link. An explicit ``'logit'``
@@ -665,7 +678,6 @@ def grr_functional(
         strict_nested=riesz_strict_nested,
         selection_score=riesz_selection_score,
         admissibility_thresholds=riesz_admissibility_thresholds,
-        fallback_policy=riesz_fallback_policy,
         return_path=return_riesz_cv_path,
         random_state=random_state,
     )
@@ -732,9 +744,6 @@ def grr_functional(
                         "n_candidates": sel.n_candidates,
                         "best_score": sel.best_score,
                         "modifies_estimand": sel.modifies_estimand,
-                        "used_fallback": sel.used_fallback,
-                        "fallback_reason": sel.fallback_reason,
-                        "fallback_violations": list(sel.fallback_violations),
                     }
                 )
                 if return_riesz_cv_path:
@@ -750,7 +759,9 @@ def grr_functional(
                 lam=lam_fold,
                 p_norm=riesz_p_norm,
             )
-            fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            fit_result = grr.fit(
+                X_tr, max_iter=max_iter, tol=tol, verbose=verbose, fit_basis=False
+            )
             riesz_fit_stats["success"].append(bool(fit_result.success))
             riesz_fit_stats["status"].append(str(getattr(fit_result, "status", "")))
             riesz_fit_stats["gradient_norm"].append(
@@ -785,17 +796,13 @@ def grr_functional(
             if callable(kdiag):
                 kernel_stats.append({k: v for k, v in kdiag(X_tr).items()})
 
-            # m(alpha) is needed for Gaussian TMLE update for any functional.
-            # For AME we need derivatives; others only need predict().
-            try:
+            # TMLE requires applying the functional to the fitted representer.
+            if "tmle" in ests:
                 m_alpha[test_idx] = m.m_from_function(
                     X_te,
                     predict=grr.predict_alpha,
                     derivative=getattr(grr, "derivative_alpha", None),
                 )
-            except NotImplementedError:
-                # If the functional cannot be applied to alpha, TMLE will be unavailable.
-                m_alpha[test_idx] = np.nan
 
             # For Bernoulli TMLE with treatment-type functionals, cache cf values.
             if "tmle" in ests and outcome_link_ == "logit" and isinstance(
@@ -893,7 +900,9 @@ def grr_functional(
                 lam=outcome_lam,
                 p_norm=outcome_p_norm,
             )
-            fit_result = out.fit(X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            fit_result = out.fit(
+                X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose, fit_basis=False
+            )
             _raise_if_fit_failed(
                 result=fit_result,
                 what="Outcome regression",
@@ -911,14 +920,11 @@ def grr_functional(
             mu_obs.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = out.predict(X_te)
 
             # m(gamma_hat)
-            try:
-                m_mu.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = m.m_from_function(
-                    X_te,
-                    predict=out.predict,
-                    derivative=getattr(out, "derivative", None),
-                )
-            except NotImplementedError:
-                m_mu.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = np.nan
+            m_mu.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = m.m_from_function(
+                X_te,
+                predict=out.predict,
+                derivative=getattr(out, "derivative", None),
+            )
 
             # Cache cf values for Bernoulli TMLE if needed
             if "tmle" in ests and outcome_link_ == "logit" and isinstance(
@@ -1046,8 +1052,10 @@ def grr_functional(
                             pi = getattr(m, "pi", float(np.mean(D)))
                             m_mu_star = (D / pi) * (mu1_star - mu0_star)
                     elif isinstance(m, AMEFunctional):
-                        mu_clip = np.clip(mu, 1e-6, 1.0 - 1e-6)
-                        d_eta = m_mu_tag / (mu_clip * (1.0 - mu_clip))
+                        mu_valid = _open_unit_interval(
+                            mu, name="AME Bernoulli outcome prediction"
+                        )
+                        d_eta = m_mu_tag / (mu_valid * (1.0 - mu_valid))
                         m_mu_star = (
                             mu_star * (1.0 - mu_star) * (d_eta + eps_hat * m_alpha)
                         )
@@ -1112,7 +1120,7 @@ def grr_functional(
     if riesz_cv_selected:
         cv_diag: dict[str, object] = {
             "selected": riesz_cv_selected,
-            "strict_nested": bool(riesz_cv_config.strict_nested),
+            "strict_nested": True,
         }
         if return_riesz_cv_path and riesz_cv_paths:
             cv_diag["path"] = riesz_cv_paths
@@ -1253,8 +1261,10 @@ def grr_functional(
             if outcome_link_ == "identity":
                 cv_risk = float(np.mean(resid * resid))
             else:
-                p = np.clip(mu, 1e-12, 1.0 - 1e-12)
-                cv_risk = float(np.mean(-(y_ * np.log(p) + (1.0 - y_) * np.log(1.0 - p))))
+                p = _open_unit_interval(mu, name="Outcome prediction")
+                cv_risk = float(
+                    np.mean(-(y_ * np.log(p) + (1.0 - y_) * np.log1p(-p)))
+                )
             fold_means: list[float] = []
             fold_vars: list[float] = []
             for fold in splits:

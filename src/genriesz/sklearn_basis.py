@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from sklearn.preprocessing import OneHotEncoder
 
 from .basis import BaseBasis
 
@@ -62,11 +63,6 @@ class RandomForestLeafBasis(BaseBasis):
         self._encoder = None
 
     def fit(self, X: ArrayLike, y: ArrayLike | None = None):
-        try:
-            from sklearn.preprocessing import OneHotEncoder
-        except Exception as e:  # pragma: no cover
-            raise ImportError("RandomForestLeafBasis requires scikit-learn") from e
-
         X2, _ = _as_2d_allow_1d(X)
         if y is not None:
             self.model.fit(X2, np.asarray(y))
@@ -76,10 +72,7 @@ class RandomForestLeafBasis(BaseBasis):
         if leaves.ndim == 3 and leaves.shape[-1] == 1:
             leaves = leaves[:, :, 0]
 
-        try:
-            enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-        except TypeError:  # older scikit-learn
-            enc = OneHotEncoder(handle_unknown="ignore", sparse=False)
+        enc = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
         enc.fit(leaves)
         self._encoder = enc
         return self

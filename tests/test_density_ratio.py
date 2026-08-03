@@ -183,24 +183,22 @@ def test_singular_and_unsolvable_closed_form_raises_instead_of_returning_a_non_s
         )
 
 
-def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, recwarn):
-    """LinAlgError derives from ValueError, so ``except RuntimeError`` missed it.
-
-    A singular solve on one candidate used to escape the per-candidate handler
-    and abort the entire sweep, violating the "failing candidates are excluded
-    and counted" contract.
-    """
+def test_cv_excludes_a_failed_candidate_without_substitution(monkeypatch):
     import genriesz.density_ratio as dr
 
-    real = dr._solve_squared_closed_form
+    real = dr._solve_squared_closed_form_status
 
-    def flaky(*, Phi_num, Phi_den, C, penalty):
-        # Fail every fit at the first lam candidate, succeed at the second.
+    def failed_status(*, Phi_num, Phi_den, C, penalty):
         if penalty.lam == 1e-3:
-            raise np.linalg.LinAlgError("Singular matrix")
+            return dr._DensityRatioFit(
+                beta=None,
+                success=False,
+                status="singular",
+                message="Singular matrix",
+            )
         return real(Phi_num=Phi_num, Phi_den=Phi_den, C=C, penalty=penalty)
 
-    monkeypatch.setattr(dr, "_solve_squared_closed_form", flaky)
+    monkeypatch.setattr(dr, "_solve_squared_closed_form_status", failed_status)
 
     rng = np.random.default_rng(11)
     X_num = rng.normal(0.0, 1.0, size=(60, 1))
@@ -212,40 +210,39 @@ def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, re
         generator="sq",
         n_centers=20,
         sigma_grid=[1.0],
-        lam_grid=[1e-3, 1e-1],  # the 1e-3 candidate raises LinAlgError
+        lam_grid=[1e-3, 1e-1],
         cv=True,
         folds=3,
         random_state=0,
     )
 
-    # The surviving candidate is selected and the failures are reported, not raised.
     assert res.lam == 1e-1
     assert np.all(np.isfinite(res.beta))
-    messages = [str(w.message) for w in recwarn.list]
-    assert any("candidate fit(s) failed" in msg for msg in messages)
+    assert res.n_failed_candidates == 1
+    failed = [row for row in res.cv_path if not bool(row["success"])]
+    assert len(failed) == 1
+    assert failed[0]["lam"] == 1e-3
+    assert failed[0]["fold_status"] == ("singular", "singular", "singular")
 
 
-def test_cv_excludes_a_candidate_that_fails_while_being_scored(monkeypatch, recwarn):
-    """The candidate handler covers scoring, not just fitting.
-
-    ``gen.conjugate`` runs on the fitted v of the validation fold and can leave
-    the generator's domain there even though the fit itself succeeded. That
-    raised out of the loop and aborted the sweep.
-    """
+def test_cv_excludes_a_candidate_with_invalid_validation_scores(monkeypatch):
     import genriesz.density_ratio as dr
-    from genriesz import DomainError, SquaredGenerator
+    from genriesz import SquaredGenerator
+    from genriesz.generators import ConjugateEvaluation
 
-    real_conjugate = SquaredGenerator.conjugate
-    seen: list[float] = []
+    real_status = SquaredGenerator.conjugate_status
+    calls = {"n": 0}
 
-    def flaky_conjugate(self, X, v):
-        # Fail while scoring the first lam candidate only.
-        seen.append(1.0)
-        if len(seen) <= 3:  # folds=3
-            raise DomainError("conjugate left the domain")
-        return real_conjugate(self, X, v)
+    def invalid_then_valid(self, X, v):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            values = np.full(len(np.asarray(v).reshape(-1)), np.nan, dtype=float)
+            alpha = np.full_like(values, np.nan)
+            valid = np.zeros(values.shape, dtype=bool)
+            return ConjugateEvaluation(conjugate=values, alpha=alpha, valid=valid)
+        return real_status(self, X, v)
 
-    monkeypatch.setattr(dr.SquaredGenerator, "conjugate", flaky_conjugate)
+    monkeypatch.setattr(dr.SquaredGenerator, "conjugate_status", invalid_then_valid)
 
     rng = np.random.default_rng(12)
     X_num = rng.normal(0.0, 1.0, size=(60, 1))
@@ -263,6 +260,12 @@ def test_cv_excludes_a_candidate_that_fails_while_being_scored(monkeypatch, recw
         random_state=0,
     )
 
-    assert res.lam == 1e-1  # the candidate that failed to score was excluded
-    messages = [str(w.message) for w in recwarn.list]
-    assert any("candidate fit(s) failed" in msg for msg in messages)
+    assert res.lam == 1e-1
+    assert res.n_failed_candidates == 1
+    failed = [row for row in res.cv_path if not bool(row["success"])]
+    assert len(failed) == 1
+    assert failed[0]["fold_status"] == (
+        "validation_domain_error",
+        "validation_domain_error",
+        "validation_domain_error",
+    )
