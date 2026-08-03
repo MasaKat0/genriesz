@@ -58,6 +58,7 @@ Generators
 .. autoclass:: genriesz.UKLGenerator
 .. autoclass:: genriesz.BKLGenerator
 .. autoclass:: genriesz.BoundedBKLGenerator
+.. autoclass:: genriesz.BoundedUKLGenerator
 .. autoclass:: genriesz.BPGenerator
 .. autoclass:: genriesz.PUGenerator
 .. autoclass:: genriesz.BregmanGenerator

@@ -47,6 +47,7 @@ from .functionals import (
 from .generators import (
     BKLGenerator,
     BoundedBKLGenerator,
+    BoundedUKLGenerator,
     BPGenerator,
     BregmanGenerator,
     DomainError,
@@ -119,6 +120,7 @@ __all__ = [
     "UKLGenerator",
     "BKLGenerator",
     "BoundedBKLGenerator",
+    "BoundedUKLGenerator",
     "BPGenerator",
     "PUGenerator",
     "DomainError",
