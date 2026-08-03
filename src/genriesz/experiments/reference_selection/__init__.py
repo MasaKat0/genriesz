@@ -4,17 +4,18 @@ The design is specified in ``notebooks/experiments/REFERENCE_SELECTION_PLAN.md``
 Each experiment in that document maps to one entry point here:
 
 ===== ==================================================================
-E1a   :func:`refsel.rescaling.rescaling_table`
-E1b   selection rules in :mod:`refsel.selection`, reported by
-      :func:`refsel.report.selection_rule_table`
-E2    :func:`refsel.report.bias_bound_table`
-E3    :func:`refsel.report.oracle_regret_table`
-E4    :func:`refsel.report.uniform_coverage_table` and
-      :func:`refsel.report.worst_case_coverage_table`
-E5    :func:`refsel.report.reference_robustness_table` and
-      :func:`refsel.report.reference_check_table`
-E6    :func:`refsel.report.interval_length_table`
-E7    the ``high`` scenarios of :func:`refsel.grids.publication_grid`
+E1a   :func:`genriesz.experiments.reference_selection.rescaling.rescaling_table`
+E1b   selection rules in :mod:`genriesz.experiments.reference_selection.selection`, reported by
+      :func:`genriesz.experiments.reference_selection.report.selection_rule_table`
+E2    :func:`genriesz.experiments.reference_selection.report.bias_bound_table`
+E3    :func:`genriesz.experiments.reference_selection.report.oracle_regret_table`
+E4    :func:`genriesz.experiments.reference_selection.report.uniform_coverage_table` and
+      :func:`genriesz.experiments.reference_selection.report.worst_case_coverage_table`
+E5    :func:`genriesz.experiments.reference_selection.report.reference_robustness_table` and
+      :func:`genriesz.experiments.reference_selection.report.reference_check_table`
+E6    :func:`genriesz.experiments.reference_selection.report.interval_length_table`
+E7    the ``high`` scenarios of
+      :func:`genriesz.experiments.reference_selection.grids.publication_grid`
 ===== ==================================================================
 """
 

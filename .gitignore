@@ -217,6 +217,9 @@ notebooks/**/*.zip
 doc/*.tex
 doc/*.pdf
 
+# Paper manuscript (lives on disk only; never committed)
+/generalizedrieszregression/
+
 # Generated experiment outputs (keep the directory, ignore its contents)
 notebooks/experiments/data/*
 !notebooks/experiments/data/.gitkeep
@@ -227,4 +230,5 @@ notebooks/scorematchingriesz/data/*
 
 
 # Experiment results (Parquet). Regenerate with notebooks/experiments/09_reference_based_loss_link_selection.ipynb
-notebooks/experiments/results/
+notebooks/experiments/results/*
+!notebooks/experiments/results/.gitkeep

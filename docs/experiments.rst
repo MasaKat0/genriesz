@@ -22,49 +22,64 @@ Notebook map
    * - Notebook
      - Placement
      - Purpose
-   * - ``00_experiment_index.ipynb``
-     - Index
-     - Notebook map and shared conventions for the experiment suite.
    * - ``01_main_simulation_study.ipynb``
      - Main text
-     - Three-DGP simulation with compatible loss-link pairs, incompatible loss-link pairs, and regularization paths. ATE and ATT are both reported.
+     - Three data-generating processes with compatible and incompatible loss--link specifications. ATE and ATT are reported.
    * - ``02_main_empirical_ihdp.ipynb``
      - Main text
-     - IHDP semi-synthetic benchmark for ATE and ATT.
+     - IHDP semi-synthetic ATE and ATT analyses.
    * - ``03_main_empirical_lalonde.ipynb``
      - Main text
-     - Lalonde NSW treated ATT benchmark, with ATE reported as sensitivity.
+     - Lalonde NSW treated ATT analysis, with ATE as a sensitivity analysis.
    * - ``04_appendix_crossfit_comparison.ipynb``
-     - Appendix
-     - Cross fitting versus no cross fitting for ATE and ATT.
+     - Online Appendix
+     - Cross fitting compared with same-sample estimation.
    * - ``05_appendix_dimension_variation.ipynb``
-     - Appendix
-     - Dimension variation for ATE and ATT.
+     - Online Appendix
+     - Changes in covariate dimension for ATE and ATT.
    * - ``06_appendix_model_variation.ipynb``
-     - Appendix
-     - RKHS, polynomial, random forest, nearest-neighbor matching, and random Fourier features. GRR models estimate ATE and ATT; nearest-neighbor matching is kept as an ATE-only baseline when ATT is unsupported.
+     - Online Appendix
+     - Polynomial, kernel, random-feature, forest-leaf, and matching specifications where the estimator is defined.
    * - ``07_appendix_score_guided_balancing.ipynb``
-     - Appendix
-     - Score-guided balancing comparison: regressor balancing versus covariate balancing, with ATE and ATT displayed separately.
+     - Online Appendix
+     - Treatment-specific regressor balancing compared with a treatment-invariant covariate specification.
    * - ``08_appendix_zhao_kernel_experiments.ipynb``
-     - Appendix
-     - Zhao/Kang-Schafer balance path and kernel-basis mismatch experiments.
+     - Online Appendix
+     - Kang--Schafer balance paths and kernel-dictionary comparisons.
+   * - ``09_reference_based_loss_link_selection.ipynb``
+     - Main text and Online Appendix
+     - Reference-based selection with separate training, diagnostic, and evaluation observations.
+   * - ``10_coverage_decomposition.ipynb``
+     - Online Appendix
+     - Coverage decomposition under correct and misspecified dictionaries.
+   * - ``11_numerical_failure_selection.ipynb``
+     - Online Appendix
+     - Numerical failure rates and the direct held-out-imbalance selection diagnostic.
 
 Conventions
 -----------
 
-The experiment notebooks follow a few shared conventions (see
-``notebooks/experiments/README.md`` for the full rationale):
+The notebooks import shared statistical calculations from
+``genriesz.experiments``. Each notebook keeps its own table construction and
+figure commands, including axis labels, legends, and calls to ``plt.show()``.
+A missing empirical data file raises an error; no notebook creates substitute
+observations or downloads a different data set.
 
-- RKHS and random-Fourier bases use ``sigma="auto"`` (median-heuristic
-  bandwidth) rather than a fixed bandwidth.
-- Each notebook's setup cell installs message-targeted warning filters: the
-  spurious Accelerate-BLAS ``... encountered in matmul`` warnings and the
-  domain-clip warnings are suppressed, and in exchange the summary tables
-  report the clip **binding rate** so estimand modifications stay visible.
-- After re-running a notebook, run ``make notebooks-strip`` before committing;
-  ``make verify`` refuses executed notebooks that still carry ``stderr``
-  output.
+The experiment code evaluates exact generator links. If optimization fails, a
+KKT condition is not met, a score is nonfinite, or an exact dual-domain
+condition is violated, the candidate is recorded as unavailable. The code does
+not replace the candidate with another specification and does not cap the
+fitted representer after estimation. Probability bounds that appear in a data-
+generating process act before treatment is drawn and do not modify fitted
+weights.
+
+The reference-based selection design is described in
+``notebooks/experiments/REFERENCE_SELECTION_PLAN.md``. Its full configuration
+contains 18 scenarios and 24,000 replication jobs. The repository contains the
+code and calibration values, but not numerical results from an incomplete run.
+
+After re-running a notebook, use ``make notebooks-strip`` before committing.
+``make verify`` checks source files, tests, notebook outputs, and file sizes.
 
 ScoreMatchingRiesz notebooks
 ----------------------------

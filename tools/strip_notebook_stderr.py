@@ -29,15 +29,8 @@ import io
 import os
 import sys
 
+import nbformat
 from _gitutil import blob_text, is_experiment_notebook, staged_blob_shas, staged_paths
-
-try:
-    import nbformat
-except ImportError:  # pragma: no cover - depends on the environment
-    sys.exit(
-        "nbformat is required: pip install nbformat\n"
-        "(it ships with jupyter, which you need to run these notebooks anyway)"
-    )
 
 TARGET_GLOB = "notebooks/experiments/*.ipynb"
 

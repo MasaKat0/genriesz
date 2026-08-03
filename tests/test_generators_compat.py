@@ -15,14 +15,15 @@ Three invariants are protected here.
    must not depend on ``v`` for this to be exact, which is why the generators
    warn when ``branch_fn`` is absent.)
 
-2. **KKT residual == imbalance.** Consequently the optimizer diagnostic
-   ``FitResult.kkt_residual`` and the balancing diagnostic
-   ``max_j |mean(alpha * phi_j - M_j)|`` are the *same number* at an unpenalized
-   solution, and differ by exactly the penalty gradient otherwise. Model
-   selection relies on this (``r_hat`` and ``held_out_imbalance`` in
-   ``score_grr_candidate``), and the balancing system is generator-independent:
-   SQ, UKL and BP drive the same linear conditions to zero and are therefore
-   interchangeable ATE balancing candidates.
+2. **KKT residual and imbalance.** At an interior solution, the optimizer
+   diagnostic ``FitResult.kkt_residual`` equals the balancing diagnostic
+   ``max_j |mean(alpha * phi_j - M_j)|`` without a penalty, and the penalty
+   gradient gives the corresponding shift under regularization. BP and BKL
+   have open dual domains. If the fitted linear predictor reaches the numerical
+   margin that represents such a boundary, the constrained KKT system replaces
+   the unconstrained balance equation. Model selection uses the reported KKT
+   residual and the held-out imbalance without treating a boundary solution as
+   exact balance.
 
 3. **The BKL logistic-MLE route is not one of them.** ``fit_density_ratio``
    fits BKL as a probabilistic classifier and predicts ``prior * exp(v)``; its
@@ -178,30 +179,51 @@ def test_l2_penalty_shifts_the_balance_by_exactly_the_penalty_gradient(name, mak
     assert fr.success
 
     delta = _imbalance(gen, X, Phi, M, model.beta_)
-    # Stationarity of the penalized objective: delta = -lam * beta.
-    assert np.allclose(delta, -lam * model.beta_, atol=1e-5)
-    assert fr.kkt_residual == pytest.approx(
-        float(np.max(np.abs(delta + lam * model.beta_))), rel=1e-6, abs=1e-9
-    )
+    stationarity = delta + lam * model.beta_
+    if fr.clip_binding_rate == 0.0:
+        # Interior stationarity of the penalized objective gives
+        # delta = -lam * beta.
+        assert np.allclose(delta, -lam * model.beta_, atol=1e-5)
+        assert fr.kkt_residual == pytest.approx(
+            float(np.max(np.abs(stationarity))), rel=1e-6, abs=1e-9
+        )
+    else:
+        # BP can attain the numerical margin of its open dual domain. The
+        # unconstrained gradient then need not vanish, but the constrained KKT
+        # residual must still be small.
+        assert name == "bp"
+        assert fr.kkt_residual < 1e-5
+        assert np.max(np.abs(stationarity)) > 1e-4
     # The penalty genuinely moves the balance away from zero, so the previous
     # test's unpenalized identity is not vacuous.
     assert np.max(np.abs(delta)) > 1e-4
 
 
-def test_balancing_conditions_are_generator_independent():
-    """SQ, UKL and BP solve the same linear system, so they are interchangeable."""
+def test_compatible_generators_share_the_balance_equations_in_the_interior():
+    """Compatible generators use the same equations when no domain bound is active."""
 
     X, _ = _make_ate(n=300, seed=4)
     basis, m, Phi, M = _design(X)
+    boundary_cases = 0
 
-    for _, make_gen in BALANCING_GENERATORS:
+    for name, make_gen in BALANCING_GENERATORS:
         gen = make_gen()
         model = GRRGLM(basis=basis, generator=gen, functional=m, penalty=None, lam=0.0)
         fr = model.fit(X, max_iter=2000, tol=1e-12)
         assert fr.success
-        # Same (Phi, M), same balance conditions, different link: all reach zero.
         delta = _imbalance(gen, X, Phi, M, model.beta_)
-        assert np.max(np.abs(delta)) < 1e-5
+        if fr.clip_binding_rate == 0.0:
+            assert np.max(np.abs(delta)) < 1e-5
+        else:
+            # This seed makes the BP solution attain the numerical margin of
+            # its exact dual domain. The constrained KKT condition, rather than
+            # unconstrained exact balance, is the relevant first-order result.
+            assert name == "bp"
+            boundary_cases += 1
+            assert fr.kkt_residual < 1e-5
+            assert np.max(np.abs(delta)) > 1e-4
+
+    assert boundary_cases == 1
 
 
 # ---------------------------------------------------------------------------
@@ -303,15 +325,8 @@ def _select(gen, *, n: int = 250, seed: int = 10, admissibility_thresholds=None)
 
 def test_bounded_generator_is_excluded_from_the_admissible_set():
     gen = BoundedBKLGenerator(C=1e-2, alpha_max=30.0, branch_fn=_treated_branch)
-    with pytest.warns(UserWarning, match="modifies the estimand"):
-        res = _select(gen)
-
-    assert res.modifies_estimand is True
-    assert res.n_admissible == 0
-    assert res.n_candidates == 2
-    assert all(r["modifies_estimand"] and not r["admissible"] for r in res.path)
-    # Selection still happens -- it is a target-sensitivity sweep, not a failure.
-    assert res.lam in (1e-2, 1e-1)
+    with pytest.raises(RuntimeError, match="modifying the estimand"):
+        _select(gen)
 
 
 def test_exclusion_holds_even_when_the_bound_never_binds():
@@ -330,12 +345,8 @@ def test_exclusion_holds_even_when_the_bound_never_binds():
     """
 
     gen = BoundedBKLGenerator(C=1e-2, alpha_max=1e6, branch_fn=_treated_branch)
-    with pytest.warns(UserWarning, match="modifies the estimand"):
-        res = _select(gen, admissibility_thresholds={"min_ess_ratio": None})
-
-    assert all(r["cap_binding_rate"] == 0.0 for r in res.path)
-    assert res.n_admissible == 0
-    assert res.modifies_estimand is True
+    with pytest.raises(RuntimeError, match="modifying the estimand"):
+        _select(gen, admissibility_thresholds={"min_ess_ratio": None})
 
 
 def test_unbounded_generator_stays_admissible():
@@ -350,15 +361,19 @@ def test_all_candidates_failing_raises_without_the_sensitivity_warning():
 
     X, Y = _make_ate(n=120, seed=13)
 
-    def _boom(_alpha):
-        raise RuntimeError("generator explodes")
-
-    gen = BregmanGenerator(g=_boom)
+    gen = BregmanGenerator(
+        g=lambda alpha: alpha * alpha,
+        grad=lambda alpha: 2.0 * alpha,
+        inv_grad=lambda _value: float("nan"),
+        grad2=lambda _alpha: 2.0,
+    )
     gen.modifies_estimand = True
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        with pytest.raises(RuntimeError, match="No Riesz candidate could be fitted and scored"):
+        with pytest.raises(
+            RuntimeError, match="No Riesz candidate passed the admissibility screen"
+        ):
             _select(gen, n=120, seed=13)
 
     assert not [w for w in caught if "modifies the estimand" in str(w.message)]

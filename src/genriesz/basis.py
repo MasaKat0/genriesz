@@ -4,7 +4,7 @@ In *genriesz*, Riesz representers and nuisance regressions are typically fit
 in a (possibly high-dimensional) linear model on top of a **basis** / feature
 map ``phi(x)``.
 
-The API is intentionally lightweight:
+The basis API has three operations:
 
 - ``basis.fit(X, y=None)`` (optional)
 - ``basis(X) -> (n, p)`` feature matrix
@@ -18,7 +18,6 @@ from __future__ import annotations
 import copy
 import functools
 import types
-import warnings
 from collections.abc import Callable
 from typing import Protocol
 
@@ -476,13 +475,9 @@ def _lookup_method(obj: object, name: str) -> object | None:
     if not _defines(type(attr), "__get__"):
         return attr  # not a descriptor: it binds to itself
     if type(attr) is types.MemberDescriptorType:
-        # Reading an unset slot raises AttributeError, the data model's way of
-        # saying the attribute is absent. That is the one meaning it can carry,
-        # and attribute access answers it by consulting ``__getattr__`` next.
-        try:
-            return _bind(attr, obj)
-        except AttributeError:
-            return _dynamic_lookup(obj, name)
+        # A slot may be unset. Normal attribute access then consults ``__getattr__``
+        # and returns the supplied default when the name remains absent.
+        return getattr(obj, name, None)
     return _bind(attr, obj)
 
 
@@ -534,7 +529,7 @@ def coerce_basis(basis: Basis | Callable) -> Basis:
     would trigger it. The same hazard applies to ``fit`` and ``copy``, which a
     caller's feature map may define as properties, so both go through
     :func:`_lookup_method`. The one place code does run is that helper's
-    ``__getattr__`` fallback, for objects that opted into dynamic attributes.
+    dynamic ``__getattr__`` lookup, for objects that opted into dynamic attributes.
 
     Define ``fit`` and ``copy`` as methods. A property named ``fit`` is read as
     a property, not as a method, and the object is treated as a feature map.
@@ -979,21 +974,18 @@ def _resolve_sigma(
     """Resolve ``sigma`` to a positive float, applying the median heuristic.
 
     ``"auto"`` maps to the median pairwise distance of the (already standardized)
-    training rows ``Xs``. If that heuristic is degenerate (e.g. duplicate rows),
-    it falls back to ``1.0`` with a warning so the kernel stays well defined.
+    training rows ``Xs``. Identical or nonfinite rows do not determine a positive
+    bandwidth, so the method reports that the automatic choice is undefined.
     """
 
     if not isinstance(sigma, str):
         return float(sigma)
     med = _median_pairwise_distance(Xs, random_state=random_state)
     if not np.isfinite(med) or med <= 0:
-        warnings.warn(
-            "sigma='auto' median heuristic produced a non-positive bandwidth "
-            "(degenerate training rows); falling back to sigma=1.0.",
-            UserWarning,
-            stacklevel=3,
+        raise ValueError(
+            "sigma='auto' requires a positive pairwise-distance median; the "
+            "training rows are identical, insufficient, or nonfinite."
         )
-        return 1.0
     return float(med)
 
 
@@ -1180,7 +1172,7 @@ class GaussianRKHSBasis(BaseBasis):
         gram = (Phi.T @ Phi) / Phi.shape[0]
         gram = gram + float(ridge) * np.eye(gram.shape[0])
         evals = np.linalg.eigvalsh(gram)
-        evals = np.clip(evals, 0.0, None)
+        evals = np.maximum(evals, 0.0)
         cond = float(evals[-1] / evals[0]) if evals[0] > 0 else float("inf")
         total = float(np.sum(evals))
         if total > 0:

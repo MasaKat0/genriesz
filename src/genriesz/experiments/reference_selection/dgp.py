@@ -15,6 +15,7 @@ from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import expit
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
@@ -141,8 +142,8 @@ def propensity(
     overlap_scale: float,
     hidden_scale: float,
 ) -> FloatArray:
-    index = np.clip(overlap_scale * _treatment_index(Z, design, hidden_scale), -35.0, 35.0)
-    return 1.0 / (1.0 + np.exp(-index))
+    index = overlap_scale * _treatment_index(Z, design, hidden_scale)
+    return expit(index)
 
 
 def true_representer(

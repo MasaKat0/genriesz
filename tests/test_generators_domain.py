@@ -1,6 +1,6 @@
-"""Domain / clip diagnostics for the built-in Bregman generators.
+"""Domain diagnostics for the built-in Bregman generators.
 
-Covers design-doc items E/P (clip visibility) and the conjugate identity
+Covers exact-domain visibility and the conjugate identity
 d g*(v)/dv = alpha(v), which guarantees that the GRR objective and gradient
 are mutually consistent wherever the link is smooth.
 """
@@ -88,8 +88,8 @@ def test_sq_reports_no_binding():
     assert not np.any(gen.domain_binding(X, np.array([-1e6, -1.0, 1.0, 1e6])))
 
 
-def test_bkl_and_pu_warn_without_branch_fn():
-    with pytest.warns(UserWarning, match="branch_fn"):
+def test_bkl_and_pu_require_branch_fn():
+    with pytest.raises(ValueError, match="requires branch_fn"):
         BKLGenerator(C=1.0)
-    with pytest.warns(UserWarning, match="branch_fn"):
+    with pytest.raises(ValueError, match="requires branch_fn"):
         PUGenerator(C=1.0)

@@ -27,9 +27,9 @@ This module provides:
   - :class:`BPGenerator` ("BP")
   - :class:`PUGenerator` ("PU")
 
-- A flexible :class:`BregmanGenerator` that lets users specify an arbitrary
-  generator ``g`` and (optionally) its derivatives. If derivatives are omitted,
-  they are approximated numerically.
+- A flexible :class:`BregmanGenerator` for a user-specified generator ``g``.
+  The first derivative, inverse derivative, and second derivative must be
+  supplied explicitly.
 
 Notes
 -----
@@ -46,10 +46,10 @@ length n.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
-import warnings
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -57,6 +57,23 @@ from numpy.typing import ArrayLike, NDArray
 from .utils import as_1d_of_length, as_2d
 
 BranchFn = Callable[[NDArray[np.float64]], int]
+
+
+@dataclass(frozen=True)
+class GeneratorEvaluation:
+    """Values and validity indicators for an exact inverse-link evaluation."""
+
+    values: NDArray[np.float64]
+    valid: NDArray[np.bool_]
+
+
+@dataclass(frozen=True)
+class ConjugateEvaluation:
+    """Conjugate values, inverse-link values, and their validity indicators."""
+
+    conjugate: NDArray[np.float64]
+    alpha: NDArray[np.float64]
+    valid: NDArray[np.bool_]
 
 #: Upper bound on the number of arrays memoized inside ``branch_cache()``.
 #: Solvers see one array per fit; the bound only exists so a caller that hands a
@@ -67,128 +84,76 @@ _BRANCH_CACHE_MAX_ENTRIES = 8
 class DomainError(RuntimeError):
     """Raised when a generator cannot evaluate its link/conjugate at a point.
 
-    This replaces the previous behavior of silently returning a huge objective
-    value and a zero gradient (or silently clipping the pre-image to a value
-    that makes the returned ``alpha`` explode), which could make the optimizer
-    stop at a broken point with ``success=True``. Callers (e.g. ``GRRGLM.fit``)
-    catch this and record an explicit ``status="domain_error"`` failure.
+    This replaces the previous behavior of silently returning a large objective
+    value and a zero gradient or changing the inverse-link value. Status-returning
+    generator methods let solvers record a failed fit without substituting a
+    different representer value. Direct calls to an exact link raise this error.
     """
 
 
 class _RowwiseScalarFn:
-    """Wrap a scalar function and provide vectorized or rowwise evaluation.
+    """Evaluate a scalar callable once per observation.
 
-    The wrapped callable can have signature:
-
-    - ``f(alpha)``
-    - ``f(x, alpha)`` where ``x`` is a 1D regressor row
-    - a vectorized form: ``f(alpha_array)`` or ``f(X, alpha_array)``
-
-    Whether the callable is vectorized is decided once, by probing it. The probe
-    must not confuse *"this function cannot take arrays"* with *"this data is
-    outside the function's domain"*: a generator that raises
-    :class:`DomainError` on a bad ``alpha`` is still vectorized, and permanently
-    demoting it to a Python loop would silently cost O(n) per objective
-    evaluation for the rest of the fit. So when the vectorized probe raises, the
-    same inputs are retried rowwise:
-
-    - rowwise succeeds -> the failure was the signature; use rowwise from now on.
-    - rowwise fails too -> the failure was the data; propagate it and leave the
-      vectorization verdict undecided so the next call can probe again.
-
-    Once the verdict is ``True`` the vectorized call is made directly, with no
-    exception handling, so domain errors surface unchanged.
+    A custom generator callable must have signature ``f(alpha)`` or
+    ``f(x, alpha)`` and must return one scalar for one observation. The
+    convention is explicit: the library does not probe a callable, catch an
+    exception, and silently switch between vectorized and rowwise evaluation.
     """
 
     def __init__(self, func: Callable):
         self.func = func
+        sig = inspect.signature(func)
+        positional = [
+            parameter
+            for parameter in sig.parameters.values()
+            if parameter.kind
+            in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        ]
+        if len(positional) not in (1, 2):
+            raise TypeError(
+                "A custom generator callable must accept f(alpha) or f(x, alpha)."
+            )
+        self._arity = len(positional)
+        self._vectorized = False
 
-        # Determine whether the function expects 1 or 2 positional args.
-        try:
-            sig = inspect.signature(func)
-            n_pos = 0
-            for p in sig.parameters.values():
-                if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
-                    n_pos += 1
-            self._arity = 1 if n_pos <= 1 else 2
-        except Exception:
-            # If we cannot inspect, assume 2-arg form.
-            self._arity = 2
-
-        # None = unknown, True = vectorized works, False = rowwise only
-        self._vectorized: bool | None = None
-
-    def _call_vectorized(
+    def __call__(
         self, X: NDArray[np.float64], a: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        out = self.func(a) if self._arity == 1 else self.func(X, a)
-        return np.asarray(out, dtype=float).reshape(-1)
-
-    def _call_rowwise(
-        self, X: NDArray[np.float64], a: NDArray[np.float64]
-    ) -> NDArray[np.float64]:
-        out = np.empty(len(a), dtype=float)
+        X_ = as_2d(X)
+        a_ = as_1d_of_length(a, n=len(X_), name="a")
+        out = np.empty(len(a_), dtype=float)
         if self._arity == 1:
-            for i in range(len(a)):
-                out[i] = float(self.func(float(a[i])))
+            for i in range(len(a_)):
+                out[i] = float(self.func(float(a_[i])))
         else:
-            for i in range(len(a)):
-                out[i] = float(self.func(np.asarray(X[i], dtype=float), float(a[i])))
+            for i in range(len(a_)):
+                out[i] = float(
+                    self.func(np.asarray(X_[i], dtype=float), float(a_[i]))
+                )
         return out
 
-    def _probe(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> bool:
-        # Two rows: one cannot separate "returns a scalar" from "returns one
-        # value per row".
-        k = 2
-        Xk, ak = X[:k], a[:k]
-        try:
-            out = self._call_vectorized(Xk, ak)
-        except Exception:
-            # Signature problem, or bad data? Ask the rowwise path.
-            self._call_rowwise(Xk, ak)  # raises the data error, if that is what it was
-            return False
-        return bool(out.shape[0] == k)
 
-    def _try_both(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
-        """Evaluate without recording a verdict (fewer than two rows).
+class _BranchCacheContext(AbstractContextManager[None]):
+    """Install and restore one generator branch-sign cache."""
 
-        Vectorized first, exactly as before this module learned to probe: a
-        vectorized-only callable must keep working when it is handed a single
-        row. A failure falls through to rowwise, which re-raises if the cause was
-        the data rather than the signature.
-        """
+    def __init__(self, generator: BregmanGenerator):
+        self.generator = generator
+        self.previous: dict[
+            int, tuple[NDArray[np.float64], NDArray[np.float64]]
+        ] | None = None
 
-        try:
-            out = self._call_vectorized(X, a)
-        except Exception:
-            return self._call_rowwise(X, a)
-        if out.shape[0] == len(a):
-            return out
-        return self._call_rowwise(X, a)
+    def __enter__(self) -> None:
+        self.previous = self.generator._branch_cache
+        self.generator._branch_cache = {}
+        return None
 
-    def __call__(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.float64]:
-        X = as_2d(X)
-        a = as_1d_of_length(a, n=len(X), name="a")
-
-        if self._vectorized is None:
-            if len(a) < 2:
-                return self._try_both(X, a)
-            self._vectorized = self._probe(X, a)
-
-        if self._vectorized:
-            out = self._call_vectorized(X, a)
-            if out.shape[0] != len(a):
-                raise ValueError(
-                    f"vectorized callable returned {out.shape[0]} values for "
-                    f"{len(a)} observations"
-                )
-            return out
-
-        return self._call_rowwise(X, a)
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        self.generator._branch_cache = self.previous
+        return False
 
 
 class BregmanGenerator:
-    """A Bregman generator with an (optional) automatic link.
+    """A Bregman generator with an explicit fitting link.
 
     Parameters
     ----------
@@ -196,29 +161,24 @@ class BregmanGenerator:
         Generator function ``g(x, alpha)`` or ``g(alpha)``.
     grad:
         First derivative wrt alpha, ``∂g(x, alpha)/∂alpha``.
-        If omitted, it is approximated by finite differences.
     inv_grad:
-        Inverse derivative (link) ``alpha = (∂g)^{-1}(x, v)``.
-        If omitted, it is computed by Newton iterations using ``grad`` and
-        ``grad2``.
+        Inverse derivative (link) ``alpha = (∂g)^{-1}(x, v)``. A custom
+        generator used for fitting must supply this function explicitly.
     grad2:
-        Second derivative wrt alpha (elementwise). If omitted, it is
-        approximated from ``g`` via a second-order finite difference.
+        Second derivative wrt alpha (elementwise).
     name:
         Display name.
     C:
         Optional domain parameter used by some generator families.
-        The generic implementation uses it only as a soft domain guard.
     branch_fn:
         Optional branch selector returning 1 (positive) or 0 (negative).
         Built-in UKL/BP generators use this to choose the sign branch.
 
     Notes
     -----
-    The generic (user-specified) generator supports regressor-dependent
-    generators via ``g(x, alpha)``. For performance and numerical stability,
-    providing analytic ``grad`` and especially ``inv_grad`` is strongly
-    recommended.
+    The generic generator supports regressor-dependent functions through
+    ``g(x, alpha)``. The solver never infers a link from failed numerical
+    inversion; ``inv_grad`` defines the fitted model.
     """
 
     #: Whether this generator's link intentionally bounds/caps the representer
@@ -237,9 +197,6 @@ class BregmanGenerator:
         name: str = "Custom",
         C: float = 0.0,
         branch_fn: BranchFn | None = None,
-        finite_diff_eps: float = 1e-6,
-        newton_max_iter: int = 60,
-        newton_tol: float = 1e-10,
     ):
         self.name = str(name)
         self.C = float(C)
@@ -250,14 +207,28 @@ class BregmanGenerator:
             None
         )
 
+        if type(self) is BregmanGenerator:
+            missing = [
+                name
+                for name, value in (
+                    ("g", g),
+                    ("grad", grad),
+                    ("inv_grad", inv_grad),
+                    ("grad2", grad2),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ValueError(
+                    "A custom BregmanGenerator requires explicit "
+                    + ", ".join(missing)
+                    + "."
+                )
+
         self._g = None if g is None else _RowwiseScalarFn(g)
         self._grad = None if grad is None else _RowwiseScalarFn(grad)
         self._inv_grad = None if inv_grad is None else _RowwiseScalarFn(inv_grad)
         self._grad2 = None if grad2 is None else _RowwiseScalarFn(grad2)
-
-        self._eps = float(finite_diff_eps)
-        self._newton_max_iter = int(newton_max_iter)
-        self._newton_tol = float(newton_tol)
 
     # ------------------------------------------------------------------
     # Compatibility helpers
@@ -276,45 +247,77 @@ class BregmanGenerator:
     def evaluate_inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         return self.inv_grad(X, v)
 
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Return where the exact inverse derivative is defined."""
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+    def signed_dual_interval(
+        self, *, margin: float
+    ) -> tuple[float, float, float] | None:
+        """Return bounds for ``u = s v`` when the exact domain is linear."""
+
+        _ = margin
+        return None
+
+    def inv_grad_status(self, X: ArrayLike, v: ArrayLike) -> GeneratorEvaluation:
+        """Evaluate the exact inverse link without clipping or substitution."""
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        valid = np.asarray(self.dual_domain_mask(X_, v_), dtype=bool)
+        values = np.full(v_.shape, np.nan, dtype=float)
+        if bool(np.all(valid)):
+            # Keep the original X object so a branch selector that depends only
+            # on X is evaluated once inside branch_cache().
+            values[:] = np.asarray(self.inv_grad(X_, v_), dtype=float)
+        elif np.any(valid):
+            values[valid] = np.asarray(self.inv_grad(X_[valid], v_[valid]), dtype=float)
+        valid = valid & np.isfinite(values)
+        values[~valid] = np.nan
+        return GeneratorEvaluation(values=values, valid=valid)
+
+    def conjugate_status(self, X: ArrayLike, v: ArrayLike) -> ConjugateEvaluation:
+        """Evaluate the exact convex conjugate and report invalid rows."""
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        link = self.inv_grad_status(X_, v_)
+        conjugate = np.full(v_.shape, np.nan, dtype=float)
+        if np.any(link.valid):
+            alpha = link.values[link.valid]
+            g_value = self.g(X_[link.valid], alpha)
+            extended = (
+                np.asarray(v_[link.valid], dtype=np.longdouble)
+                * np.asarray(alpha, dtype=np.longdouble)
+                - np.asarray(g_value, dtype=np.longdouble)
+            )
+            representable = np.isfinite(extended) & (
+                np.abs(extended) <= np.finfo(float).max
+            )
+            valid_locations = np.flatnonzero(link.valid)
+            conjugate[valid_locations[representable]] = np.asarray(
+                extended[representable], dtype=float
+            )
+        valid = link.valid & np.isfinite(conjugate)
+        conjugate[~valid] = np.nan
+        alpha = link.values.copy()
+        alpha[~valid] = np.nan
+        return ConjugateEvaluation(conjugate=conjugate, alpha=alpha, valid=valid)
+
     # ------------------------------------------------------------------
     # Internal utilities
     # ------------------------------------------------------------------
-    @contextlib.contextmanager
-    def branch_cache(self) -> Iterator[None]:
-        """Memoize the branch signs of each ``X`` seen inside the block.
+    def branch_cache(self) -> AbstractContextManager[None]:
+        """Memoize branch signs during one sequential fit.
 
-        ``branch_fn`` is a function of ``x`` alone, so within a fit the sign
-        array is constant while ``v`` changes on every objective and gradient
-        evaluation. Without this, an L-BFGS fit calls ``branch_fn`` once per row
-        per evaluation -- tens of thousands of Python calls for a few hundred
-        rows of real work.
-
-        Entries are keyed by array identity (a strong reference is held, so ids
-        cannot be recycled). **Do not mutate ``X`` in place inside the block**;
-        the cache cannot see that.
-
-        Use it as a ``with`` block. Nesting is safe -- the previous cache is
-        restored on exit -- but the save/restore is LIFO, so a generator instance
-        must not be shared between concurrently running fits (threads, or manual
-        out-of-order ``__enter__``/``__exit__``). Generators already carry other
-        mutable probe state and were never thread-safe; the library's solvers are
-        sequential.
-
-        A caller that hands a *fresh* array to every call -- e.g. an ``int`` or
-        ``float32`` ``X``, which ``np.asarray(..., dtype=float)`` must copy --
-        would never hit the cache and would otherwise accumulate one full array
-        per call. The cache is therefore capped at
-        :data:`_BRANCH_CACHE_MAX_ENTRIES`; past that it is cleared rather than
-        grown, degrading to the uncached cost instead of leaking memory. The
-        solvers normalize ``X`` once before fitting, so they keep a single entry.
+        The selector is a function of ``X`` alone. Reusing its values avoids
+        repeated Python calls while the optimizer changes the dual coordinate.
         """
 
-        prev = self._branch_cache
-        self._branch_cache = {}
-        try:
-            yield
-        finally:
-            self._branch_cache = prev
+        return _BranchCacheContext(self)
 
     def _branch_signs(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
         s = np.empty(len(X), dtype=float)
@@ -326,7 +329,10 @@ class BregmanGenerator:
         """Return +1/-1 sign array for branch-wise generators."""
 
         if self.branch_fn is None:
-            return np.where(v >= 0.0, 1.0, -1.0)
+            raise RuntimeError(
+                "A branch-wise generator requires an explicit branch_fn. "
+                "The branch cannot be inferred from the fitted dual coordinate."
+            )
 
         cache = self._branch_cache
         if cache is None:
@@ -367,13 +373,9 @@ class BregmanGenerator:
         X_ = as_2d(X)
         a_ = as_1d_of_length(alpha, n=len(X_), name="alpha")
 
-        if self._grad is not None:
-            return self._grad(X_, a_)
-
-        # Finite differences on g
-        eps = self._eps
-        gfn = self._require_g()
-        return (gfn(X_, a_ + eps) - gfn(X_, a_ - eps)) / (2.0 * eps)
+        if self._grad is None:
+            raise RuntimeError("This generator does not define grad().")
+        return self._grad(X_, a_)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Evaluate the second derivative ∂²g/∂alpha² row-wise."""
@@ -381,68 +383,21 @@ class BregmanGenerator:
         X_ = as_2d(X)
         a_ = as_1d_of_length(alpha, n=len(X_), name="alpha")
 
-        if self._grad2 is not None:
-            return self._grad2(X_, a_)
-
-        # Second-order finite difference on g
-        eps = self._eps
-        gfn = self._require_g()
-        g_p = gfn(X_, a_ + eps)
-        g_0 = gfn(X_, a_)
-        g_m = gfn(X_, a_ - eps)
-        return (g_p - 2.0 * g_0 + g_m) / (eps * eps)
+        if self._grad2 is None:
+            raise RuntimeError("This generator does not define grad2().")
+        return self._grad2(X_, a_)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
-        """Inverse derivative map alpha = (∂g)^{-1}(x, v)."""
+        """Evaluate the inverse derivative supplied by the user."""
 
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-
-        if self._inv_grad is not None:
-            return self._inv_grad(X_, v_)
-
-        # Automatic inversion via Newton iterations.
-        # This is a generic fallback and may be slow or unstable.
-        s = self._sign(X_, v_)
-
-        # Heuristic initialization.
-        alpha = v_.copy()
-        if self.branch_fn is not None:
-            alpha = s * np.abs(alpha)
-
-        # Soft domain guard used by UKL/BP-like generators.
-        if self.C > 0:
-            alpha = s * np.maximum(np.abs(alpha), self.C + 1e-6)
-
-        tol = self._newton_tol
-        for _ in range(self._newton_max_iter):
-            g1 = self.grad(X_, alpha)
-            diff = g1 - v_
-            max_abs = float(np.max(np.abs(diff)))
-            if not np.isfinite(max_abs):
-                break
-            if max_abs < tol:
-                return alpha
-
-            g2 = self.grad2(X_, alpha)
-            g2 = np.asarray(g2, dtype=float)
-            # Guard against non-positive curvature (should not happen for strictly convex g).
-            g2 = np.where(np.isfinite(g2) & (g2 > 1e-12), g2, 1e-12)
-
-            step = diff / g2
-            step = np.clip(step, -50.0, 50.0)
-            alpha = alpha - step
-
-            if self.branch_fn is not None:
-                alpha = s * np.abs(alpha)
-            if self.C > 0:
-                alpha = s * np.maximum(np.abs(alpha), self.C + 1e-6)
-
-        # If we reach here, Newton did not converge reliably.
-        raise RuntimeError(
-            "Failed to numerically invert grad. Provide inv_grad (and preferably grad/grad2) "
-            "for this generator."
-        )
+        if self._inv_grad is None:
+            raise RuntimeError(
+                "A custom BregmanGenerator used for fitting must provide inv_grad. "
+                "No numerical inverse or substitute link is used."
+            )
+        return self._inv_grad(X_, v_)
 
     def conjugate(
         self, X: ArrayLike, v: ArrayLike
@@ -453,15 +408,25 @@ class BregmanGenerator:
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         alpha = self.inv_grad(X_, v_)
         g_val = self.g(X_, alpha)
-        g_star = v_ * alpha - g_val
+        extended = (
+            np.asarray(v_, dtype=np.longdouble) * np.asarray(alpha, dtype=np.longdouble)
+            - np.asarray(g_val, dtype=np.longdouble)
+        )
+        representable = np.isfinite(extended) & (np.abs(extended) <= np.finfo(float).max)
+        if not np.all(representable):
+            n_bad = int(np.sum(~representable))
+            raise DomainError(
+                f"Generator '{self.name}' produced {n_bad}/{len(v_)} convex-conjugate "
+                "value(s) outside the finite float64 range."
+            )
+        g_star = np.asarray(extended, dtype=float)
         return g_star, alpha
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        """Return a boolean mask of observations where an internal domain clip binds.
+        """Return where an explicit bound or an exact-domain margin is active.
 
-        The base implementation reports no binding. Built-in generators with
-        numerical clips in ``inv_grad`` override this so that solvers and
-        diagnostics can surface the clip binding rate instead of hiding it.
+        The base implementation reports no binding. A bounded generator may
+        override this method because its bound changes the fitted target.
         """
 
         X_ = as_2d(X)
@@ -523,54 +488,95 @@ class UKLGenerator(BregmanGenerator):
         if float(C) < 0:
             raise ValueError("C must be >= 0")
         if branch_fn is None:
-            warnings.warn(
-                "UKLGenerator without branch_fn uses sign(v) to select the alpha branch. "
-                "This is correct only when |alpha| > C + 1. "
-                "For GRR with functionals that require negative alpha (e.g. ATE/ATT), "
-                "provide branch_fn or use SquaredGenerator instead.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                "UKLGenerator requires branch_fn because the representer branch "
+                "must be fixed by the estimand rather than inferred from v."
             )
         super().__init__(name="UKL", C=float(C), branch_fn=branch_fn)
+
+    def _representable_link(
+        self, X: NDArray[np.float64], v: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
+        s = self._sign(X, v)
+        z = s * v
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            exp_term = np.exp(z)
+            alpha_abs = self.C + exp_term
+        valid = (
+            np.isfinite(v)
+            & np.isfinite(exp_term)
+            & (exp_term > 0.0)
+            & np.isfinite(alpha_abs)
+            & (alpha_abs > self.C)
+        )
+        return s, alpha_abs, valid
+
+    def signed_dual_interval(
+        self, *, margin: float
+    ) -> tuple[float, float, float]:
+        inward = max(float(margin), np.finfo(float).eps)
+        min_positive = np.nextafter(0.0, 1.0)
+        max_float = np.finfo(float).max
+        minimum_distance = (
+            np.nextafter(self.C, np.inf) - self.C if self.C > 0.0 else min_positive
+        )
+        maximum_distance = np.nextafter(max_float - self.C, 0.0)
+        return (
+            float(np.log(minimum_distance) + inward),
+            float(np.log(maximum_distance) - inward),
+            0.0,
+        )
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Branch-wise inverse gradient alpha = (g')^{-1}(v)."""
 
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-        s = self._sign(X_, v_)
+        s, alpha_abs, valid = self._representable_link(X_, v_)
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                f"UKLGenerator cannot represent the exact inverse link for "
+                f"{n_bad}/{len(v_)} observation(s) in float64."
+            )
+        return s * alpha_abs
 
-        # exp can underflow to 0 for large negative inputs; clip and floor.
-        z = np.clip(s * v_, -700.0, 700.0)
-        exp_term = np.exp(z)
-        exp_term = np.maximum(exp_term, 1e-12)
-        return s * (self.C + exp_term)
-
-    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-        z = self._sign(X_, v_) * v_
-        return (z <= np.log(1e-12)) | (z >= 700.0)
+        _, _, valid = self._representable_link(X_, v_)
+        return valid
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        return ~self.dual_domain_mask(X, v)
+
+    def _positive_distance(self, alpha: NDArray[np.float64]) -> NDArray[np.float64]:
+        t = np.abs(alpha) - self.C
+        valid = np.isfinite(alpha) & np.isfinite(t) & (t > 0.0)
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                f"UKLGenerator alpha-domain violation for {n_bad}/{len(alpha)} "
+                "observation(s): |alpha| must be strictly greater than C."
+            )
+        return t
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         return t * np.log(t) - np.abs(a)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         return np.sign(a) * np.log(t)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         return 1.0 / t
 
 
@@ -615,23 +621,39 @@ class BPGenerator(BregmanGenerator):
             raise ValueError("omega must be > 0")
         self.omega = float(omega)
         if branch_fn is None:
-            warnings.warn(
-                "BPGenerator without branch_fn uses sign(v) to select the alpha branch. "
-                "This is correct only when |alpha| - C > 1. "
-                "For GRR with functionals that require negative alpha (e.g. ATE/ATT), "
-                "provide branch_fn or use SquaredGenerator instead.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                "BPGenerator requires branch_fn because the representer branch "
+                "must be fixed by the estimand rather than inferred from v."
             )
         super().__init__(name=f"BP(omega={self.omega:g})", C=float(C), branch_fn=branch_fn)
+
+    def signed_dual_interval(
+        self, *, margin: float
+    ) -> tuple[float, float, float]:
+        inward = max(float(margin), np.finfo(float).eps)
+        min_positive = np.nextafter(0.0, 1.0)
+        max_float = np.finfo(float).max
+        k = 1.0 + 1.0 / self.omega
+        minimum_power = (
+            np.nextafter(self.C, np.inf) - self.C if self.C > 0.0 else min_positive
+        )
+        log_t_min = self.omega * np.log(minimum_power)
+        t_min = min_positive if log_t_min <= np.log(min_positive) else float(np.exp(log_t_min))
+        lower = float(k * (max(t_min, min_positive) - 1.0) + inward)
+        maximum_power = np.nextafter(max_float - self.C, 0.0)
+        log_t_max = self.omega * np.log(maximum_power)
+        upper = np.inf
+        if log_t_max < np.log(max_float):
+            upper = float(k * (float(np.exp(log_t_max)) - 1.0) - inward)
+        return lower, upper, 0.0
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Branch-wise inverse gradient map for BP.
 
-        The theoretical domain restriction is ``t = 1 + sign*v/k > 0``. In finite
-        samples (and especially under cross fitting) the linear
-        predictor can violate this constraint. Instead of raising an exception,
-        we **clip** ``t`` to a small positive value.
+        The theoretical domain restriction is ``t = 1 + sign*v/k > 0``. A
+        violation has no real inverse image, so the method raises
+        :class:`DomainError`. ``GRRGLM`` enforces the corresponding linear
+        constraints when the branch selector is fixed by the regressors.
         """
 
         X_ = as_2d(X)
@@ -640,8 +662,45 @@ class BPGenerator(BregmanGenerator):
         k = 1.0 + 1.0 / self.omega
 
         t = 1.0 + s * v_ / k
-        t = np.maximum(t, 1e-6)
-        return s * (self.C + np.power(t, 1.0 / self.omega))
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            power = np.power(t, 1.0 / self.omega)
+            alpha_abs = self.C + power
+        valid = (
+            np.isfinite(v_)
+            & np.isfinite(t)
+            & (t > 0.0)
+            & np.isfinite(power)
+            & (power > 0.0)
+            & np.isfinite(alpha_abs)
+            & (alpha_abs > self.C)
+        )
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                f"BPGenerator exact-link failure for {n_bad}/{t.shape[0]} "
+                "observation(s): 1 + s*v/k must be positive and the resulting "
+                "alpha must be representable in float64."
+            )
+        return s * alpha_abs
+
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        k = 1.0 + 1.0 / self.omega
+        t = 1.0 + s * v_ / k
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            power = np.power(t, 1.0 / self.omega)
+            alpha_abs = self.C + power
+        return (
+            np.isfinite(v_)
+            & np.isfinite(t)
+            & (t > 0.0)
+            & np.isfinite(power)
+            & (power > 0.0)
+            & np.isfinite(alpha_abs)
+            & (alpha_abs > self.C)
+        )
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
@@ -650,26 +709,34 @@ class BPGenerator(BregmanGenerator):
         k = 1.0 + 1.0 / self.omega
         return (1.0 + s * v_ / k) <= 1e-6
 
+    def _positive_distance(self, alpha: NDArray[np.float64]) -> NDArray[np.float64]:
+        t = np.abs(alpha) - self.C
+        valid = np.isfinite(alpha) & np.isfinite(t) & (t > 0.0)
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                f"BPGenerator alpha-domain violation for {n_bad}/{len(alpha)} "
+                "observation(s): |alpha| must be strictly greater than C."
+            )
+        return t
+
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         return (np.power(t, 1.0 + self.omega) - (1.0 + self.omega) * t) / self.omega
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         k = 1.0 + 1.0 / self.omega
         return np.sign(a) * k * (np.power(t, self.omega) - 1.0)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._positive_distance(a)
         k = 1.0 + 1.0 / self.omega
         return k * self.omega * np.power(t, self.omega - 1.0)
 
@@ -692,27 +759,44 @@ def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
     where ``t1 log1p(2C/t1) -> 2C`` smoothly as ``t1 -> inf``. Both terms are
     then O(C log|alpha|) and no cancellation occurs.
 
-    The substitution is an identity wherever the ``1e-12`` floor on ``t1`` is
-    inactive, i.e. on the domain interior ``|alpha| > C + 1e-12`` -- everywhere
-    the link is actually evaluated. In the floored sliver ``t2 != t1 + 2C``, so
-    the two forms differ by ~1e-11; both are floored surrogates of a value that
-    the floor has already made arbitrary there, and this one is the closer of
-    the two to the un-floored limit for small ``C``.
+    The rewrite is an identity throughout the open domain ``|alpha| > C``.
+    Inputs outside that domain raise :class:`DomainError`; no floor is used.
     """
 
-    t1 = np.maximum(np.abs(a) - C, 1e-12)
-    t2 = np.maximum(np.abs(a) + C, 1e-12)
+    t1 = np.abs(a) - C
+    t2 = np.abs(a) + C
+    valid = np.isfinite(a) & np.isfinite(t1) & np.isfinite(t2) & (t1 > 0.0)
+    if not np.all(valid):
+        n_bad = int(np.sum(~valid))
+        raise DomainError(
+            f"BKLGenerator alpha-domain violation for {n_bad}/{len(a)} "
+            "observation(s): |alpha| must be strictly greater than C."
+        )
     return -t1 * np.log1p(2.0 * C / t1) - 2.0 * C * np.log(t2)
 
 
 def _bkl_grad(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
-    t1 = np.maximum(np.abs(a) - C, 1e-12)
-    t2 = np.maximum(np.abs(a) + C, 1e-12)
+    t1 = np.abs(a) - C
+    t2 = np.abs(a) + C
+    valid = np.isfinite(a) & np.isfinite(t1) & np.isfinite(t2) & (t1 > 0.0)
+    if not np.all(valid):
+        n_bad = int(np.sum(~valid))
+        raise DomainError(
+            f"BKLGenerator alpha-domain violation for {n_bad}/{len(a)} "
+            "observation(s): |alpha| must be strictly greater than C."
+        )
     return np.sign(a) * (np.log(t1) - np.log(t2))
 
 
 def _bkl_grad2(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
-    denom = np.maximum(np.abs(a) * np.abs(a) - C * C, 1e-12)
+    denom = np.abs(a) * np.abs(a) - C * C
+    valid = np.isfinite(a) & np.isfinite(denom) & (denom > 0.0)
+    if not np.all(valid):
+        n_bad = int(np.sum(~valid))
+        raise DomainError(
+            f"BKLGenerator alpha-domain violation for {n_bad}/{len(a)} "
+            "observation(s): |alpha| must be strictly greater than C."
+        )
     return (2.0 * C) / denom
 
 
@@ -728,9 +812,10 @@ def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float6
     correct ``~2C/|u|``.
     """
 
-    t = np.exp(u)  # in (0, 1) for u < 0
-    denom = np.maximum(-np.expm1(u), 1e-300)  # = 1 - e^u, exact as u -> 0-
-    return C * (1.0 + t) / denom
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        t = np.exp(u)  # in (0, 1) for u < 0
+        denom = -np.expm1(u)  # = 1 - e^u, accurate as u -> 0-
+        return C * (1.0 + t) / denom
 
 
 class BKLGenerator(BregmanGenerator):
@@ -759,12 +844,12 @@ class BKLGenerator(BregmanGenerator):
     ``status="domain_error"`` failure (see design item E / coverage-design
     "KL系lossとcapの修正設計", 方針A).
 
-    Note that ``L-BFGS-B`` cannot optimize this uncapped objective directly: its
-    unconstrained line search steps out of the domain and hits the raise. For a
-    *usable* bounded-representer variant, use :class:`BoundedBKLGenerator`, which
-    keeps ``alpha`` bounded with a consistent objective/gradient but targets a
-    modified (bounded) estimand and is therefore a target-sensitivity candidate,
-    not an admissible one.
+    An unconstrained line search cannot optimize this objective with a fixed
+    branch because it may leave the dual domain. ``GRRGLM`` therefore imposes
+    the exact observationwise linear constraints when ``branch_fn`` is supplied.
+    :class:`BoundedBKLGenerator` remains available as a bounded-representer
+    sensitivity specification; where its bound is active, it targets a modified
+    estimand.
 
     If ``branch_fn`` is provided, it selects the sign branch.
     """
@@ -773,14 +858,9 @@ class BKLGenerator(BregmanGenerator):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for BKLGenerator")
         if branch_fn is None:
-            warnings.warn(
-                "BKLGenerator without branch_fn selects the alpha branch from "
-                "sign(v) (positive branch for v <= 0). "
-                "For GRR with functionals that require a fixed sign per "
-                "observation (e.g. ATE/ATT), provide branch_fn or use "
-                "SquaredGenerator instead.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                "BKLGenerator requires branch_fn because the representer branch "
+                "must be fixed by the estimand rather than inferred from v."
             )
         super().__init__(name="BKL", C=float(C), branch_fn=branch_fn)
 
@@ -788,9 +868,16 @@ class BKLGenerator(BregmanGenerator):
         self, X: NDArray[np.float64], v: NDArray[np.float64]
     ) -> NDArray[np.float64]:
         # For BKL, the positive branch corresponds to v <= 0.
-        if self.branch_fn is None:
-            return np.where(v <= 0.0, 1.0, -1.0)
         return self._sign(X, v)
+
+    def signed_dual_interval(
+        self, *, margin: float
+    ) -> tuple[float, float, float]:
+        inward = max(float(margin), np.finfo(float).eps)
+        alpha_next = np.nextafter(self.C, np.inf)
+        delta = alpha_next - self.C
+        lower = float(np.log(delta) - np.log(2.0 * self.C + delta) + inward)
+        return lower, -inward, -1.0
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -810,10 +897,22 @@ class BKLGenerator(BregmanGenerator):
                 f"optimizable variant."
             )
 
-        # Guard only the exp underflow tail (very negative u -> alpha -> C+),
-        # which does not affect the finite, well-defined side.
-        u = np.maximum(u, -700.0)
-        return s * _bkl_abs_alpha_from_u(u, self.C)
+        alpha_abs = _bkl_abs_alpha_from_u(u, self.C)
+        representable = np.isfinite(alpha_abs) & (alpha_abs > self.C)
+        if not np.all(representable):
+            n_bad = int(np.sum(~representable))
+            raise DomainError(
+                f"BKLGenerator cannot represent the exact inverse link for "
+                f"{n_bad}/{len(v_)} observation(s) in float64."
+            )
+        return s * alpha_abs
+
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        u = self._branch_sign(X_, v_) * v_
+        alpha_abs = _bkl_abs_alpha_from_u(u, self.C)
+        return np.isfinite(v_) & (u < 0.0) & np.isfinite(alpha_abs) & (alpha_abs > self.C)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         """Mask of observations that violate the BKL domain (``u = s*v >= 0``).
@@ -895,18 +994,22 @@ class BoundedBKLGenerator(BregmanGenerator):
                 f"alpha_max must be > C. Got alpha_max={alpha_max}, C={C}."
             )
         if branch_fn is None:
-            warnings.warn(
-                "BoundedBKLGenerator without branch_fn selects the alpha branch "
-                "from sign(v) (positive branch for v <= 0). For GRR with "
-                "functionals that require a fixed sign per observation (e.g. "
-                "ATE/ATT), provide branch_fn.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                "BoundedBKLGenerator requires branch_fn because the representer "
+                "branch must be fixed by the estimand rather than inferred from v."
             )
         self.alpha_max = float(alpha_max)
-        # u_min < 0 is the pre-image of alpha_max under the BKL link.
+        # u_min < 0 is the pre-image of alpha_max under the BKL link. The
+        # lower dual bound is the pre-image of the smallest float64 value that
+        # remains strictly above C. Both bounds are part of this explicitly
+        # bounded sensitivity specification and are reported by domain_binding.
         self._u_min = float(
             np.log((self.alpha_max - float(C)) / (self.alpha_max + float(C)))
+        )
+        self.alpha_floor = float(np.nextafter(float(C), np.inf))
+        self._u_floor = float(
+            np.log(self.alpha_floor - float(C))
+            - np.log(self.alpha_floor + float(C))
         )
         super().__init__(
             name=f"BoundedBKL(alpha_max={self.alpha_max:g})",
@@ -918,18 +1021,32 @@ class BoundedBKLGenerator(BregmanGenerator):
         self, X: NDArray[np.float64], v: NDArray[np.float64]
     ) -> NDArray[np.float64]:
         # Same convention as BKLGenerator: positive branch corresponds to v <= 0.
-        if self.branch_fn is None:
-            return np.where(v <= 0.0, 1.0, -1.0)
         return self._sign(X, v)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._branch_sign(X_, v_)
-        # Clamp the dangerous side (u -> 0) to u_min so |alpha| <= alpha_max, and
-        # the exp-underflow tail to -700. Both sides keep u strictly negative.
-        u = np.clip(s * v_, -700.0, self._u_min)
-        return s * _bkl_abs_alpha_from_u(u, self.C)
+        raw_u = s * v_
+        lower_binding = raw_u < self._u_floor
+        upper_binding = raw_u > self._u_min
+        u = np.maximum(np.minimum(raw_u, self._u_min), self._u_floor)
+        alpha_abs = _bkl_abs_alpha_from_u(u, self.C)
+        alpha_abs[lower_binding] = self.alpha_floor
+        alpha_abs[upper_binding] = self.alpha_max
+        representable = np.isfinite(alpha_abs) & (alpha_abs > self.C)
+        if not np.all(representable):
+            n_bad = int(np.sum(~representable))
+            raise DomainError(
+                f"BoundedBKLGenerator cannot represent the bounded link for "
+                f"{n_bad}/{len(v_)} observation(s) in float64."
+            )
+        return s * alpha_abs
+
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         """Mask where the bound binds (``u = s*v > u_min`` -> ``|alpha| = alpha_max``).
@@ -941,7 +1058,7 @@ class BoundedBKLGenerator(BregmanGenerator):
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         u = self._branch_sign(X_, v_) * v_
-        return u > self._u_min
+        return (u > self._u_min) | (u < self._u_floor)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
@@ -960,71 +1077,110 @@ class BoundedBKLGenerator(BregmanGenerator):
 
 
 class PUGenerator(BregmanGenerator):
-    """PU generator (PU-Riesz).
+    """Binary-entropy generator with ``|alpha|`` in ``(0, 1)``.
 
-    This generator is based on the binary-entropy potential::
-
-        g(alpha) = C * [ |alpha| log|alpha| + (1-|alpha|) log(1-|alpha|) ],
-
-    with domain ``|alpha| in (0, 1)`` and ``C > 0``.
-
-    The derivative is::
-
-        g'(alpha) = sign(alpha) * C * log( |alpha| / (1-|alpha|) ).
-
-    The inverse gradient is a (scaled) logistic map.
-
-    Notes
-    -----
-    This generator is primarily useful when you want the representer to be
-    bounded (in absolute value) by 1.
+    The derivative is ``sign(alpha) * C * log(|alpha| / (1-|alpha|))``.
+    ``branch_fn`` fixes the sign branch. The inverse derivative is evaluated
+    exactly whenever its value is representable in float64.
     """
 
     def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for PUGenerator")
         if branch_fn is None:
-            warnings.warn(
-                "PUGenerator without branch_fn uses sign(v) to select the alpha "
-                "branch. For GRR with functionals that require a fixed sign per "
-                "observation (e.g. ATE/ATT), provide branch_fn.",
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                "PUGenerator requires branch_fn because the representer branch "
+                "must be fixed by the estimand rather than inferred from v."
             )
         super().__init__(name="PU", C=float(C), branch_fn=branch_fn)
+
+    def signed_dual_interval(
+        self, *, margin: float
+    ) -> tuple[float, float, float]:
+        inward = max(float(margin), np.finfo(float).eps)
+        min_positive = np.nextafter(0.0, 1.0)
+        one_below = np.nextafter(1.0, 0.0)
+        lower_logit = float(np.log(min_positive) - np.log1p(-min_positive))
+        upper_logit = float(np.log(one_below) - np.log1p(-one_below))
+        return (
+            float(self.C * lower_logit + inward),
+            float(self.C * upper_logit - inward),
+            0.0,
+        )
+
+    def _representable_link(
+        self, X: NDArray[np.float64], v: NDArray[np.float64]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.bool_]]:
+        s = self._sign(X, v)
+        z = s * v / self.C
+        magnitude = np.empty_like(z, dtype=float)
+        positive = z >= 0.0
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            magnitude[positive] = 1.0 / (1.0 + np.exp(-z[positive]))
+            exp_z = np.exp(z[~positive])
+            magnitude[~positive] = exp_z / (1.0 + exp_z)
+        valid = (
+            np.isfinite(v)
+            & np.isfinite(z)
+            & np.isfinite(magnitude)
+            & (magnitude > 0.0)
+            & (magnitude < 1.0)
+        )
+        return s, magnitude, valid
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-        s = self._sign(X_, v_)
+        s, magnitude, valid = self._representable_link(X_, v_)
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                "PUGenerator cannot represent the exact inverse link for "
+                f"{n_bad}/{len(v_)} observation(s) in float64."
+            )
+        return s * magnitude
 
-        z = np.clip(s * v_ / self.C, -700.0, 700.0)
-        a = 1.0 / (1.0 + np.exp(-z))
-        a = np.clip(a, 1e-10, 1.0 - 1e-10)
-        return s * a
-
-    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+    def dual_domain_mask(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
-        z = self._sign(X_, v_) * v_ / self.C
-        return np.abs(z) >= np.log(1e10)
+        _, _, valid = self._representable_link(X_, v_)
+        return valid
+
+    def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        return ~self.dual_domain_mask(X, v)
+
+    def _probability_magnitude(self, alpha: NDArray[np.float64]) -> NDArray[np.float64]:
+        magnitude = np.abs(alpha)
+        valid = (
+            np.isfinite(alpha)
+            & np.isfinite(magnitude)
+            & (magnitude > 0.0)
+            & (magnitude < 1.0)
+        )
+        if not np.all(valid):
+            n_bad = int(np.sum(~valid))
+            raise DomainError(
+                f"PUGenerator alpha-domain violation for {n_bad}/{len(alpha)} "
+                "observation(s): |alpha| must lie strictly between 0 and 1."
+            )
+        return magnitude
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
-        return self.C * (t * np.log(t) + (1.0 - t) * np.log(1.0 - t))
+        t = self._probability_magnitude(a)
+        return self.C * (t * np.log(t) + (1.0 - t) * np.log1p(-t))
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
-        return np.sign(a) * self.C * (np.log(t) - np.log(1.0 - t))
+        t = self._probability_magnitude(a)
+        return np.sign(a) * self.C * (np.log(t) - np.log1p(-t))
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
+        t = self._probability_magnitude(a)
         return self.C / (t * (1.0 - t))
 
 

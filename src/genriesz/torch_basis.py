@@ -1,15 +1,7 @@
-"""Optional PyTorch-based bases.
+"""PyTorch-based feature maps for generalized Riesz regression.
 
-Neural networks can be used as flexible feature maps. The GRR solvers remain
-linear in the coefficients, but the basis itself can be learned.
-
-This module provides:
-
-- :class:`MLPEmbeddingNet`  - a simple MLP producing an embedding
-- :class:`TorchEmbeddingBasis` - trains the embedding network (optionally) and
-  exposes the embedding as a NumPy feature map.
-
-The implementation is intentionally minimal and is meant for examples.
+Neural networks can provide fitted feature maps while the final generalized
+Riesz regression remains linear in its coefficients.
 """
 
 from __future__ import annotations
@@ -17,81 +9,55 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
 from numpy.typing import ArrayLike, NDArray
 
 from .basis import BaseBasis
 
-try:
-    import torch
-    import torch.nn as nn
-    import torch.optim as optim
-except Exception as e:  # pragma: no cover
-    torch = None  # type: ignore
-    nn = None  # type: ignore
-    optim = None  # type: ignore
-    _IMPORT_ERROR = e
-else:
-    _IMPORT_ERROR = None
 
+class MLPEmbeddingNet(nn.Module):
+    """Feed-forward network that returns an embedding."""
 
-if torch is not None:
+    def __init__(
+        self,
+        *,
+        input_dim: int,
+        hidden_dims: tuple[int, ...] = (32, 16),
+        output_dim: int = 8,
+        activation: str = "relu",
+    ) -> None:
+        super().__init__()
+        activation_lower = activation.lower()
+        if activation_lower not in {"relu", "tanh"}:
+            raise ValueError(f"Unknown activation: {activation}")
 
-    class MLPEmbeddingNet(nn.Module):
-        """A simple feed-forward network that outputs an embedding."""
+        def make_activation() -> nn.Module:
+            return nn.ReLU() if activation_lower == "relu" else nn.Tanh()
 
-        def __init__(
-            self,
-            *,
-            input_dim: int,
-            hidden_dims: tuple[int, ...] = (32, 16),
-            output_dim: int = 8,
-            activation: str = "relu",
-        ) -> None:
-            super().__init__()
+        layers: list[nn.Module] = []
+        d_in = int(input_dim)
+        for hidden in hidden_dims:
+            layers.append(nn.Linear(d_in, int(hidden)))
+            layers.append(make_activation())
+            d_in = int(hidden)
+        layers.append(nn.Linear(d_in, int(output_dim)))
+        self.net = nn.Sequential(*layers)
 
-            activation_lower = activation.lower()
-            if activation_lower not in {"relu", "tanh"}:
-                raise ValueError(f"Unknown activation: {activation}")
-
-            def _make_act() -> nn.Module:
-                return nn.ReLU() if activation_lower == "relu" else nn.Tanh()
-
-            layers: list[nn.Module] = []
-            d_in = int(input_dim)
-            for h in hidden_dims:
-                layers.append(nn.Linear(d_in, int(h)))
-                layers.append(_make_act())
-                d_in = int(h)
-            layers.append(nn.Linear(d_in, int(output_dim)))
-            self.net = nn.Sequential(*layers)
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[name-defined]
-            return self.net(x)
-
-else:  # pragma: no cover - exercised only without the optional dependency
-
-    class MLPEmbeddingNet:  # type: ignore[no-redef]
-        """Placeholder that raises a clean ImportError when PyTorch is absent."""
-
-        def __init__(self, *args, **kwargs) -> None:
-            raise ImportError(
-                "MLPEmbeddingNet requires PyTorch. Install it with `pip install torch` "
-                "or `pip install genriesz[torch]`."
-            ) from _IMPORT_ERROR
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
 @dataclass
 class TorchEmbeddingBasis(BaseBasis):
-    """A basis given by a learned PyTorch embedding network."""
+    """Feature map given by a fitted PyTorch embedding network."""
 
     net: MLPEmbeddingNet
     include_bias: bool = True
     device: str | None = None
 
     def __post_init__(self) -> None:
-        if torch is None:  # pragma: no cover
-            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
-
         self._device = self.device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.net.to(self._device)
         self._is_fit = False
@@ -106,13 +72,7 @@ class TorchEmbeddingBasis(BaseBasis):
         batch_size: int = 128,
         verbose: bool = False,
     ):
-        """Optionally train the embedding to predict ``y``.
-
-        If ``y`` is None, this method only marks the basis as fit.
-        """
-
-        if torch is None:  # pragma: no cover
-            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
+        """Fit the embedding to predict ``y`` when an outcome is supplied."""
 
         X_ = np.asarray(X, dtype=float)
         if y is None:
@@ -120,39 +80,41 @@ class TorchEmbeddingBasis(BaseBasis):
             return self
 
         y_ = np.asarray(y, dtype=float).reshape(-1, 1)
-
-        # Simple supervised training with a linear prediction head.
         last_layer = self.net.net[-1]
-        assert isinstance(last_layer, nn.Linear)
+        if not isinstance(last_layer, nn.Linear):
+            raise TypeError("The embedding network must end with a linear layer.")
         head = nn.Linear(last_layer.out_features, 1).to(self._device)
-        params = list(self.net.parameters()) + list(head.parameters())
-        opt = optim.Adam(params, lr=float(lr))
-        loss_fn = nn.MSELoss()
+        optimizer = optim.Adam(
+            list(self.net.parameters()) + list(head.parameters()), lr=float(lr)
+        )
+        loss_function = nn.MSELoss()
 
-        ds = torch.utils.data.TensorDataset(
+        dataset = torch.utils.data.TensorDataset(
             torch.tensor(X_, dtype=torch.float32),
             torch.tensor(y_, dtype=torch.float32),
         )
-        loader = torch.utils.data.DataLoader(ds, batch_size=int(batch_size), shuffle=True)
+        loader = torch.utils.data.DataLoader(
+            dataset, batch_size=int(batch_size), shuffle=True
+        )
 
         self.net.train()
         head.train()
-        for ep in range(int(epochs)):
+        for epoch in range(int(epochs)):
             total = 0.0
-            for xb, yb in loader:
-                xb = xb.to(self._device)
-                yb = yb.to(self._device)
-
-                opt.zero_grad(set_to_none=True)
-                emb = self.net(xb)
-                pred = head(emb)
-                loss = loss_fn(pred, yb)
+            for x_batch, y_batch in loader:
+                x_batch = x_batch.to(self._device)
+                y_batch = y_batch.to(self._device)
+                optimizer.zero_grad(set_to_none=True)
+                prediction = head(self.net(x_batch))
+                loss = loss_function(prediction, y_batch)
                 loss.backward()
-                opt.step()
-                total += float(loss.detach().cpu().item()) * len(xb)
-
+                optimizer.step()
+                total += float(loss.detach().cpu().item()) * len(x_batch)
             if verbose:
-                print(f"[TorchEmbeddingBasis] epoch {ep+1}/{epochs} loss={total/len(ds):.6f}")
+                print(
+                    f"[TorchEmbeddingBasis] epoch {epoch + 1}/{epochs} "
+                    f"loss={total / len(dataset):.6f}"
+                )
 
         self._is_fit = True
         return self
@@ -160,26 +122,26 @@ class TorchEmbeddingBasis(BaseBasis):
     @property
     def n_features(self) -> int:
         last_layer = self.net.net[-1]
-        assert isinstance(last_layer, nn.Linear)
-        out_dim = int(last_layer.out_features)
-        return out_dim + (1 if self.include_bias else 0)
+        if not isinstance(last_layer, nn.Linear):
+            raise TypeError("The embedding network must end with a linear layer.")
+        return int(last_layer.out_features) + (1 if self.include_bias else 0)
 
     def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
-        if torch is None:  # pragma: no cover
-            raise ImportError("TorchEmbeddingBasis requires PyTorch") from _IMPORT_ERROR
         if not self._is_fit:
             raise RuntimeError("TorchEmbeddingBasis must be fit before use")
-
         X_ = np.asarray(X, dtype=float)
         single = X_.ndim == 1
         if single:
             X_ = X_.reshape(1, -1)
+        if X_.ndim != 2:
+            raise ValueError(f"X must be one- or two-dimensional, got {X_.shape}.")
 
         self.net.eval()
         with torch.no_grad():
-            xb = torch.tensor(X_, dtype=torch.float32, device=self._device)
-            emb = self.net(xb).detach().cpu().numpy().astype(float)
-
+            x_tensor = torch.tensor(X_, dtype=torch.float32, device=self._device)
+            embedding = self.net(x_tensor).detach().cpu().numpy().astype(float)
         if self.include_bias:
-            emb = np.concatenate([np.ones((emb.shape[0], 1), dtype=float), emb], axis=1)
-        return emb[0] if single else emb
+            embedding = np.concatenate(
+                [np.ones((embedding.shape[0], 1), dtype=float), embedding], axis=1
+            )
+        return embedding[0] if single else embedding

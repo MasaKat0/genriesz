@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -138,6 +139,7 @@ class LinearFunctional:
     """Base class for linear functionals used by GRR."""
 
     name: str
+    requires_function_derivative: ClassVar[bool] = False
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:  # pragma: no cover
         raise NotImplementedError
@@ -344,6 +346,8 @@ class ATTFunctional(LinearFunctional):
 @dataclass(frozen=True)
 class AMEFunctional(LinearFunctional):
     """Average marginal effect (average derivative) of gamma wrt x_k."""
+
+    requires_function_derivative: ClassVar[bool] = True
 
     coordinate: int = 0
 

@@ -323,8 +323,8 @@ def reference_check_table(tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     checks = checks.copy()
     if "checkable" not in checks:
         checks["checkable"] = True
-    checks["checkable"] = checks["checkable"].fillna(False).astype(bool)
-    checks["_violated"] = checks["violated"].fillna(False).astype(bool)
+    checks["checkable"] = checks["checkable"].eq(True)
+    checks["_violated"] = checks["violated"].eq(True)
 
     keys = ["first", "second", *SCENARIO_KEYS]
     per_replication = (

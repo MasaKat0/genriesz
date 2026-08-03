@@ -14,7 +14,7 @@ Public symbols are re-exported from submodules for convenience.
 
 from __future__ import annotations
 
-__version__ = "0.2.6"
+__version__ = "0.3.0"
 
 # High-level estimation
 # Bases

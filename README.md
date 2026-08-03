@@ -234,19 +234,18 @@ Notes:
   treatment-type functionals (ATE/ATT/DID). If you represent those estimands via a
   custom callable ``m``, prefer the built-in wrappers (e.g. ``grr_ate``).
 
-### Providing $g'$ and $(g')^{-1}$
+### Providing exact generator derivatives
 
-If you can implement the derivative `grad(W_i, alpha)` and inverse-derivative
-`inv_grad(W_i, v)` analytically, pass them to:
+A custom generator must provide the generator, its first derivative, the exact
+inverse derivative, and its second derivative:
 
 ```python
-BregmanGenerator(g=..., grad=..., inv_grad=...)
+BregmanGenerator(g=..., grad=..., inv_grad=..., grad2=...)
 ```
 
-If you omit them, the library falls back to:
-
-- finite differences for $g'$, and
-- scalar root-finding for $(g')^{-1}$.
+The library does not estimate a missing derivative numerically and does not
+infer an inverse link by root-finding. If any of these functions is unavailable,
+the custom generator is not a valid fitting specification.
 
 ---
 

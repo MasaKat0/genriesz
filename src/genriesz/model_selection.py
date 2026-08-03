@@ -9,19 +9,13 @@ Design principles (see ``doc/coverage_failure_improvement_design_revised.md``):
 - ``select_grr_hyperparams`` receives the outer *training* sample only. It never
   sees the outer evaluation fold (no leakage of centers, standardization, or
   selection).
-- Strict nested CV (``GRRCVConfig.strict_nested=True``, the default): inside each
-  *inner* fold every preprocessing step -- standardization, the ``"auto"`` sigma
-  median heuristic, kernel-center selection, and the supervised basis fit -- is
-  derived from that fold's *inner-training* rows alone. The inner-validation rows
-  only ever *evaluate* the already-fitted feature map, so no inner-validation
-  observation enters the feature map that scores it. The selected candidate is
-  then refit on the whole outer-training fold (bandwidth reported at the
-  outer-training median; ``n_centers`` reselected from the outer-training rows).
-- ``strict_nested=False`` restores the older *outer-fixed feature map*: centers
-  and the sigma median heuristic are computed once on the whole outer-training
-  fold and shared across the inner folds. This is cheaper but leaks each inner
-  fold's validation rows into the feature map that scores them; it is recorded on
-  the result (``GRRCVResult.strict_nested``) and is not the default.
+- Strict nested CV is mandatory: inside each *inner* fold every preprocessing
+  step -- standardization, the ``"auto"`` sigma median heuristic, kernel-center
+  selection, and the supervised basis fit -- is derived from that fold's
+  *inner-training* rows alone. The inner-validation rows only evaluate the fitted
+  feature map. The selected candidate is then refit on the whole outer-training
+  fold (bandwidth reported at the outer-training median; ``n_centers`` reselected
+  from the outer-training rows).
 - Selection is two-stage: an *admissibility* screen (optimizer success, effective
   sample size, cap binding, ...) followed by a *criterion* minimization
   (default ``bias_variance``: ``B^2 + V/n + tau_R R + tau_K K``).
@@ -35,14 +29,13 @@ Design principles (see ``doc/coverage_failure_improvement_design_revised.md``):
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .basis import Basis, _median_pairwise_distance
-from .functionals import AMEFunctional, LinearFunctional
+from .functionals import LinearFunctional
 from .generators import BregmanGenerator
 from .glm import GRRGLM, OutcomeGLM
 from .utils import Fold, is_binary_y, kfold_splits, stratified_kfold_splits
@@ -107,20 +100,12 @@ class GRRCVConfig:
     cv_folds:
         Number of inner folds.
     strict_nested:
-        If True (default), run *strict* nested CV: within each inner fold the
-        standardization, the ``"auto"`` sigma median heuristic, the kernel-center
-        pool, and the supervised basis fit are all derived from that fold's
-        inner-training rows only, so no inner-validation observation enters the
-        feature map that scores it (design section 3.4, audit P0-05). If False,
-        use the older *outer-fixed feature map*: centers and the median heuristic
-        are computed once on the whole outer-training fold and shared across inner
-        folds -- cheaper, but the inner-validation rows leak into their own
-        scoring feature map. The choice is recorded on
-        :class:`GRRCVResult.strict_nested`. The guarantee covers the CV-selected
-        centers and the standardization / median heuristic; *fixed* centers passed
-        explicitly on the basis (``GaussianRKHSBasis(centers=...)``) are the
-        caller's own choice and are used as given when ``n_centers_grid`` is not
-        cross-validated.
+        Retained as a keyword-only compatibility argument. It must be ``True``.
+        Within each inner fold, standardization, the ``"auto"`` sigma median
+        heuristic, the kernel-center pool, and the supervised basis fit are
+        derived from that fold's inner-training rows only. Fixed centers passed
+        explicitly on the basis are the caller's specification and are used as
+        given when ``n_centers_grid`` is not cross-validated.
     selection_score:
         One of ``"bias_variance"`` (default), ``"bregman_validation"``,
         ``"squared_loss_validation"``, ``"imbalance_validation"``.
@@ -166,27 +151,18 @@ class GRRCVConfig:
     # ``__match_args__`` of the previous release intact (a 5th positional still
     # means ``selection_score``, not ``strict_nested``).
     strict_nested: bool = field(default=True, kw_only=True)
-    #: What to do when no exact-target candidate passes the admissibility
-    #: screen (audit CV-11). ``None`` (default) raises: an inadmissible winner
-    #: can carry a deceptively small criterion (a saturated kernel scores near
-    #: zero), so silently returning one is a selection failure, not a selection.
-    #: ``"best_criterion"`` opts into the pre-audit behaviour -- take the best
-    #: finite-criterion candidate among all fitted ones -- with a warning, and
-    #: the result records ``used_fallback``, the reason, and the thresholds the
-    #: chosen candidate violates. A ``modifies_estimand`` generator keeps its
-    #: dedicated target-sensitivity path (section 9-4, until CV-12 separates it
-    #: from exact-target selection), but only over candidates that pass every
-    #: *other* admissibility check; when none does, this policy gates it like
-    #: any other screen wipe-out.
-    fallback_policy: str | None = field(default=None, kw_only=True)
+
 
     def __post_init__(self) -> None:
         if self.selection_score not in SELECTION_SCORES:
             raise ValueError(f"selection_score must be one of {SELECTION_SCORES}")
         if int(self.cv_folds) < 2:
             raise ValueError("cv_folds must be >= 2")
-        if self.fallback_policy not in (None, "best_criterion"):
-            raise ValueError("fallback_policy must be None or 'best_criterion'")
+        if self.strict_nested is not True:
+            raise ValueError(
+                "strict_nested=False is not supported because it lets inner-validation "
+                "observations enter the feature map used to score them."
+            )
 
     @property
     def is_active(self) -> bool:
@@ -202,23 +178,15 @@ class GRRCVResult:
     """Selected Riesz hyper-parameters and the candidate path table.
 
     ``modifies_estimand`` records that the generator targets a modified estimand
-    (design section 9-4). It forces ``n_admissible == 0``: the selection below is
-    then a target-sensitivity analysis over the bounded target, not a selection
-    over the original one. It is keyword-only so that adding it leaves the
-    positional signature and ``__match_args__`` of the previous release intact.
+    (design section 9-4). Such candidates are excluded from exact-target
+    selection and must be analyzed separately as a sensitivity specification.
 
-    ``strict_nested`` records whether the inner CV used strict nested
-    preprocessing (per-fold centers and median heuristic; the default) or the
-    older outer-fixed feature map (audit P0-05). ``fold_provenance`` holds, per
-    inner fold, the ``validation_index`` (inner-validation rows), the
-    ``preprocess_fit_index`` (rows the standardization / median / center pool were
-    fit on) and the ``center_index`` (global rows in the ``max(n_centers_grid)``
-    center pool; a candidate with a smaller ``n_centers`` uses a prefix of it, and
-    it is empty when the basis selects its own centers). Under strict nested CV the
-    center and preprocess indices are disjoint from the validation index (so is any
-    prefix); under the outer-fixed feature map they overlap it (the honest record
-    of the leak). Both fields are keyword-only to keep the
-    positional signature and ``__match_args__`` intact.
+    ``strict_nested`` is always ``True`` and records that the inner CV used
+    fold-specific preprocessing. ``fold_provenance`` holds, for each inner fold,
+    the validation rows, the rows used to fit preprocessing, and the selected
+    center rows. The preprocessing and center indices are disjoint from the
+    validation indices. Both fields are keyword-only to keep the positional
+    signature and ``__match_args__`` intact.
     """
 
     sigma: float | None
@@ -231,19 +199,6 @@ class GRRCVResult:
     path: list[dict] = field(default_factory=list)
     modifies_estimand: bool = field(default=False, kw_only=True)
     strict_nested: bool = field(default=True, kw_only=True)
-    #: Whether the winner came from the fallback pool rather than the admissible
-    #: set (audit CV-11). ``fallback_reason`` is ``"no_admissible_candidate"``
-    #: (screen wipe-out, only reachable with
-    #: ``fallback_policy="best_criterion"``) or ``"modifies_estimand"`` (the
-    #: generator's candidates are inadmissible by design, section 9-4, and the
-    #: winner passes every remaining quality check).
-    #: ``fallback_violations`` lists the admissibility thresholds the chosen
-    #: candidate violates, so the caller can see *why* it was inadmissible
-    #: without re-deriving the screen. Inference-status downgrade for fallback
-    #: results lands with audit P0-09 (the status object does not exist yet).
-    used_fallback: bool = field(default=False, kw_only=True)
-    fallback_reason: str | None = field(default=None, kw_only=True)
-    fallback_violations: list[str] = field(default_factory=list, kw_only=True)
     # Excluded from ``__eq__``: it holds NumPy arrays, whose element-wise ``==``
     # would make dataclass equality raise a truth-value ``ValueError``. Provenance
     # is diagnostic metadata, not identity, so two results with equal scalar
@@ -518,7 +473,7 @@ def score_grr_candidate(
             lam=lam,
             p_norm=riesz_p_norm,
         )
-        fr = grr.fit(X_itr, max_iter=max_iter, tol=tol)
+        fr = grr.fit(X_itr, max_iter=max_iter, tol=tol, fit_basis=False)
         if not fr.success or grr.beta_ is None:
             all_success = False
             continue
@@ -529,12 +484,13 @@ def score_grr_candidate(
         v_iva = Phi_iva @ beta
 
         # Unpenalized Bregman-Riesz validation risk.
-        try:
-            g_star, alpha_iva = generator.conjugate(X_iva, v_iva)
-            risks.append(float(np.mean(g_star - (M_iva @ beta))))
-        except Exception:
+        conjugate = generator.conjugate_status(X_iva, v_iva)
+        if not bool(np.all(conjugate.valid)):
             all_success = False
             continue
+        g_star = conjugate.conjugate
+        alpha_iva = conjugate.alpha
+        risks.append(float(np.mean(g_star - (M_iva @ beta))))
 
         # Generator-agnostic squared-loss (LSIF) validation risk of the fitted
         # representer alpha_hat = generator.inv_grad(phi @ beta):
@@ -555,18 +511,16 @@ def score_grr_candidate(
                 phi = np.asarray(_cb(XX), dtype=float)
                 return np.asarray(_gen.inv_grad(XX, phi @ _beta), dtype=float)
 
-            try:
-                m_rep = np.asarray(
-                    m.m_from_function(X_iva, predict=_representer, derivative=None),
-                    dtype=float,
-                )
-            except NotImplementedError as exc:
+            if bool(getattr(m, "requires_function_derivative", False)):
                 raise ValueError(
-                    "selection_score='squared_loss_validation' requires the "
-                    "functional to evaluate m(alpha) from the representer alone "
-                    f"(no derivative); {type(m).__name__} does not. Use "
-                    "'bregman_validation' or 'bias_variance' instead."
-                ) from exc
+                    "selection_score='squared_loss_validation' is not available for "
+                    f"{type(m).__name__} because m(alpha) requires a derivative of the "
+                    "representer. Use 'bregman_validation' or 'bias_variance'."
+                )
+            m_rep = np.asarray(
+                m.m_from_function(X_iva, predict=_representer, derivative=None),
+                dtype=float,
+            )
             sq = 0.5 * float(np.mean(np.square(alpha_iva))) - float(np.mean(m_rep))
             # A non-finite fold makes this candidate incomparable on the LSIF
             # scale; record NaN so strict aggregation drops it from selection.
@@ -590,18 +544,15 @@ def score_grr_candidate(
         out = OutcomeGLM(
             basis=cb, link=outcome_link, penalty=outcome_penalty, lam=outcome_lam
         )
-        out_fr = out.fit(X_itr, y_itr, max_iter=max_iter, tol=tol)
+        out_fr = out.fit(X_itr, y_itr, max_iter=max_iter, tol=tol, fit_basis=False)
         if out.theta_ is not None and out_fr.success:
             coef_norms.append(float(np.linalg.norm(out.theta_)))
-            try:
-                m_gamma = m.m_from_function(
-                    X_iva, predict=out.predict, derivative=getattr(out, "derivative", None)
-                )
-                gamma_iva = out.predict(X_iva)
-                psi = np.asarray(m_gamma, dtype=float) + alpha_iva * (y_iva - gamma_iva)
-                variances.append(float(np.var(psi, ddof=1)) if psi.size > 1 else float("nan"))
-            except NotImplementedError:
-                variances.append(float("nan"))
+            m_gamma = m.m_from_function(
+                X_iva, predict=out.predict, derivative=getattr(out, "derivative", None)
+            )
+            gamma_iva = out.predict(X_iva)
+            psi = np.asarray(m_gamma, dtype=float) + alpha_iva * (y_iva - gamma_iva)
+            variances.append(float(np.var(psi, ddof=1)) if psi.size > 1 else float("nan"))
 
         if want_kernel:
             kdiag = getattr(cb, "diagnostics", None)
@@ -614,9 +565,9 @@ def score_grr_candidate(
     def _nanmean(xs: list[float]) -> float:
         if not xs:
             return float("nan")
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=RuntimeWarning)
-            return float(np.nanmean(xs))
+        finite = np.asarray(xs, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        return float(np.mean(finite)) if finite.size else float("nan")
 
     b_imb = _nanmean(imbalances)
     b_coef = _nanmean(coef_norms)
@@ -734,7 +685,7 @@ def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> 
     fit failed on every inner fold, so ``b_hat``/``v_hat`` are NaN) must not be
     scored as if those pieces were zero -- zero is the *best possible* value, so
     the un-evaluable candidate would beat every honestly-evaluated one. NaN
-    criteria are filtered out of both the admissible pool and the fallback pool.
+    criteria are excluded from selection.
     """
 
     if score == "bregman_validation":
@@ -742,7 +693,7 @@ def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> 
     if score == "squared_loss_validation":
         return float(row["squared_loss_validation"])
     if score == "imbalance_validation":
-        # Requires the score-variance normalization; falling back to the raw
+        # Requires the score-variance normalization; using the raw
         # imbalance would compare candidates on two different scales.
         return float(row["std_imbalance"])
     # bias_variance (default): B^2 + V/n + tau_R R + tau_K K. B and V are
@@ -757,18 +708,15 @@ def _criterion(row: dict, *, score: str, n: int, tau_R: float, tau_K: float) -> 
     return float(b * b + v / max(n, 1) + tau_R * r + tau_K * k)
 
 
-def _positive_median(value: float) -> float:
-    """Return ``value`` if it is a usable bandwidth anchor, else ``1.0``.
+def _require_positive_median(value: float, *, context: str) -> float:
+    """Return a positive bandwidth anchor or report a degenerate sample."""
 
-    A degenerate inner fold (identical inner-training rows) yields a zero or NaN
-    median; ``value * multiplier`` would then be ``0`` and make the Gaussian basis
-    raise. The fallback is a fixed ``1.0`` -- the same degenerate fallback
-    ``GaussianRKHSBasis(sigma="auto")`` uses -- and crucially *not* the
-    outer-training median, which would read that fold's validation rows and
-    reintroduce the leakage strict nested CV removes.
-    """
-
-    return float(value) if np.isfinite(value) and value > 0 else 1.0
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(
+            f"{context} has no positive pairwise-distance median. Automatic "
+            "bandwidth selection is undefined for identical or nonfinite rows."
+        )
+    return float(value)
 
 
 def _sigma_candidate_specs(
@@ -825,36 +773,35 @@ def select_grr_hyperparams(
     on it -- the same policy as the outer cross-fitting (audit CV-13) -- and an
     inner-training fold that still misses one group raises.
 
-    With ``config.strict_nested=True`` (the default) the inner CV is a *strict*
-    nested CV: within each inner fold the standardization, the ``"auto"`` sigma
-    median heuristic and the kernel-center pool are all fit on that fold's
-    inner-training rows, so an inner-validation observation never enters the
-    feature map that scores it (audit P0-05). The returned ``sigma``/``n_centers``
-    describe the selected candidate at the *outer-training* resolution -- the
-    values it is refit with on the whole ``X_train`` -- and ``fold_provenance``
-    records the per-fold indices for leakage tests. ``config.strict_nested=False``
-    keeps the older outer-fixed feature map.
+    The inner CV is strictly nested. Within each inner fold, standardization,
+    the ``"auto"`` sigma median heuristic, and the kernel-center pool are fit on
+    that fold's inner-training rows. The returned ``sigma`` and ``n_centers``
+    describe the selected candidate at the outer-training resolution, and
+    ``fold_provenance`` records the per-fold indices used in leakage tests.
 
     ``riesz_lam`` is the penalty used to fit each scored candidate and, when
     ``config.lam_grid is None``, the sole lambda candidate -- so the returned
     ``lam`` is then ``riesz_lam`` itself.
     """
 
-    if config.selection_score == "squared_loss_validation" and isinstance(m, AMEFunctional):
+    if config.selection_score == "squared_loss_validation" and bool(
+        getattr(m, "requires_function_derivative", False)
+    ):
         raise ValueError(
             "selection_score='squared_loss_validation' is not defined for "
-            "AMEFunctional: its m(alpha) needs a derivative of the representer, "
-            "which the LSIF risk does not provide. Use 'bregman_validation' or "
-            "'bias_variance' for average-derivative functionals."
+            f"{type(m).__name__}: its m(alpha) cannot be evaluated from the fitted "
+            "representer alone; the functional requires a derivative that the LSIF risk "
+            "does not provide. Use 'bregman_validation' or "
+            "'bias_variance' for derivative-based functionals."
         )
 
     X_tr = np.asarray(X_train, dtype=float)
     y_tr = np.asarray(y_train, dtype=float).reshape(-1)
     n = X_tr.shape[0]
 
-    # Global median (full outer-training). It is the reported bandwidth anchor for
-    # "auto" candidates and, under the outer-fixed feature map, the anchor shared
-    # across inner folds. Measured in the basis's own coordinate system: a
+    # Global median (full outer-training) is the reported bandwidth anchor for
+    # "auto" candidates after the selected specification is refit. It is measured
+    # in the basis's own coordinate system: a
     # standardized anchor under a ``standardize=False`` kernel is off by the
     # feature scale (audit N-03).
     global_median = _median_pairwise_distance(
@@ -887,8 +834,8 @@ def select_grr_hyperparams(
     if isinstance(t_idx, (int, np.integer)) and 0 <= int(t_idx) < X_tr.shape[1]:
         col = X_tr[:, int(t_idx)]
         if is_binary_y(col):
-            # A single-group binary sample must not silently fall back to a
-            # plain (unchecked) K-fold: every inner-training fold would be
+            # A single-group binary sample cannot be sent to a
+            # plain unchecked K-fold: every inner-training fold would be
             # single-group too, exactly what this guard exists to reject.
             if not (np.any(col == 1.0) and np.any(col == 0.0)):
                 raise ValueError(
@@ -926,45 +873,29 @@ def select_grr_hyperparams(
 
     max_nc = max((c for c in n_centers_list if c is not None), default=None)
 
-    # Per-fold preprocessing anchors and provenance. Strict nested CV keeps the
-    # standardization / median heuristic and the kernel-center pool inside each
-    # fold's inner-training rows; the outer-fixed feature map fits them once on
-    # the whole outer-training fold and shares them (leaking each fold's own
-    # validation rows into the map that scores them).
-    # A degenerate fold (identical inner-training rows) has a zero/NaN median; a
-    # 0 bandwidth would make ``GaussianRKHSBasis`` raise and halt the whole
-    # selection. ``_positive_median`` falls back to a fixed 1.0 -- validation-
-    # independent, so the degenerate fold's bandwidth still never reads its own
-    # validation rows (using the outer-training median here would leak).
-    if config.strict_nested:
-        fold_medians = [
-            _positive_median(
-                _median_pairwise_distance(
-                    _anchor_matrix(X_tr[fold.train], basis), random_state=config.random_state
-                )
-            )
-            for fold in inner_folds
-        ]
-        fold_center_index = [
-            _select_center_indices(
-                np.asarray(fold.train, dtype=int),
-                n_centers=max_nc,
-                random_state=config.random_state,
-            )
-            if max_nc is not None
-            else np.asarray([], dtype=int)
-            for fold in inner_folds
-        ]
-        preprocess_fit_index = [np.asarray(fold.train, dtype=int) for fold in inner_folds]
-    else:
-        fold_medians = [global_median] * n_folds
-        global_center_index = (
-            _select_center_indices(np.arange(n), n_centers=max_nc, random_state=config.random_state)
-            if max_nc is not None
-            else np.asarray([], dtype=int)
+    # Per-fold preprocessing anchors and provenance. A degenerate
+    # inner-training fold has no valid automatic bandwidth, so selection stops
+    # rather than substituting an unrelated value.
+    fold_medians = [
+        _require_positive_median(
+            _median_pairwise_distance(
+                _anchor_matrix(X_tr[fold.train], basis), random_state=config.random_state
+            ),
+            context=f"Inner training fold {fi}",
         )
-        fold_center_index = [global_center_index for _ in inner_folds]
-        preprocess_fit_index = [np.arange(n, dtype=int) for _ in inner_folds]
+        for fi, fold in enumerate(inner_folds)
+    ]
+    fold_center_index = [
+        _select_center_indices(
+            np.asarray(fold.train, dtype=int),
+            n_centers=max_nc,
+            random_state=config.random_state,
+        )
+        if max_nc is not None
+        else np.asarray([], dtype=int)
+        for fold in inner_folds
+    ]
+    preprocess_fit_index = [np.asarray(fold.train, dtype=int) for fold in inner_folds]
 
     fold_provenance = [
         {
@@ -977,8 +908,8 @@ def select_grr_hyperparams(
 
     path: list[dict] = []
     for nc in n_centers_list:
-        # Per-fold center rows (identical across folds under the outer-fixed map).
-        # Under strict nested CV the pool is capped at the inner-training fold size,
+        # Per-fold center rows are selected from the corresponding inner-training
+        # sample. The pool is capped at the inner-training fold size,
         # so a candidate ``nc`` larger than a fold has fewer centers *while scoring*
         # -- an inherent nested-CV limit -- but the reported ``n_centers`` is ``nc``
         # because the selected candidate is refit on the larger outer-training fold.
@@ -1030,82 +961,22 @@ def select_grr_hyperparams(
     modifies_estimand = bool(getattr(generator, "modifies_estimand", False))
 
     admissible = [r for r in path if r["admissible"] and np.isfinite(r["criterion"])]
+    if not admissible:
+        fitted = sum(bool(r["success"]) and np.isfinite(r["criterion"]) for r in path)
+        modifies_note = (
+            " The generator is marked as modifying the estimand, so its candidates "
+            "belong in a separate sensitivity analysis."
+            if modifies_estimand
+            else ""
+        )
+        raise RuntimeError(
+            "No Riesz candidate passed the admissibility screen on this training "
+            f"sample ({len(path)} candidates scored, {fitted} had finite criteria)."
+            f"{modifies_note} Inspect the returned path by setting return_path=True, "
+            "or revise the candidate grid and admissibility thresholds."
+        )
+
     pool = admissible
-    used_fallback = False
-    fallback_reason: str | None = None
-    if not pool:
-        # Fall back before warning: if nothing fitted at all, the failure is the
-        # story and a warning about "the selection below" would describe a
-        # selection that never happens.
-        pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
-        if not pool:
-            raise RuntimeError(
-                "No Riesz candidate could be fitted and scored on this training "
-                "fold (a candidate whose required selection metrics are missing "
-                "-- e.g. its outcome fit failed on every inner fold -- has no "
-                "criterion). Check the basis, generator, grids, and the outcome "
-                "model, or inspect the CV path (return_riesz_cv_path=True)."
-            )
-        used_fallback = True
-        # A modifies_estimand generator is inadmissible by design (section 9-4),
-        # but that flag must not bypass the *quality* checks: a target-
-        # sensitivity candidate still has to pass the ESS floor, the
-        # kernel-health band, and every other threshold. The sensitivity pool
-        # therefore keeps only candidates whose sole violation is the estimand
-        # flag; if none qualifies, the fallback policy decides, exactly as for
-        # an exact-target generator.
-        sensitivity = [
-            r
-            for r in pool
-            if _violated_thresholds(r, thr) == ["modifies_estimand"]
-        ]
-        if modifies_estimand and sensitivity:
-            pool = sensitivity
-            fallback_reason = "modifies_estimand"
-            warnings.warn(
-                f"Generator {getattr(generator, 'name', type(generator).__name__)} "
-                f"modifies the estimand, so none of its candidates enter the "
-                f"admissible set (design section 9-4). The hyper-parameters "
-                f"selected below tune a target-sensitivity analysis over the "
-                f"modified (bounded) estimand -- they are not a selection over "
-                f"the original estimand. Report the bound-binding rate alongside "
-                f"the estimate.",
-                UserWarning,
-                stacklevel=2,
-            )
-        elif config.fallback_policy == "best_criterion":
-            fallback_reason = "no_admissible_candidate"
-            warnings.warn(
-                "No Riesz candidate passed the admissibility screen on this training "
-                "fold; fallback_policy='best_criterion' selects the best-criterion "
-                "candidate among all fitted ones. The result records the thresholds "
-                "it violates (fallback_violations). Inspect the CV path table "
-                "(return_riesz_cv_path=True).",
-                UserWarning,
-                stacklevel=2,
-            )
-        else:
-            # Audit CV-11: an inadmissible winner can carry a deceptively small
-            # criterion (a saturated kernel scores near zero while estimating
-            # nothing), so silently returning one is worse than stopping.
-            sensitivity_note = (
-                "The generator modifies the estimand, so this means no "
-                "candidate passed the *remaining* quality checks either. "
-                if modifies_estimand
-                else ""
-            )
-            raise RuntimeError(
-                f"No Riesz candidate passed the admissibility screen on this "
-                f"training fold ({len(path)} candidates scored, 0 admissible). "
-                f"{sensitivity_note}"
-                "An inadmissible candidate is not returned by default because "
-                "its criterion is not trustworthy -- a saturated kernel scores "
-                "near zero while estimating nothing. Inspect the CV path "
-                "(return_riesz_cv_path=True), widen admissibility_thresholds, "
-                "fix the grids (e.g. a sigma anchor mismatched to the feature "
-                "scale), or opt into fallback_policy='best_criterion' to accept "
-                "the best inadmissible candidate with a recorded warning."
-            )
 
     best = min(pool, key=lambda r: r["criterion"])
 
@@ -1119,9 +990,6 @@ def select_grr_hyperparams(
         n_candidates=len(path),
         path=path if config.return_path else [],
         modifies_estimand=modifies_estimand,
-        strict_nested=bool(config.strict_nested),
+        strict_nested=True,
         fold_provenance=fold_provenance,
-        used_fallback=used_fallback,
-        fallback_reason=fallback_reason,
-        fallback_violations=_violated_thresholds(best, thr) if used_fallback else [],
     )

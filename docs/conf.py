@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
+from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -23,12 +25,12 @@ if SRC not in sys.path:
 project = "genriesz"
 author = "Masahiro Kato"
 
-try:
-    from importlib import metadata as importlib_metadata
+version_text = (Path(SRC) / "genriesz" / "__init__.py").read_text(encoding="utf-8")
+match = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', version_text, re.MULTILINE)
+if match is None:
+    raise RuntimeError("src/genriesz/__init__.py does not define __version__.")
+release = match.group(1)
 
-    release = importlib_metadata.version("genriesz")
-except Exception:  # pragma: no cover
-    release = "0.0.0"
 
 
 # ---------------------------------------------------------------------------

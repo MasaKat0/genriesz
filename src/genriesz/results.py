@@ -130,13 +130,10 @@ class FunctionalEstimate:
 
             return pd.DataFrame(rows)
 
-        # as_pandas is None: prefer pandas when installed.
-        try:
-            import pandas as pd  # type: ignore
+        # as_pandas is None: return a DataFrame; pandas is an optional data dependency.
+        import pandas as pd  # type: ignore
 
-            return pd.DataFrame(rows)
-        except Exception:
-            return rows
+        return pd.DataFrame(rows)
 
     def love_plot(
         self,
@@ -165,12 +162,7 @@ class FunctionalEstimate:
                 "They are computed only for treatment-effect functionals (ATE, ATT, and DID)."
             )
 
-        try:
-            import matplotlib.pyplot as plt  # type: ignore
-        except Exception as err:  # pragma: no cover
-            raise ImportError(
-                "matplotlib is required for love_plot(). Install it via `pip install matplotlib`."
-            ) from err
+        import matplotlib.pyplot as plt  # type: ignore
 
         names = list(love["covariate_names"])
         if absolute:
