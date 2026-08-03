@@ -898,6 +898,9 @@ class RieszCoefficientFit:
     message: str
     kkt_residual: float
     domain_margin: float
+    clip_binding_rate: float = float("nan")
+    binding_rate_lower: float = float("nan")
+    binding_rate_upper: float = float("nan")
 
 
 def _fit_riesz_coefficients(
@@ -949,6 +952,9 @@ def _fit_riesz_coefficients(
             message=message,
             kkt_residual=kkt_residual,
             domain_margin=float("inf"),
+            clip_binding_rate=float(fit.clip_binding_rate),
+            binding_rate_lower=float(fit.binding_rate_lower),
+            binding_rate_upper=float(fit.binding_rate_upper),
         )
 
     sign = np.where(X[:, TREATMENT_INDEX] >= 0.5, 1.0, -1.0)
@@ -974,16 +980,27 @@ def _fit_riesz_coefficients(
 
     def objective(beta: FloatArray) -> float:
         v = Phi @ beta
-        g_star, _ = generator.conjugate(X, v)
-        value = float(np.mean(g_star - M @ beta))
+        evaluation = generator.conjugate_status(X, v)
+        if not np.all(evaluation.valid):
+            # The exact conjugate is +inf outside the dual domain. Reporting
+            # the extended value makes the line search reject an infeasible
+            # trial step instead of the evaluation raising mid-solve; no
+            # substitute value enters the fit.
+            return float("inf")
+        value = float(np.mean(evaluation.conjugate - M @ beta))
         if penalty_ is not None:
             value += 0.5 * float(lam) * float(np.sum(beta * beta))
         return value
 
     def gradient(beta: FloatArray) -> FloatArray:
         v = Phi @ beta
-        _, alpha = generator.conjugate(X, v)
-        value = np.mean(alpha[:, None] * Phi - M, axis=0)
+        evaluation = generator.conjugate_status(X, v)
+        if not np.all(evaluation.valid):
+            # Undefined outside the dual domain. The infinite objective has
+            # already rejected such a step; NaN keeps any consumer visibly
+            # broken rather than steering it with a fabricated direction.
+            return np.full(beta.shape, np.nan)
+        value = np.mean(evaluation.alpha[:, None] * Phi - M, axis=0)
         if penalty_ is not None:
             value = value + float(lam) * beta
         return np.asarray(value, dtype=float)
@@ -1004,6 +1021,21 @@ def _fit_riesz_coefficients(
         k = 1.0 + 1.0 / generator.omega
         margin = float(np.min(1.0 + signed_index / k))
     grad = gradient(beta)
+    if not (np.all(np.isfinite(beta)) and np.all(np.isfinite(grad))):
+        # The optimizer returned a point outside the exact dual domain; the
+        # KKT diagnostics are undefined there and the fit is a failure.
+        return RieszCoefficientFit(
+            beta=beta,
+            success=False,
+            status="constrained_optimizer_failure",
+            message=(
+                "The constrained optimizer returned a point outside the "
+                "exact dual domain."
+            ),
+            kkt_residual=float("inf"),
+            domain_margin=margin,
+            clip_binding_rate=0.0,
+        )
     if isinstance(generator, BKLGenerator):
         slack = -dual_margin - signed_index
         stationarity_target = -grad
@@ -1043,6 +1075,9 @@ def _fit_riesz_coefficients(
         message=message,
         kkt_residual=kkt,
         domain_margin=margin,
+        # The exact dual domain is enforced by constraints; no clamp exists,
+        # so nothing binds and the per-side clamp rates do not apply.
+        clip_binding_rate=0.0,
     )
 
 
@@ -1076,6 +1111,9 @@ def _fit_functional(
     held_out_max: list[float] = []
     fit_statuses: list[str] = []
     fit_gradients: list[float] = []
+    fit_binding_rates: list[float] = []
+    fit_binding_lower: list[float] = []
+    fit_binding_upper: list[float] = []
     split_list = _folds(D, cross_fit=cross_fit, folds=folds, random_state=random_state)
 
     for fold_id, fold in enumerate(split_list):
@@ -1106,6 +1144,9 @@ def _fit_functional(
         )
         fit_statuses.append(fit_r.status)
         fit_gradients.append(float(fit_r.kkt_residual))
+        fit_binding_rates.append(float(fit_r.clip_binding_rate))
+        fit_binding_lower.append(float(fit_r.binding_rate_lower))
+        fit_binding_upper.append(float(fit_r.binding_rate_upper))
         if not fit_r.success:
             return FunctionalFit(
                 estimates={},
@@ -1225,8 +1266,18 @@ def _fit_functional(
         "held_out_imbalance_max": float(np.max(held_out_max)),
         "riesz_fit_statuses": tuple(fit_statuses),
         "riesz_gradient_norm_max": float(np.max(fit_gradients)),
-        "riesz_modifies_estimand": False,
-        "riesz_clip_binding_rate_max": 0.0,
+        "riesz_modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
+        "riesz_clip_binding_rate_max": float(np.max(fit_binding_rates)),
+        "riesz_binding_rate_lower_max": (
+            float(np.max(fit_binding_lower))
+            if np.all(np.isfinite(fit_binding_lower))
+            else float("nan")
+        ),
+        "riesz_binding_rate_upper_max": (
+            float(np.max(fit_binding_upper))
+            if np.all(np.isfinite(fit_binding_upper))
+            else float("nan")
+        ),
         "love_plot": balance,
     }
     return FunctionalFit(estimates=estimates, diagnostics=diagnostics, failure=None)
@@ -1365,8 +1416,17 @@ def fit_one_grr_with_basis(
     max_iter: int = 500,
     random_state: int = 0,
     label_info: dict[str, Any] | None = None,
+    generator_override: BregmanGenerator | None = None,
 ) -> list[dict[str, Any]]:
-    """Fit one specification with a caller-supplied basis."""
+    """Fit one specification with a caller-supplied basis.
+
+    ``generator_override`` replaces the generator built from ``loss_spec``;
+    the caller then states the fitted model explicitly. Truncated sensitivity
+    variants (for example :class:`~genriesz.BoundedBKLGenerator`) are accepted
+    for every estimand, while an exact :class:`~genriesz.BKLGenerator` is
+    rejected for ATT no matter how it is supplied, because the control branch
+    can approach zero.
+    """
 
     X = np.asarray(data["X"], dtype=float)
     Y = np.asarray(data["Y"], dtype=float)
@@ -1380,19 +1440,23 @@ def fit_one_grr_with_basis(
     }
     if label_info is not None:
         label.update(label_info)
-    if str(estimand).upper() == "ATT" and str(loss_spec["loss"]).upper() == "BKL":
-        return _failure_rows(
-            label,
-            ExperimentFailure(
-                "incompatible_exact_domain",
-                "Exact BKL is not an admissible ATT candidate "
-                "because the control branch can approach zero.",
-            ),
-            true_theta(data, estimand),
-        )
-    generator = make_compatible_generator(
-        loss_spec["loss"], estimand=estimand, omega=loss_spec.get("omega")
+    incompatible_att_bkl = ExperimentFailure(
+        "incompatible_exact_domain",
+        "Exact BKL is not an admissible ATT candidate "
+        "because the control branch can approach zero.",
     )
+    if generator_override is not None:
+        generator = generator_override
+    else:
+        if str(estimand).upper() == "ATT" and str(loss_spec["loss"]).upper() == "BKL":
+            return _failure_rows(label, incompatible_att_bkl, true_theta(data, estimand))
+        generator = make_compatible_generator(
+            loss_spec["loss"], estimand=estimand, omega=loss_spec.get("omega")
+        )
+    if str(estimand).upper() == "ATT" and isinstance(generator, BKLGenerator):
+        # An exact BKL link is inadmissible for ATT no matter how it was
+        # supplied; an override does not bypass the domain argument.
+        return _failure_rows(label, incompatible_att_bkl, true_theta(data, estimand))
     fit = _fit_functional(
         X,
         Y,

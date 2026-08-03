@@ -17,13 +17,16 @@ import numpy as np
 import pytest
 
 from genriesz.experiments.publication import (
+    CoverageDiagnosticBasis,
     ZOnlyBasis,
     fit_matching_ate,
     fit_one_grr,
+    fit_one_grr_with_basis,
     fit_one_incompatible,
     load_ihdp_replication,
     load_lalonde,
     make_base_basis,
+    make_coverage_diagnostic_data,
     make_dimension_data,
     make_kernel_gp_data,
     make_score_guided_data,
@@ -715,3 +718,154 @@ def test_linear_link_fit_reports_an_iteration_limit_as_a_failure() -> None:
     beta, status = _fit_linear_link_ukl(Phi, M, sign, C=1.0, lam=1e-2, max_iter=500)
     assert status == "converged"
     assert np.all(np.isfinite(beta))
+
+
+# ---------------------------------------------------------------------------
+# The constrained exact solvers evaluate the conjugate as an extended-value
+# function: a line-search step outside the dual domain yields an infinite
+# objective and the fit either converges or records a candidate failure. It
+# must never escape as an exception (a weak-overlap BKL fold once did).
+# ---------------------------------------------------------------------------
+def test_exact_bkl_under_weak_overlap_records_any_failure() -> None:
+    data = make_coverage_diagnostic_data(n=400, seed=3_000_000, overlap_scale=2.5)
+    rows = fit_one_grr_with_basis(
+        data,
+        estimand="ATE",
+        loss_spec={"label": "BKL", "loss": "BKL"},
+        representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+        cross_fit=True,
+        lam=1e-2,
+        folds=2,
+        estimators=("arw",),
+        random_state=0,
+    )
+    assert rows
+    assert {row["status"] for row in rows} <= {"ok", "constrained_optimizer_failure"}
+
+
+# ---------------------------------------------------------------------------
+# ``generator_override`` states the fitted model explicitly; the sensitivity
+# diagnostics (estimand flag and per-side binding rates) surface in the rows,
+# and the exact path keeps reporting an unbound fit.
+# ---------------------------------------------------------------------------
+def test_generator_override_surfaces_the_sensitivity_diagnostics() -> None:
+    from genriesz.experiments.publication import branch_treated
+    from genriesz.generators import BoundedUKLGenerator
+
+    data = make_coverage_diagnostic_data(n=300, seed=7, overlap_scale=0.5)
+    gen = BoundedUKLGenerator.from_propensity_bounds(0.05, 0.95, branch_fn=branch_treated)
+    rows = fit_one_grr_with_basis(
+        data,
+        estimand="ATE",
+        loss_spec={"label": "UKL", "loss": "UKL"},
+        representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+        cross_fit=True,
+        lam=1e-2,
+        folds=2,
+        estimators=("arw",),
+        random_state=0,
+        generator_override=gen,
+    )
+    row = rows[0]
+    assert row["status"] == "ok"
+    assert row["riesz_modifies_estimand"] is True
+    assert np.isfinite(row["riesz_binding_rate_lower_max"])
+    assert np.isfinite(row["riesz_binding_rate_upper_max"])
+    assert row["riesz_clip_binding_rate_max"] >= 0.0
+
+
+def test_exact_fit_reports_an_unbound_representer() -> None:
+    data = make_coverage_diagnostic_data(n=300, seed=7, overlap_scale=0.5)
+    rows = fit_one_grr_with_basis(
+        data,
+        estimand="ATE",
+        loss_spec={"label": "UKL", "loss": "UKL"},
+        representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+        cross_fit=True,
+        lam=1e-2,
+        folds=2,
+        estimators=("arw",),
+        random_state=0,
+    )
+    row = rows[0]
+    assert row["status"] == "ok"
+    assert row["riesz_modifies_estimand"] is False
+    assert row["riesz_clip_binding_rate_max"] == 0.0
+    assert np.isnan(row["riesz_binding_rate_lower_max"])
+    assert np.isnan(row["riesz_binding_rate_upper_max"])
+
+
+def test_exact_bkl_under_the_notebook_configuration_records_any_failure() -> None:
+    # Full notebook-12 configuration. The optimizer can also terminate at a
+    # point outside the exact dual domain; the KKT diagnostics are undefined
+    # there and the fold must surface as a recorded failure, not an exception
+    # from the multiplier solve.
+    data = make_coverage_diagnostic_data(n=2000, seed=3_108_063, overlap_scale=2.5)
+    rows = fit_one_grr_with_basis(
+        data,
+        estimand="ATE",
+        loss_spec={"label": "BKL", "loss": "BKL"},
+        representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+        cross_fit=True,
+        lam=1e-2,
+        folds=5,
+        estimators=("arw",),
+        random_state=9,
+    )
+    assert rows
+    assert {row["status"] for row in rows} == {"constrained_optimizer_failure"}
+    assert any(
+        "outside the exact dual domain" in str(row.get("message", "")) for row in rows
+    )
+
+
+@pytest.mark.parametrize(
+    "loss_spec",
+    [
+        {"label": "BKL", "loss": "BKL"},
+        {"label": "BP(0.5)", "loss": "BP", "omega": 0.5},
+    ],
+    ids=["bkl", "bp"],
+)
+def test_exact_constrained_paths_report_an_unbound_representer(loss_spec) -> None:
+    # The exact dual domain is enforced by constraints; no clamp exists, so a
+    # successful fit reports a zero binding rate and no per-side rates.
+    data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=400, seed=5)
+    rows = fit_one_grr(
+        data,
+        estimand="ATE",
+        loss_spec=loss_spec,
+        basis_kind="rkhs",
+        cross_fit=True,
+        lam=1e-2,
+        basis_features=40,
+        folds=2,
+        estimators=("arw",),
+        random_state=0,
+    )
+    row = rows[0]
+    assert row["status"] == "ok"
+    assert row["riesz_modifies_estimand"] is False
+    assert row["riesz_clip_binding_rate_max"] == 0.0
+    assert np.isnan(row["riesz_binding_rate_lower_max"])
+    assert np.isnan(row["riesz_binding_rate_upper_max"])
+
+
+def test_generator_override_does_not_bypass_the_att_guard() -> None:
+    from genriesz.experiments.publication import branch_treated
+
+    data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=300, seed=9)
+    rows = fit_one_grr_with_basis(
+        data,
+        estimand="ATT",
+        loss_spec={"label": "BKL", "loss": "BKL"},
+        representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+        cross_fit=True,
+        lam=1e-2,
+        folds=2,
+        estimators=("arw",),
+        random_state=0,
+        generator_override=BKLGenerator(C=0.05, branch_fn=branch_treated),
+    )
+    assert rows
+    assert {row["status"] for row in rows} == {"incompatible_exact_domain"}

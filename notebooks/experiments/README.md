@@ -27,6 +27,7 @@ The IHDP notebooks require `ihdp_npci_1-100.train.npz` and `ihdp_npci_1-100.test
 | `09_reference_based_loss_link_selection.ipynb` | Reference-based selection with separate training, diagnostic, and evaluation observations |
 | `10_coverage_decomposition.ipynb` | Coverage decomposition under correct and misspecified dictionaries |
 | `11_numerical_failure_selection.ipynb` | Numerical failure rates and the direct held-out-imbalance selection diagnostic |
+| `12_truncated_model_sensitivity.ipynb` | Truncated (bounded) representer models as a target-sensitivity sweep under weak overlap |
 
 The reference-based selection design is specified in `REFERENCE_SELECTION_PLAN.md`. Its implementation is in `genriesz.experiments.reference_selection`. The notebook always uses the complete publication configuration: 18 scenarios, 24,000 replication jobs, and 10,000 Gaussian multiplier draws for each simultaneous radius. Its opening rescaling table records a held-out dual-domain failure instead of clipping the index or substituting another generator.
 

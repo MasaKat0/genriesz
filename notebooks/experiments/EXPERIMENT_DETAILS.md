@@ -50,6 +50,20 @@ The treatment index and untreated outcome contain a centered quadratic term. The
 
 This notebook evaluates the earlier held-out-imbalance and variance diagnostic without a reference score. Each replication draws two independent samples: the diagnostic sample determines the selected specification, and the evaluation sample supplies the reported squared error. It records how often each loss--link specification is available and compares the selected root mean squared error with an infeasible oracle that picks the smallest realized error among the available candidates on the evaluation sample of each replication. The result does not evaluate the reference-based theorem of notebook 09.
 
+## Notebook 12: truncated-model sensitivity
+
+The notebook compares exact UKL and BKL with their truncated (bounded)
+variants under the weak-overlap coverage-diagnostic design. The bound is part
+of the fitted model: `e_min` values of 0.01, 0.02, and 0.05 correspond to
+representer magnitude caps of 100, 50, and 20, stated through
+`BoundedUKLGenerator.from_propensity_bounds` and `BoundedBKLGenerator`. No
+fitted value is clipped afterwards. The table reports bias, Monte Carlo
+standard deviation, mean estimated standard error, coverage of the population
+effect, root mean squared error, the maximum absolute representer, per-side
+binding rates, and the stable count; failures remain in the denominator.
+Where a bound binds the estimator targets a modified (bounded) estimand, so
+the bounded rows are a target-sensitivity analysis around the exact rows.
+
 ## Figures and tables
 
 Each notebook constructs its figures and tables after computing the corresponding result data. Plot layout, labels, and output paths are stated directly in the notebook. The package does not contain a plotting function that can silently change the manuscript figures.
