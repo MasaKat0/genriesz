@@ -181,12 +181,6 @@ class BregmanGenerator:
     inversion; ``inv_grad`` defines the fitted model.
     """
 
-    #: Whether this generator's link intentionally bounds/caps the representer
-    #: and therefore targets a *modified* estimand. Model selection uses this
-    #: (together with ``domain_binding``) to keep such variants out of the
-    #: admissible set and treat them as target-sensitivity candidates (§9-4).
-    modifies_estimand: bool = False
-
     def __init__(
         self,
         *,
@@ -425,8 +419,10 @@ class BregmanGenerator:
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         """Return where an explicit bound or an exact-domain margin is active.
 
-        The base implementation reports no binding. A bounded generator may
-        override this method because its bound changes the fitted target.
+        The base implementation reports no binding. A generator with a
+        saturating (truncated) link or a restricted exact domain overrides
+        this method to report where its stated bound or domain margin is
+        active, so fits can surface the rate as a diagnostic.
         """
 
         X_ = as_2d(X)
@@ -853,9 +849,9 @@ class BKLGenerator(BregmanGenerator):
     An unconstrained line search cannot optimize this objective with a fixed
     branch because it may leave the dual domain. ``GRRGLM`` therefore imposes
     the exact observationwise linear constraints when ``branch_fn`` is supplied.
-    :class:`BoundedBKLGenerator` remains available as a bounded-representer
-    sensitivity specification; where its bound is active, it targets a modified
-    estimand.
+    :class:`BoundedBKLGenerator` is the truncated variant of this model: its
+    link saturates at stated representer bounds, so it stays defined for every
+    finite dual coordinate and is optimizable unconstrained.
 
     If ``branch_fn`` is provided, it selects the sign branch.
     """
@@ -951,7 +947,7 @@ class BKLGenerator(BregmanGenerator):
 
 
 class BoundedBKLGenerator(BregmanGenerator):
-    """Bounded-representer BKL variant (target-sensitivity candidate).
+    """Truncated BKL model with a bounded representer link.
 
     The BKL generator function ``g`` is the same as :class:`BKLGenerator`, but
     the inverse link is **bounded and smooth** instead of exact-and-raising::
@@ -968,23 +964,22 @@ class BoundedBKLGenerator(BregmanGenerator):
     and gradient therefore stay mutually consistent everywhere, so this variant
     is optimizable with ``L-BFGS-B``.
 
-    The price is that where the bound binds the estimator no longer targets the
-    exact BKL-Riesz representer: it targets a **modified (bounded) estimand**.
-    Report :meth:`domain_binding` (the bound-binding rate) and treat this as a
-    *target-sensitivity* candidate, not an admissible one (design §9-4).
+    The truncation absorbs the numerical instability of the exact link: the
+    stated bounds are part of the fitted model, not a post-hoc rewrite of its
+    values. Where a bound is active the fit reports it through
+    :meth:`domain_binding` and the per-side binding rates, which are ordinary
+    diagnostics to read alongside the estimate.
 
     Parameters
     ----------
     C:
         Positive generator shift (domain ``|alpha| > C``).
     alpha_max:
-        Bound on ``|alpha|`` (must be ``> C``). This is a sensitivity knob: sweep
-        it and report how the estimate moves. Defaults to ``50.0``.
+        Bound on ``|alpha|`` (must be ``> C``). Defaults to ``50.0``.
     branch_fn:
         Optional branch selector (as in :class:`BKLGenerator`).
     """
 
-    modifies_estimand = True
     #: The link is pinned at the bound where ``domain_binding`` is True, so
     #: ``d alpha / d v = 0`` there. ``GRRGLM.derivative_alpha`` uses this.
     link_is_constant_where_binding = True
@@ -1014,8 +1009,8 @@ class BoundedBKLGenerator(BregmanGenerator):
         self.alpha_max = float(alpha_max)
         # u_min < 0 is the pre-image of alpha_max under the BKL link. The
         # lower dual bound is the pre-image of the smallest float64 value that
-        # remains strictly above C. Both bounds are part of this explicitly
-        # bounded sensitivity specification and are reported by domain_binding.
+        # remains strictly above C. Both bounds are part of the stated
+        # truncated model and are reported by domain_binding.
         self._u_min = float(
             np.log((self.alpha_max - float(C)) / (self.alpha_max + float(C)))
         )
@@ -1077,7 +1072,7 @@ class BoundedBKLGenerator(BregmanGenerator):
         return self._signed_u(X, v) > self._u_min
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        """Mask where the bound binds, i.e. the modified-estimand region.
+        """Mask where a stated representer bound is active.
 
         A point exactly on a pre-image boundary is not binding: the clamp is
         inactive there and the interior derivative applies.
@@ -1112,7 +1107,7 @@ class BoundedBKLGenerator(BregmanGenerator):
 
 
 class BoundedUKLGenerator(BregmanGenerator):
-    """Bounded-representer UKL variant (target-sensitivity candidate).
+    """Truncated UKL model with a bounded representer link.
 
     The UKL generator function is unchanged, but the fitted model is
     truncated: with ``z = s v`` the inverse link ``|alpha| = C + e^z`` is
@@ -1124,10 +1119,11 @@ class BoundedUKLGenerator(BregmanGenerator):
     the objective and gradient stay mutually consistent everywhere. Values
     are never rewritten after fitting.
 
-    Where a bound binds the estimator no longer targets the exact UKL-Riesz
-    representer: it targets a modified (bounded) estimand. Report
-    :meth:`domain_binding` and treat this class as a *target-sensitivity*
-    specification, never an admissible candidate (design section 9-4).
+    The truncation absorbs the numerical instability of the exact link: the
+    stated bounds are part of the fitted model, not a post-hoc rewrite of its
+    values. Where a bound is active the fit reports it through
+    :meth:`domain_binding` and the per-side binding rates, which are ordinary
+    diagnostics to read alongside the estimate.
 
     Parameters
     ----------
@@ -1143,7 +1139,6 @@ class BoundedUKLGenerator(BregmanGenerator):
         Branch selector fixed by the estimand (required).
     """
 
-    modifies_estimand = True
     #: The link is pinned at the bound where ``domain_binding`` is True, so
     #: ``d alpha / d v = 0`` there. ``GRRGLM.derivative_alpha`` uses this.
     link_is_constant_where_binding = True
@@ -1293,7 +1288,7 @@ class BoundedUKLGenerator(BregmanGenerator):
         return self._signed_z(X, v) > self._z_hi
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
-        """Mask where a representer bound binds (the modified-estimand region).
+        """Mask where a stated representer bound is active.
 
         A point exactly on a pre-image boundary is not binding: the clamp is
         inactive there and the interior derivative applies.

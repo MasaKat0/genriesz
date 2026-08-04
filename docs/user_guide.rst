@@ -374,11 +374,13 @@ Truncated (bounded) representer models
 representer bounds instead of clipping a fitted exact model. Where a bound
 binds, :math:`\alpha` is pinned at the bound, so the envelope identity
 :math:`d g^*(v)/dv = \alpha` holds exactly and the objective and gradient stay
-mutually consistent; fitted values are never rewritten afterwards. Where a
-bound binds the estimator targets a modified (bounded) estimand, so both
-classes carry ``modifies_estimand=True``: hyperparameter selection always
-excludes them from the admissible set, and they are reported as separate
-sensitivity specifications.
+mutually consistent; fitted values are never rewritten afterwards. The exact
+UKL and BKL links diverge as the dual index approaches the domain boundary;
+the truncation absorbs that numerical instability as part of the declared
+model. The stated bounds make these ordinary candidates: hyperparameter
+selection screens them on the same quality checks as any other generator, and
+the bound-binding rate is an ordinary diagnostic to report alongside the
+estimate.
 
 ``BoundedUKLGenerator.from_propensity_bounds(e_min, e_max)`` states the ATE
 parameterization in which the implied propensity stays inside

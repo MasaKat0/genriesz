@@ -57,7 +57,6 @@ class ScaledGenerator(BregmanGenerator):
         super().__init__(name=f"{kappa:g}x{inner.name}", C=inner.C, branch_fn=inner.branch_fn)
         self.inner = inner
         self.kappa = float(kappa)
-        self.modifies_estimand = inner.modifies_estimand
 
     def g(self, X, alpha):  # type: ignore[override]
         return self.kappa * np.asarray(self.inner.g(X, alpha), dtype=float)

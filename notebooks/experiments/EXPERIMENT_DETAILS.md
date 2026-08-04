@@ -6,7 +6,7 @@ The notebooks use the estimators and data-generating processes in `genriesz.expe
 
 For ATE and ATT, the representer and outcome regression are estimated on training observations. With cross fitting, predictions are formed only for observations outside the fitting fold. The notebooks report regression adjustment, Riesz weighting, augmented Riesz weighting, and Gaussian targeted maximum likelihood estimates when the requested specification is available. Regression adjustment, Riesz weighting, and the matching comparison are reported as point estimates only: their plug-in scores are not Neyman orthogonal, so no standard error, interval, or coverage is attached to them. Inference columns are populated for the augmented and targeted estimators, whose influence-function standard errors are valid under cross-fitting.
 
-A generalized Riesz fit uses the generator and compatible link named in the notebook. The squared link is defined for every finite dual index. UKL has no mathematical restriction on that index, but the exact exponential value must remain representable in float64. The exact BKL and BP links have restricted dual domains. A candidate is unavailable when its exact inverse link is outside the mathematical domain or cannot be represented in float64. The software does not replace it with a bounded generator or change its fitted values.
+A generalized Riesz fit uses the generator and compatible link named in the notebook. The squared link is defined for every finite dual index. The default UKL and BKL specifications are truncated models: the exact links diverge as the dual index approaches the domain boundary, so the fitted link saturates at representer bounds that are fixed constants of the experimental design. For ATE, the UKL bounds state the symmetric propensity window (0.01, 0.99), so the representer magnitude lies in [1/0.99, 100]; for ATT, only the upper magnitude cap 100 is a model choice and the lower clamp is the float64 representability floor. The BKL cap is 50 for both estimands. The bounds are part of the declared model, values are never rewritten after fitting, and the result tables report the rate at which each bound is active. The exact BP link has a restricted dual domain enforced by explicit linear constraints; a BP candidate is unavailable when its exact inverse link is outside the mathematical domain or cannot be represented in float64, and the software does not replace it or change its fitted values.
 
 For ATT, the treated proportion is estimated from the sample. The variance calculation subtracts the corresponding treatment-share term from the influence values. The point estimate is unchanged.
 
@@ -18,7 +18,7 @@ The diagnostics include the 95th percentile and maximum of the absolute fitted r
 
 The notebook uses three data-generating processes. The first has smooth heterogeneous treatment effects and moderate overlap. The second has a nonlinear treatment index and weaker overlap. The third has correlated high-dimensional covariates with sparse confounding. The true propensity is bounded between 0.05 and 0.95 before treatment is drawn, as in the original notebook design.
 
-Compatible squared, unnormalized Kullback--Leibler, exact binary Kullback--Leibler, and Basu power specifications are compared under the same folds. The notebook also reports deliberately incompatible loss--link specifications and a propensity-score plug-in comparison. A candidate failure remains in the result data and is excluded only from summaries that require an estimate.
+Compatible squared, truncated unnormalized Kullback--Leibler, truncated binary Kullback--Leibler, and Basu power specifications are compared under the same folds. The notebook also reports deliberately incompatible loss--link specifications and a propensity-score plug-in comparison. A candidate failure remains in the result data and is excluded only from summaries that require an estimate.
 
 ## Notebook 02: IHDP
 
@@ -49,20 +49,6 @@ The treatment index and untreated outcome contain a centered quadratic term. The
 ## Notebook 11: direct failure diagnostic
 
 This notebook evaluates the earlier held-out-imbalance and variance diagnostic without a reference score. Each replication draws two independent samples: the diagnostic sample determines the selected specification, and the evaluation sample supplies the reported squared error. It records how often each loss--link specification is available and compares the selected root mean squared error with an infeasible oracle that picks the smallest realized error among the available candidates on the evaluation sample of each replication. The result does not evaluate the reference-based theorem of notebook 09.
-
-## Notebook 12: truncated-model sensitivity
-
-The notebook compares exact UKL and BKL with their truncated (bounded)
-variants under the weak-overlap coverage-diagnostic design. The bound is part
-of the fitted model: `e_min` values of 0.01, 0.02, and 0.05 correspond to
-representer magnitude caps of 100, 50, and 20, stated through
-`BoundedUKLGenerator.from_propensity_bounds` and `BoundedBKLGenerator`. No
-fitted value is clipped afterwards. The table reports bias, Monte Carlo
-standard deviation, mean estimated standard error, coverage of the population
-effect, root mean squared error, the maximum absolute representer, per-side
-binding rates, and the stable count; failures remain in the denominator.
-Where a bound binds the estimator targets a modified (bounded) estimand, so
-the bounded rows are a target-sensitivity analysis around the exact rows.
 
 ## Figures and tables
 

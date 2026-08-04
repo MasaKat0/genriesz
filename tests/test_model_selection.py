@@ -514,32 +514,21 @@ def test_removed_fallback_policy_keyword_is_rejected():
         GRRCVConfig(fallback_policy="best_criterion")
 
 
-def test_modifies_estimand_candidate_is_not_selected():
+def test_a_stray_estimand_flag_attribute_no_longer_screens_candidates():
+    # The estimand-flag exclusion machinery is removed: an attribute with the
+    # old name has no effect, and selection judges the candidate on quality.
     X, y = _healthy_sample()
     gen = SquaredGenerator()
     gen.modifies_estimand = True
-    common = dict(
+    res = select_grr_hyperparams(
         X_train=X,
         y_train=y,
         m=ATEFunctional(0),
         basis=GaussianRKHSBasis(n_centers=30, random_state=0),
         generator=gen,
+        config=GRRCVConfig(sigma_grid="auto", cv_folds=2, random_state=0),
     )
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        select_grr_hyperparams(
-            config=GRRCVConfig(sigma_grid="auto", cv_folds=2, random_state=0),
-            **common,
-        )
-    with pytest.raises(RuntimeError, match="modifying the estimand"):
-        select_grr_hyperparams(
-            config=GRRCVConfig(
-                sigma_grid="auto",
-                cv_folds=2,
-                random_state=0,
-                admissibility_thresholds=_IMPOSSIBLE,
-            ),
-            **common,
-        )
+    assert res.n_admissible >= 1
 
 
 def test_estimation_entry_point_does_not_accept_fallback_policy():
