@@ -18,7 +18,7 @@ The diagnostics include the 95th percentile and maximum of the absolute fitted r
 
 The notebook uses three data-generating processes. The first has smooth heterogeneous treatment effects and moderate overlap. The second has a nonlinear treatment index and weaker overlap. The third has correlated high-dimensional covariates with sparse confounding. The true propensity is bounded between 0.05 and 0.95 before treatment is drawn, as in the original notebook design.
 
-Compatible squared, truncated unnormalized Kullback--Leibler, truncated binary Kullback--Leibler, and Basu power specifications are compared under the same folds. The notebook also reports deliberately incompatible loss--link specifications and a propensity-score plug-in comparison. A candidate failure remains in the result data and is excluded only from summaries that require an estimate.
+Compatible squared, truncated unnormalized Kullback--Leibler, truncated binary Kullback--Leibler, and Basu power specifications are compared under the same folds. The notebook also reports deliberately incompatible loss--link specifications and a propensity-score plug-in comparison. The plug-in baseline is a cross-fitted, effectively unpenalized logistic regression of the treatment on the raw covariates (standardized with training-fold moments), with fitted propensities clipped to the declared window [0.01, 0.99]; the clip is part of the stated comparison method and its activation rate is reported alongside the estimates. Its IPW arm is a plug-in weighting score and is reported as a point estimate only; the AIPW arm carries the influence-function inference. A candidate failure remains in the result data and is excluded only from summaries that require an estimate.
 
 ## Notebook 02: IHDP
 
