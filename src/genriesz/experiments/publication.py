@@ -1828,25 +1828,148 @@ def fit_one_incompatible(
     return result_to_rows(fit, label_info=label, true_value=true_theta(data, estimand))
 
 
+#: Propensity clip window of the plug-in logistic baseline. The clip is part
+#: of the declared comparison method (the textbook IPW/AIPW practice), not a
+#: rewrite of a genriesz estimator; the rate at which it is active is
+#: reported as ``propensity_clip_rate`` in the baseline's result rows.
+PLUGIN_PROPENSITY_CLIP = 0.01
+
+
 def fit_one_plugin_logistic(
     data: dict[str, Any],
     *,
     estimand: str,
-    cross_fit: bool = True,
     folds: int = 5,
     basis_features: int = 120,
     random_state: int = 0,
+    outcome_lam: float = 1e-3,
+    max_iter: int = 500,
 ) -> list[dict[str, Any]]:
-    return fit_one_incompatible(
-        data,
-        estimand=estimand,
-        pair_name="BKL loss + logit link",
-        cross_fit=cross_fit,
-        lam=1e-2,
-        basis_features=basis_features,
-        folds=folds,
-        random_state=random_state,
+    """Cross-fitted logistic-propensity IPW/AIPW baseline on raw covariates.
+
+    The propensity model is an effectively unpenalized logistic regression of
+    the treatment on the raw covariates (standardized with training-fold
+    moments), the textbook plug-in baseline; it is deliberately not the
+    RKHS-feature propensity index of the incompatible loss--link pairs.
+    Fitted propensities are clipped to ``[PLUGIN_PROPENSITY_CLIP, 1 -
+    PLUGIN_PROPENSITY_CLIP]``: the clip is part of the declared baseline and
+    its activation rate is reported as ``propensity_clip_rate``. The IPW arm
+    is a plug-in weighting score, so it is reported point-only; the AIPW arm
+    carries the influence-function inference. The outcome model matches the
+    RKHS specification of the GRR arms.
+    """
+
+    X = np.asarray(data["X"], dtype=float)
+    Y = np.asarray(data["Y"], dtype=float)
+    D = X[:, TREATMENT_INDEX]
+    Z = np.delete(X, TREATMENT_INDEX, axis=1)
+    n = X.shape[0]
+    label = {
+        "estimand": str(estimand).upper(),
+        "loss": "Logistic",
+        "basis": "raw Z",
+        "basis_mode": "regressor",
+        "cross_fit": True,
+        "lambda_riesz": float("nan"),
+        "penalty": "none",
+    }
+    functional = _functional(estimand, D)
+    alpha = np.full(n, np.nan)
+    mu = np.full(n, np.nan)
+    mu1 = np.full(n, np.nan)
+    mu0 = np.full(n, np.nan)
+    clip_hits = 0
+    basis_y = make_basis(
+        "rkhs",
+        mode="regressor",
+        seed=random_state + 7919,
+        n_features=basis_features,
     )
+    for fold_id, fold in enumerate(
+        stratified_kfold_splits(D, folds=int(folds), random_state=int(random_state))
+    ):
+        train = fold.train
+        test = fold.test
+        D_train = D[train]
+        if np.sum(D_train == 1.0) == 0 or np.sum(D_train == 0.0) == 0:
+            return _failure_rows(
+                label,
+                ExperimentFailure(
+                    "degenerate_treatment_fold",
+                    "The training fold does not contain both treatment groups.",
+                    fold_id,
+                ),
+                true_theta(data, estimand),
+            )
+        Z_train = Z[train]
+        mean_train = Z_train.mean(axis=0)
+        sd_train = Z_train.std(axis=0)
+        sd_train = np.where(sd_train > 0.0, sd_train, 1.0)
+        model = LogisticRegression(C=1e10, solver="lbfgs", max_iter=2000)
+        model.fit((Z_train - mean_train) / sd_train, D_train.astype(int))
+        e_raw = model.predict_proba((Z[test] - mean_train) / sd_train)[:, 1]
+        clip_hits += int(
+            np.sum(
+                (e_raw < PLUGIN_PROPENSITY_CLIP)
+                | (e_raw > 1.0 - PLUGIN_PROPENSITY_CLIP)
+            )
+        )
+        e = np.clip(e_raw, PLUGIN_PROPENSITY_CLIP, 1.0 - PLUGIN_PROPENSITY_CLIP)
+        D_test = D[test]
+        if isinstance(functional, ATEFunctional):
+            alpha[test] = D_test / e - (1.0 - D_test) / (1.0 - e)
+        else:
+            alpha[test] = (D_test - (1.0 - D_test) * e / (1.0 - e)) / functional.pi
+        fold_basis = basis_y.copy().fit(X[train], Y[train])
+        model_y = OutcomeGLM(
+            basis=fold_basis, link="identity", penalty="l2", lam=float(outcome_lam)
+        )
+        fit_y = model_y.fit(
+            X[train], Y[train], max_iter=max_iter, tol=1e-8, fit_basis=False
+        )
+        if not fit_y.success:
+            return _failure_rows(
+                label,
+                ExperimentFailure(f"outcome_{fit_y.status}", fit_y.message, fold_id),
+                true_theta(data, estimand),
+            )
+        X1_test, X0_test = _counterfactuals(X[test])
+        mu[test] = model_y.predict(X[test])
+        mu1[test] = model_y.predict(X1_test)
+        mu0[test] = model_y.predict(X0_test)
+    if not all(np.all(np.isfinite(v)) for v in (alpha, mu, mu1, mu0)):
+        return _failure_rows(
+            label,
+            ExperimentFailure(
+                "nonfinite_score_input", "A plug-in nuisance prediction is nonfinite."
+            ),
+            true_theta(data, estimand),
+        )
+    m_mu = _m_values(functional, X, mu1, mu0)
+    theta_ipw = float(np.mean(alpha * Y))
+    score = m_mu + alpha * (Y - mu)
+    theta_aipw = float(np.mean(score))
+    estimates = {
+        "ipw": _point_only_estimate(theta_ipw),
+        "aipw": _normal_estimate(
+            theta_aipw,
+            _recenter_influence(functional, D, theta_aipw, score - theta_aipw),
+        ),
+    }
+    abs_alpha = np.abs(alpha)
+    balance = _balance_table(Z, D, alpha, functional.name)
+    diagnostics = {
+        "alpha_abs_mean": float(np.mean(abs_alpha)),
+        "alpha_abs_p95": float(np.percentile(abs_alpha, 95)),
+        "alpha_abs_max": float(np.max(abs_alpha)),
+        "max_abs_smd_unweighted": float(balance["abs_smd_unweighted"].max()),
+        "max_abs_smd_weighted": float(balance["abs_smd_weighted"].max()),
+        "ess_treated": _effective_sample_size(abs_alpha[D == 1.0]),
+        "ess_control": _effective_sample_size(abs_alpha[D == 0.0]),
+        "propensity_clip_rate": float(clip_hits) / float(n),
+    }
+    fit = FunctionalFit(estimates=estimates, diagnostics=diagnostics, failure=None)
+    return result_to_rows(fit, label_info=label, true_value=true_theta(data, estimand))
 
 
 def summarize_estimates(df: pd.DataFrame, group_cols: list[str]) -> pd.DataFrame:

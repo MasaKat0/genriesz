@@ -590,6 +590,194 @@ def test_an_exit_point_outside_the_exact_domain_is_a_recorded_failure() -> None:
     assert "outside the exact dual domain" in fit.message
 
 
+@pytest.mark.parametrize("estimand", ["ATE", "ATT"])
+def test_plugin_logistic_is_the_textbook_baseline(estimand) -> None:
+    # The plug-in baseline is an unpenalized logistic propensity on the raw
+    # covariates with a declared clip window -- not the RKHS-feature
+    # propensity index of the incompatible loss-link pairs. The IPW arm is a
+    # plug-in weighting score (point-only); AIPW carries the influence CI.
+    from genriesz.experiments.publication import fit_one_plugin_logistic
+
+    data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=300, seed=11)
+    rows = fit_one_plugin_logistic(
+        data, estimand=estimand, folds=3, random_state=0, basis_features=40
+    )
+    by_estimator = {row["estimator"]: row for row in rows}
+    assert set(by_estimator) == {"ipw", "aipw"}
+    for row in rows:
+        assert row["status"] == "ok"
+        assert row["loss"] == "Logistic"
+        assert row["basis"] == "raw Z"
+        assert np.isfinite(row["estimate"])
+        assert 0.0 <= row["propensity_clip_rate"] <= 1.0
+    assert by_estimator["ipw"]["inference"] == "point_only"
+    assert not np.isfinite(by_estimator["ipw"]["se"])
+    assert by_estimator["aipw"]["inference"] == "influence_normal"
+    assert np.isfinite(by_estimator["aipw"]["se"])
+    assert by_estimator["aipw"]["covered"] in (True, False)
+
+
+def test_plugin_rows_support_the_notebook_summary_keys() -> None:
+    # Notebook 01 groups the plug-in rows by these exact keys and merges the
+    # clip rate on them; a missing column here once stopped the full run.
+    import pandas as pd
+
+    from genriesz.experiments.publication import (
+        fit_one_plugin_logistic,
+        summarize_estimates,
+    )
+
+    data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=300, seed=13)
+    rows = fit_one_plugin_logistic(
+        data, estimand="ATE", folds=3, random_state=0, basis_features=40
+    )
+    for row in rows:
+        row["dgp"] = "DGP 1: smooth heterogeneous effects"
+        row["replication"] = 0
+    frame = pd.DataFrame(rows)
+    keys = ["dgp", "estimand", "basis", "loss", "estimator"]
+    summary = summarize_estimates(frame, keys)
+    clip = (
+        frame.groupby(keys, dropna=False)["propensity_clip_rate"]
+        .mean()
+        .rename("propensity_clip_rate_mean")
+        .reset_index()
+    )
+    merged = summary.merge(clip, on=keys, how="left")
+    assert set(merged["estimator"]) == {"ipw", "aipw"}
+    assert merged["propensity_clip_rate_mean"].notna().all()
+
+
+def test_plugin_clip_is_reported_when_active() -> None:
+    # Under weak overlap the declared clip window binds; the rate is surfaced
+    # in the rows instead of being silently absorbed.
+    from genriesz.experiments.publication import fit_one_plugin_logistic
+
+    data = make_simulation_data("DGP 2: weak overlap nonlinear design", n=400, seed=100000)
+    rows = fit_one_plugin_logistic(
+        data, estimand="ATE", folds=3, random_state=0, basis_features=40
+    )
+    assert all(row["status"] == "ok" for row in rows)
+    assert all(row["propensity_clip_rate"] > 0.0 for row in rows)
+
+
+def test_every_producer_carries_its_notebook_summary_keys() -> None:
+    # The notebooks group each producer's rows with summarize_estimates()
+    # under fixed key lists, adding only scenario keys of their own (for
+    # example "dgp" or "replication"). Every remaining key must come from the
+    # producer's rows -- on failure rows too, because the notebooks build one
+    # DataFrame before filtering. A producer that stops supplying a key stops
+    # a full run mid-way (notebook 01 once failed with KeyError: 'loss' when
+    # the plug-in baseline lost its "loss" label). Each failure-capable
+    # producer is exercised on a deterministic failure configuration as well;
+    # fit_matching_ate has no failure path and is checked on success only.
+    from genriesz.experiments.publication import fit_one_plugin_logistic
+
+    data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=250, seed=17)
+    plugin_data = make_simulation_data(
+        "DGP 1: smooth heterogeneous effects", n=300, seed=11
+    )
+    coverage_data = make_coverage_diagnostic_data(n=300, seed=7, overlap_scale=0.5)
+    plugin_nan_data = dict(plugin_data)
+    nan_outcome = np.asarray(plugin_data["Y"], dtype=float).copy()
+    nan_outcome[0] = float("nan")
+    plugin_nan_data["Y"] = nan_outcome
+
+    def grr_rows(*, loss: str, max_iter: int = 500) -> list[dict]:
+        # The UKL failure case needs an iterative solver; SQ is closed form
+        # and succeeds regardless of the iteration budget.
+        return fit_one_grr(
+            data,
+            estimand="ATE",
+            loss_spec={"label": loss, "loss": loss},
+            basis_kind="polynomial",
+            degree=1,
+            folds=2,
+            estimators=("arw",),
+            random_state=0,
+            max_iter=max_iter,
+        )
+
+    def with_basis_rows(*, max_iter: int = 500) -> list[dict]:
+        return fit_one_grr_with_basis(
+            coverage_data,
+            estimand="ATE",
+            loss_spec={"label": "UKL", "loss": "UKL"},
+            representer_basis=CoverageDiagnosticBasis(include_quadratic=True),
+            cross_fit=True,
+            lam=1e-2,
+            folds=2,
+            estimators=("arw",),
+            random_state=0,
+            max_iter=max_iter,
+        )
+
+    def incompatible_rows(*, estimand: str) -> list[dict]:
+        return fit_one_incompatible(
+            make_simulation_data("DGP 1: smooth heterogeneous effects", n=400, seed=5),
+            estimand=estimand,
+            pair_name="UKL loss + linear link",
+            cross_fit=True,
+            lam=1e-2,
+            basis_features=40,
+            folds=2,
+            random_state=0,
+        )
+
+    def plugin_rows(source: dict) -> list[dict]:
+        return fit_one_plugin_logistic(
+            source, estimand="ATE", folds=3, random_state=0, basis_features=40
+        )
+
+    # Required keys per producer. Notebooks 01, 02, 04, 05, and 07 group
+    # fit_one_grr rows (dgp, dimension, and heterogeneous_effect are
+    # notebook-added); notebook 08 groups fit_one_grr_with_basis rows
+    # (outcome_surface and n_active_features come from label_info); notebook
+    # 01 groups the incompatible and plug-in rows; notebook 06 concatenates
+    # matching rows into the model-variation summary.
+    cases = {
+        "fit_one_grr": (
+            grr_rows(loss="SQ"),
+            grr_rows(loss="UKL", max_iter=1),
+            {"estimand", "basis", "basis_mode", "loss", "cross_fit", "lambda_riesz"},
+        ),
+        "fit_one_grr_with_basis": (
+            with_basis_rows(),
+            with_basis_rows(max_iter=1),
+            {"estimand", "basis", "loss"},
+        ),
+        "fit_one_incompatible": (
+            incompatible_rows(estimand="ATE"),
+            incompatible_rows(estimand="ATT"),
+            {"estimand", "loss_link_pair"},
+        ),
+        "fit_matching_ate": (
+            fit_matching_ate(data, rep=0, M=1),
+            None,
+            {"estimand", "basis", "loss"},
+        ),
+        "fit_one_plugin_logistic": (
+            plugin_rows(plugin_data),
+            plugin_rows(plugin_nan_data),
+            {"estimand", "basis", "loss"},
+        ),
+    }
+    for name, (ok_rows, failure_rows, required) in cases.items():
+        assert ok_rows, name
+        assert all(row["status"] == "ok" for row in ok_rows), name
+        checked = list(ok_rows)
+        if failure_rows is not None:
+            assert failure_rows, name
+            assert all(row["status"] != "ok" for row in failure_rows), name
+            assert all(row["estimator"] == "failed" for row in failure_rows), name
+            checked.extend(failure_rows)
+        for row in checked:
+            missing = (required | {"estimator", "status"}) - set(row)
+            assert not missing, f"{name}: rows are missing {sorted(missing)}"
+    for row in cases["fit_one_plugin_logistic"][0]:
+        assert "propensity_clip_rate" in row
+
+
 def test_matching_uses_the_public_matching_weights_without_substitution() -> None:
     data = make_simulation_data("DGP 1: smooth heterogeneous effects", n=250, seed=37)
     rows = fit_matching_ate(data, rep=0, M=1)
@@ -612,11 +800,16 @@ def test_missing_lalonde_file_raises_instead_of_downloading_data(tmp_path: Path)
 
 
 def test_np_clip_is_confined_to_prespecified_data_generation() -> None:
+    # ``fit_one_plugin_logistic`` is the one estimator-side allowance: the
+    # propensity clip window is a declared part of the textbook plug-in
+    # baseline being compared against, and its activation rate is reported as
+    # ``propensity_clip_rate``. No genriesz estimator clips a fitted value.
     allowed = {
         "make_simulation_data",
         "make_dimension_data",
         "make_kernel_gp_data",
         "generate_data",
+        "fit_one_plugin_logistic",
     }
     offenders: list[tuple[str, str | None]] = []
     for path in SOURCE_FILES:
