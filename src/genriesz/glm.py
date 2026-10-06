@@ -149,15 +149,21 @@ def classify_predictions(
     ``outside`` marks rows outside the domain: ``v`` outside the range of
     ``g'`` on the row's branch, or a finite representer value outside the open
     domain of ``g`` on that branch (e.g. an exp underflow to ``|alpha| = C``, or
-    the wrong sign). ``nonfinite`` marks rows whose representer value is not
-    finite (overflow). ``alpha`` is NaN on both.
+    the wrong sign). ``nonfinite`` marks rows whose dual coordinate is not
+    finite (e.g. a NaN offset) or whose representer value is not finite
+    (overflow); it is decided before domain membership. ``alpha`` is NaN on
+    both.
     """
 
     n = X.shape[0]
     alpha = np.full(n, np.nan)
-    outside = ~np.asarray(generator.link_domain(X, v), dtype=bool)
-    nonfinite = np.zeros(n, dtype=bool)
-    ok = ~outside
+    v = np.asarray(v, dtype=float)
+    nonfinite = ~np.isfinite(v)
+    outside = np.zeros(n, dtype=bool)
+    vfin = ~nonfinite
+    if np.any(vfin):
+        outside[vfin] = ~np.asarray(generator.link_domain(X[vfin], v[vfin]), dtype=bool)
+    ok = vfin & ~outside
     if np.any(ok):
         _, a, _ = generator.dual_eval(X[ok], v[ok])
         idx = np.flatnonzero(ok)

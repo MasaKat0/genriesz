@@ -528,8 +528,17 @@ def score_grr_candidate(
                 all_success = False
                 continue
         else:
+            # Every strict candidate, whatever the selection score: the observed
+            # validation rows and the rows at which m evaluates the representer
+            # (counterfactual arms) must be in the domain and finite; otherwise
+            # the fold fails.
             alpha_iva, outside, nonfinite = grr.classify(X_iva)
-            if np.any(outside) or np.any(nonfinite):
+            cf_iva = np.asarray(m.evaluation_points(X_iva, cb), dtype=float)
+            if cf_iva.size:
+                _, cf_out, cf_nonfin = grr.classify(cf_iva)
+            else:
+                cf_out = cf_nonfin = np.zeros(0, dtype=bool)
+            if np.any(outside) or np.any(nonfinite) or np.any(cf_out) or np.any(cf_nonfin):
                 all_success = False
                 continue
             g_star, _, _ = generator.dual_eval(X_iva, v_iva)

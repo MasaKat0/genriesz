@@ -258,3 +258,81 @@ def test_rw_full_uses_the_ols_influence_function():
                                    abs=0)
     naive = float(np.std(alpha * Y - theta, ddof=1) / np.sqrt(len(Y)))
     assert abs(est.se - naive) > 1e-4
+
+
+# ---------------------------------------------------------------------------
+# Re-review: nonfinite before domain; CV checks counterfactual rows for every score
+# ---------------------------------------------------------------------------
+def test_nan_dual_coordinate_is_nonfinite_but_underflow_stays_a_domain_failure():
+    from genriesz.glm import classify_predictions
+
+    gen = UKLGenerator(C=1.0, branch_fn=_pos)
+    X = np.ones((4, 1))
+    alpha, outside, nonfinite = classify_predictions(
+        gen, X, np.array([np.nan, np.inf, -800.0, 0.0])
+    )
+    assert list(nonfinite) == [True, True, False, False]
+    assert list(outside) == [False, False, True, False]
+    assert alpha[3] == 2.0 and np.all(np.isnan(alpha[:3]))
+
+
+def test_held_out_nan_offset_propagates_as_nonfinite_not_domain_prediction():
+    X, Y = _ate(n=300, seed=4)
+    ids = np.random.default_rng(0).permutation(np.arange(len(X)) % 2)
+    # One extra evaluation-fold row at which the (fixed) offset is NaN.
+    X = np.vstack([X, [[1.0, 50.0]]])
+    Y = np.concatenate([Y, [0.0]])
+    ids = np.concatenate([ids, [0]])
+
+    def offset(X_):
+        return np.where(X_[:, 1] > 10.0, np.nan, 0.0)
+
+    res = grr_ate(
+        X=X, Y=Y, basis=_basis(), generator=SquaredGenerator(), riesz_offset=offset,
+        outcome_link="identity", fold_ids=ids, estimators=("arw",),
+    )
+    assert res.status == "nonfinite"
+    assert np.isnan(res.arw.estimate)
+    assert [s for s in res.fold_status if s[2] == "nonfinite"][0][1] == "prediction"
+
+
+def _cf_trap():
+    """Training rows, plus a validation row whose own arm is in the BP domain but
+    whose counterfactual arm is not (found by scanning the fitted model)."""
+
+    from genriesz.model_selection import make_candidate_basis
+
+    X, Y = _ate(n=300, seed=5)
+    gen = BPGenerator(C=0.0, omega=1.0, branch_fn=_treated)
+    cb = make_candidate_basis(_basis(), sigma=None, centers=None).fit(X)
+    model = GRRGLM(basis=cb, generator=gen, functional=ATEFunctional(0), lam=1e-2)
+    assert model.fit(X).status == "ok"
+    zs = np.linspace(-1e3, 1e3, 200001)
+    ok1 = model.domain_mask(np.column_stack([np.ones_like(zs), zs]))
+    ok0 = model.domain_mask(np.column_stack([np.zeros_like(zs), zs]))
+    z = zs[np.flatnonzero(ok1 & ~ok0)[0]]
+    return X, Y, gen, np.array([[1.0, z]])
+
+
+@pytest.mark.parametrize("want_squared_loss", [False, True], ids=["bregman-or-bv", "lsif"])
+def test_cv_rejects_folds_with_invalid_counterfactual_validation_rows(want_squared_loss):
+    from genriesz.model_selection import score_grr_candidate
+    from genriesz.utils import Fold
+
+    X, Y, gen, trap = _cf_trap()
+    Xa = np.vstack([X, trap])
+    Ya = np.concatenate([Y, [0.0]])
+    n = len(X)
+    fold = Fold(train=np.arange(n), test=np.arange(n - 50, n + 1))
+    kw = dict(
+        X_train=Xa, y_train=Ya, m=ATEFunctional(0), template_basis=_basis(), generator=gen,
+        sigma=None, lam=1e-2, centers=None, riesz_penalty="l2", riesz_p_norm=None,
+        outcome_link="identity", outcome_penalty="l2", outcome_lam=1e-3, max_iter=500,
+        tol=1e-8, want_kernel=False, want_squared_loss=want_squared_loss,
+    )
+    bad = score_grr_candidate(inner_folds=[fold], **kw)
+    assert bad["success"] is False
+    good = score_grr_candidate(
+        inner_folds=[Fold(train=np.arange(n), test=np.arange(n - 50, n))], **kw
+    )
+    assert good["success"] is True
