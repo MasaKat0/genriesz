@@ -168,6 +168,14 @@ For most use-cases you can start from one of the built-ins:
 - `PUGenerator`       → bounded-weights generator ("PU-Riesz")
 - `BregmanGenerator`  → bring your own `g`, optionally with `grad` and `inv_grad`
 
+Domains: SQ is defined on the whole real line; UKL and BP need `C >= 0` and
+`|alpha| > C`; BKL needs `C > 0` and `|alpha| > C`; PU needs `0 < |alpha| < 1`.
+Branch-wise generators need `branch_fn` for signed representers (e.g. ATE/ATT).
+The built-in links are evaluated **exactly** (releases <= 0.2.6 clipped them):
+outside the domain the link raises `DomainError` (and `g` and its derivatives
+return NaN) instead of clipping. `legacy_clip=True` restores the old clipping for
+old notebooks.
+
 ---
 
 ## General API: `grr_functional`
@@ -274,6 +282,59 @@ print(love_rows[:3])
 ```
 
 The current result object stores aggregate out-of-fold diagnostics when `cross_fit=True`; it does not expose a `fold_estimates` attribute.
+
+### Solvers, statuses, and offsets
+
+By default (`riesz_solver="auto"`), the Riesz coefficients are fitted by a
+**damped Newton** method (no penalty, ridge, `l_q` with `q >= 2`) or by
+**FISTA** (exact `l1`, optionally over an `l1` ball `riesz_l1_radius`). Both keep
+every iterate inside the generator's domain, never clip, and stop at a
+first-order residual of about `1e-10` where attainable.
+
+Failures are reported, not raised and not averaged away:
+
+```python
+res = grr_ate(X=X, Y=Y, basis=basis, generator=gen)
+if not res.success:                 # res.status != "ok"
+    print(res.status)               # e.g. "boundary", "maxit", "domain_prediction"
+    print(res.fold_status)          # (fold, stage, status, message) per fold
+    # every res.estimates[...] is NaN in that case
+```
+
+Statuses: `ok`, `boundary`, `maxit`, `linesearch`, `singular`,
+`infeasible_start`, `nonfinite`, `degenerate_functional`, `domain_prediction`,
+and `outcome_<status>`. Evaluation-fold rows and the counterfactual rows that the
+functional evaluates are checked against the domain of the fitted representer.
+
+A fixed **offset** `u_ref` shifts the dual coordinate,
+`u(x) = u_ref(x) + phi(x)' beta`; `beta = 0` then corresponds to the reference
+representer `alpha_ref = (g')^{-1}(u_ref)`, toward which a penalty shrinks. The
+offset must not be fitted on the estimation sample. BKL requires one, because
+`u = 0` is outside its domain:
+
+```python
+from genriesz import BKLGenerator, offset_from_alpha
+
+gen = BKLGenerator(C=1.0, branch_fn=lambda x: int(x[0] == 1))
+offset = offset_from_alpha(gen, lambda X: np.where(X[:, 0] == 1, 2.0, -2.0))
+res = grr_ate(X=X, Y=Y, basis=basis, generator=gen, riesz_offset=offset,
+              riesz_penalty=None)
+```
+
+Further tools: `GRRGLM(offset=..., solver=..., l1_radius=...)` (low level),
+`GRRGeneralLink` (an arbitrary, possibly incompatible link, with the gradient and
+Hessian of the Bregman objective), `weight_program_certificate` (the sample
+balancing-weight program; its `"uncertified_boundary"` verdict is numerical, not
+a proof of nonexistence; uses `cvxpy` if installed, `pip install
+"genriesz[certificates]"`), and `fold_ids=` for an explicit cross-fitting
+partition.
+
+**Backward compatibility.** `riesz_solver="lbfgs"` (and `GRRGLM(solver="lbfgs")`)
+restores the L-BFGS-B path of releases <= 0.2.6; `legacy_clip=True` on
+`UKLGenerator`/`BPGenerator`/`PUGenerator`/`BKLGenerator` restores their clipping;
+`fit_density_ratio(solver="legacy")` restores the old density-ratio routes; and
+`predict_ratio(clip_nonnegative=True)` restores the old non-negativity clip. These
+exist only so that old notebooks reproduce.
 
 ## Built-in estimands
 

@@ -293,10 +293,14 @@ the bandwidth ``sigma`` and regularisation ``lam``.
 
 .. important::
 
-   For the **squared generator** (``generator='sq'``, i.e. :class:`genriesz.SquaredGenerator`),
-   the fit uses a closed-form ridge solution.  For the **binary KL generator**,
-   it uses classification-based density ratio estimation.  For all other generators,
-   a numerical optimizer (L-BFGS-B) is used.
+   By default (``solver="auto"``) every generator is fitted by the strict
+   solvers of :mod:`genriesz.solvers` (damped Newton; FISTA for ``l1``): no
+   clipping, iterates kept in the generator's domain, and a failed fit returned
+   with ``res.status`` (and no prediction) instead of an exception. A fixed
+   ``offset`` ``u_ref`` can be supplied (BKL needs one with ``u_ref < 0``).
+   ``predict_ratio`` no longer clips at zero unless ``clip_nonnegative=True``.
+   ``solver="legacy"`` restores the routes of releases <= 0.2.6 (closed-form
+   ridge for SQ, a logistic classifier for BKL, L-BFGS-B otherwise).
 
 
 Generators and automatic links

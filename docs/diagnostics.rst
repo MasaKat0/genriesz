@@ -132,6 +132,53 @@ held-out finite-sample diagnostics rather than exact constraints.
 The current public result class stores aggregate out-of-fold diagnostics. It does
 not store per-fold ``FunctionalEstimate`` objects.
 
+Fit statuses
+------------
+
+Every result carries ``res.status``. ``"ok"`` means every cross-fitting fold
+succeeded. Any other value means some fold failed; every estimate is then NaN
+(the remaining folds are not averaged silently) and ``res.fold_status`` lists
+``(fold, stage, status, message)``. The strict solvers (the default
+``riesz_solver="auto"``) report:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Status
+     - Meaning
+   * - ``"ok"``
+     - First-order criterion met at an interior point (Newton:
+       ``max_j |dF/dbeta_j| <= 1e-10``, scaled by ``max(1, max_j|b_j|)`` without
+       a penalty; FISTA: constrained ``l1`` residual ``<= 1e-6 * lam``, then
+       refined by Newton on the support).
+   * - ``"boundary"``
+     - An iterate reached the boundary of the generator's domain
+       (``|alpha| - C <= 1e-8``; also ``s v >= -1e-12`` for BKL; never for SQ).
+   * - ``"maxit"`` / ``"linesearch"``
+     - Iteration limit / backtracking budget exhausted.
+   * - ``"singular"``
+     - Numerically singular Newton system.
+   * - ``"infeasible_start"``
+     - The starting point (``beta = 0`` unless given) is outside the domain,
+       e.g. BKL without an offset.
+   * - ``"nonfinite"``
+     - Non-finite objective, gradient, representer value, or score.
+   * - ``"degenerate_functional"``
+     - The functional vanishes on the training data, or a training fold of a
+       treatment-type functional lacks one group.
+   * - ``"domain_prediction"``
+     - The fitted representer is undefined at an evaluation-fold row or at a
+       counterfactual row that ``m`` evaluates.
+   * - ``"outcome_<status>"``
+     - An outcome regression failed.
+
+A solver status describes the optimization on one sample. It is not evidence
+that the population problem has no solution. For the sample problem,
+:func:`genriesz.weight_program_certificate` solves the balancing-weight program;
+even its ``"uncertified_boundary"`` verdict is a numerical finding, not a proof
+of nonexistence.
+
 Optimizer and clip diagnostics
 ------------------------------
 

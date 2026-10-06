@@ -103,7 +103,32 @@ Low-level solvers
 -----------------
 
 .. autoclass:: genriesz.GRRGLM
+   :members: fit, predict_v, predict_alpha, domain_mask, derivative_alpha
+.. autofunction:: genriesz.offset_from_alpha
 .. autoclass:: genriesz.OutcomeGLM
+
+Strict solvers and statuses
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: genriesz.solvers
+   :members: newton_solve, fista_solve, DualProblem, SolverResult, prox_l1_ball,
+             l1_kkt_residual
+.. autodata:: genriesz.STATUSES
+
+Arbitrary loss-link pairs
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+.. autoclass:: genriesz.GRRGeneralLink
+   :members: fit, objective, gradient, hessian, tangent_imbalance, regressor_imbalance,
+             predict_alpha
+.. autoclass:: genriesz.GeneralLinkFitResult
+
+Sample weight program
+^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: genriesz.certificates
+.. autofunction:: genriesz.weight_program_certificate
+.. autoclass:: genriesz.WeightProgramCertificate
 
 ScoreMatchingRiesz
 ------------------
