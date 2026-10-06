@@ -52,7 +52,7 @@ from .generators import (
     UKLGenerator,
     coerce_generator,
 )
-from .glm import GRRGLM, OutcomeGLM
+from .glm import GRRGLM, OffsetSpec, OutcomeGLM
 from .matching import (
     LocalPolynomialLSIFWeights,
     NNMatchingWeights,
@@ -61,6 +61,7 @@ from .matching import (
 )
 from .model_selection import GRRCVConfig, select_grr_hyperparams
 from .results import FunctionalEstimate, SingleEstimate
+from .solvers import DEGENERATE_FUNCTIONAL, DOMAIN_PREDICTION, NONFINITE, OK
 from .utils import (
     Fold,
     as_1d_of_length,
@@ -287,16 +288,94 @@ def _tmle_epsilon_bernoulli(
     return float(eps)
 
 
-def _raise_if_fit_failed(*, result, what: str, fold_id: int, tag: str | None = None) -> None:
-    """Raise when a nuisance optimization failed to converge."""
+def _splits_from_fold_ids(fold_ids: ArrayLike, n: int) -> list[Fold]:
+    """Cross-fitting folds from a per-observation fold label (``0..K-1``)."""
 
-    if bool(getattr(result, "success", False)):
-        return
-    label = what if tag is None else f"{what} ({tag})"
-    message = str(getattr(result, "message", "unknown optimizer failure"))
-    n_iter = int(getattr(result, "n_iter", -1))
-    raise RuntimeError(
-        f"{label} optimization failed in fold {fold_id}: {message} (n_iter={n_iter})."
+    ids = np.asarray(fold_ids)
+    if ids.shape != (n,):
+        raise ValueError(f"fold_ids must have shape ({n},). Got {ids.shape}.")
+    if not np.issubdtype(ids.dtype, np.integer):
+        raise ValueError("fold_ids must be integer fold labels.")
+    labels = np.unique(ids)
+    if labels.size < 2 or not np.array_equal(labels, np.arange(labels.size)):
+        raise ValueError("fold_ids must use every label 0..K-1 with K >= 2.")
+    all_idx = np.arange(n)
+    return [Fold(train=all_idx[ids != k], test=all_idx[ids == k]) for k in labels]
+
+
+class _DomainCheckedRepresenter:
+    """Evaluate a fitted :class:`GRRGLM` at arbitrary rows, recording domain failures.
+
+    The functional ``m`` evaluates the representer at rows it chooses (the
+    evaluation fold, counterfactual rows with the treatment toggled, ...). Every
+    such row outside the domain of the fitted representer is counted in
+    ``n_outside`` and returned as NaN, so the caller can report
+    ``"domain_prediction"`` instead of an exception or a clipped value. The
+    legacy ``solver="lbfgs"`` path is evaluated as before.
+    """
+
+    def __init__(self, grr: GRRGLM):
+        self.grr = grr
+        self.n_outside = 0
+
+    def predict(self, X: ArrayLike) -> NDArray[np.float64]:
+        if self.grr.solver == "lbfgs":
+            return self.grr.predict_alpha(X)
+        out = self.grr.predict_alpha(X, out_of_domain="nan")
+        self.n_outside += int(np.sum(np.isnan(out)))
+        return out
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        if self.grr.solver == "lbfgs":
+            return self.grr.derivative_alpha(X, coordinate)
+        a = self.grr.predict_alpha(X, out_of_domain="nan")
+        self.n_outside += int(np.sum(np.isnan(a)))
+        return self.grr.derivative_alpha(X, coordinate, out_of_domain="nan")
+
+
+def _failed_estimate(
+    *,
+    m: LinearFunctional,
+    n: int,
+    alpha: float,
+    null: float,
+    ests: tuple[EstimatorName, ...],
+    need_outcome: bool,
+    outcome_models: str,
+    status: str,
+    fold_status: list[tuple[int, str, str, str]],
+    optimizer: dict,
+) -> FunctionalEstimate:
+    """A result whose every requested estimate is NaN, carrying the failure status."""
+
+    nan = float("nan")
+    labels = {"ra": "RA", "rw": "RW", "arw": "ARW", "tmle": "TMLE"}
+    keys: list[tuple[str, str]] = []
+    if "rw" in ests:
+        keys.append(("rw", "RW"))
+    if need_outcome:
+        if outcome_models in {"shared", "separate"}:
+            suffixes = [""]
+        else:
+            suffixes = [" (shared)", " (separate)"]
+        for suffix in suffixes:
+            for e in ("ra", "arw", "tmle"):
+                if e in ests:
+                    keys.append((f"{e}{suffix}", f"{labels[e]}{suffix}"))
+    estimates = {k: SingleEstimate(name=nm, estimate=nan, se=nan, ci_low=nan, ci_high=nan,
+                                   p_value=nan) for k, nm in keys}
+    diagnostics: dict[str, object] = {"failure": {"status": status, "folds": list(fold_status)}}
+    if optimizer:
+        diagnostics["optimizer"] = optimizer
+    return FunctionalEstimate(
+        estimand=m.name,
+        n=n,
+        alpha=alpha,
+        null=null,
+        estimates=estimates,
+        diagnostics=diagnostics,
+        status=status,
+        fold_status=tuple(fold_status),
     )
 
 
@@ -316,6 +395,11 @@ def grr_functional(
     riesz_penalty: str | None = "l2",
     riesz_lam: float = 1e-3,
     riesz_p_norm: float | None = None,
+    riesz_offset: OffsetSpec = None,
+    riesz_solver: str = "auto",
+    riesz_l1_radius: float | None = None,
+    riesz_max_iter: int | None = None,
+    riesz_tol: float | None = None,
     # Riesz inner cross-validation (optional; backward-compatible when all None)
     riesz_lam_grid: object | None = None,
     riesz_sigma_grid: object | None = None,
@@ -342,6 +426,7 @@ def grr_functional(
     folds: int = 5,
     stratify_folds: bool | None = None,
     random_state: int | None = 0,
+    fold_ids: ArrayLike | None = None,
     # Output and inference
     estimators: Sequence[str] = ("ra", "rw", "arw", "tmle"),
     alpha: float = 0.05,
@@ -383,6 +468,20 @@ def grr_functional(
         Matching-based Riesz methods currently require ``cross_fit=False`` and
         do not support ``TMLE`` (because they do not provide a function-valued
         representer that can be evaluated counterfactually).
+    riesz_offset:
+        Offset ``u_ref`` of the Riesz model (see :class:`~genriesz.GRRGLM`): a
+        fixed function, never fitted on the estimation sample, evaluated at
+        training, evaluation and counterfactual rows.
+    riesz_solver:
+        ``"auto"`` (default; damped Newton or FISTA, strict statuses),
+        ``"newton"``, ``"fista"``, or ``"lbfgs"`` (legacy path of releases
+        <= 0.2.6, kept for old notebooks).
+    riesz_l1_radius:
+        Optional coefficient restriction ``||beta||_1 <= riesz_l1_radius``.
+    riesz_max_iter, riesz_tol:
+        Solver limits for the strict solvers (``None``: the registered defaults,
+        see :meth:`GRRGLM.fit`). The legacy ``"lbfgs"`` solver uses ``max_iter``
+        and ``tol``.
     riesz_lam_grid, riesz_sigma_grid, riesz_n_centers_grid:
         Inner cross-validation grids for the Riesz hyper-parameters; each may be
         ``"auto"``, a scalar, or a list. ``None`` (the default) means *do not
@@ -424,6 +523,11 @@ def grr_functional(
         Note that stratified and plain folds partition the sample differently,
         so estimates change (in distribution, not in validity) relative to
         releases before stratification was the default.
+    fold_ids:
+        Optional fold label per observation (integers ``0..K-1``), defining the
+        cross-fitting partition directly; it overrides ``folds``,
+        ``stratify_folds`` and ``random_state``. Use it for a data-independent
+        partition drawn from your own random stream.
     expose_alpha_values:
         If True, store the out-of-fold representer values in the diagnostics:
         ``diagnostics['alpha_values']`` holds ``alpha_hat(X_i)`` and
@@ -432,6 +536,28 @@ def grr_functional(
         Useful for loss-agnostic model selection via the out-of-fold SQ risk
         ``mean(alpha_hat(X_i)^2 - 2 m(W_i, alpha_hat))``. Default False, which
         leaves the diagnostics unchanged.
+
+    Returns
+    -------
+    FunctionalEstimate
+        ``status`` is ``"ok"`` when every fold succeeded. Otherwise every
+        requested estimate is NaN (no silent averaging over the remaining
+        folds) and ``status`` names the first failure:
+
+        - a Riesz solver status (``"boundary"``, ``"maxit"``, ``"linesearch"``,
+          ``"singular"``, ``"infeasible_start"``, ``"nonfinite"``,
+          ``"degenerate_functional"``, or a legacy status with
+          ``riesz_solver="lbfgs"``);
+        - ``"degenerate_functional"`` when a training fold of a treatment-type
+          functional lacks the treated or the control group;
+        - ``"domain_prediction"`` when the fitted representer is undefined at
+          an evaluation-fold row or at a counterfactual row that ``m``
+          evaluates;
+        - ``"nonfinite"`` for a non-finite representer value or score;
+        - ``"outcome_<status>"`` when an outcome regression failed.
+
+        ``fold_status`` lists ``(fold, stage, status, message)`` for each fold
+        processed. Invalid arguments still raise.
     """
 
     X_ = as_2d(X)
@@ -580,7 +706,11 @@ def grr_functional(
     # Cross-fitting splits
     # ------------------------------------------------------------------
     is_treatment_functional = isinstance(m, (ATEFunctional, ATTFunctional, DIDFunctional))
-    if cross_fit:
+    if fold_ids is not None:
+        if not cross_fit:
+            raise ValueError("fold_ids requires cross_fit=True.")
+        splits = _splits_from_fold_ids(fold_ids, n)
+    elif cross_fit:
         # Plain K-fold can hand a rare-treatment fold zero treated units, and
         # the resulting degenerate Riesz fit used to sail through as a
         # "success" (audit EST-07 / K-01). Stratifying on the treatment keeps
@@ -604,30 +734,32 @@ def grr_functional(
         splits = [Fold(train=all_idx, test=all_idx)]
 
     # A training fold without both groups cannot fit a treatment-type Riesz
-    # representer: the closed form would return beta = 0 as a "successful" fit
-    # and the fold's scores would silently die (audit EST-07 / K-01).
-    # Stratified folds avoid this whenever the counts allow -- a group of >= 2
-    # units always leaves at least one in every training fold -- so under the
-    # default it fires only for a single-unit group. Fail loud, and before any
-    # fold is fitted, since the splits are already fixed here.
+    # representer. This is recorded as the explicit status
+    # "degenerate_functional" (registration §1.4), with NaN estimates, instead
+    # of raising or silently averaging over the other folds. Stratified folds
+    # avoid it whenever every group has at least two units. (An evaluation fold
+    # without one group is harmless: the cross-fitted estimators average over
+    # all n rows.)
+    fold_status: list[tuple[int, str, str, str]] = []
+    failure: str | None = None
     if is_treatment_functional:
         t_idx_m = getattr(m, "treatment_index", 0)
         for fold_id_, fold_ in enumerate(splits):
             D_tr_ = X_[fold_.train, t_idx_m]
-            n_tr_treated = int(np.sum(D_tr_ == 1.0))
-            n_tr_control = int(np.sum(D_tr_ == 0.0))
-            if n_tr_treated == 0 or n_tr_control == 0:
-                raise ValueError(
-                    f"Cross-fitting fold {fold_id_}: the training fold contains "
-                    f"{n_tr_treated} treated and {n_tr_control} control "
-                    "unit(s). A treatment-type Riesz representer cannot be "
-                    "fitted without both groups. With stratified folds (the "
-                    "default) this only happens when a group has a single "
-                    "unit, so no fold count avoids it: collect more units of "
-                    "that group or set cross_fit=False. With "
-                    "stratify_folds=False, prefer the stratified default (or "
-                    "fewer folds)."
+            n_t = int(np.sum(D_tr_ == 1.0))
+            n_c = int(np.sum(D_tr_ == 0.0))
+            if n_t == 0 or n_c == 0:
+                failure = DEGENERATE_FUNCTIONAL
+                fold_status.append(
+                    (
+                        fold_id_,
+                        "split",
+                        DEGENERATE_FUNCTIONAL,
+                        f"the training fold contains {n_t} treated and {n_c} control "
+                        "unit(s); a treatment-type Riesz representer needs both groups",
+                    )
                 )
+                break
 
     # Storage for nuisances (cross-fit predictions)
     alpha_obs = np.zeros(n, dtype=float)
@@ -690,7 +822,14 @@ def grr_functional(
     # ------------------------------------------------------------------
     # Fit nuisances fold-by-fold
     # ------------------------------------------------------------------
+    m_alpha_unavailable = False
+    m_mu_unavailable: set[str] = set()
+    if riesz_cv_active and riesz_offset is not None:
+        raise ValueError("riesz_offset is not supported together with the inner Riesz CV.")
+
     for fold_id, fold in enumerate(splits):
+        if failure is not None:
+            break
         train_idx, test_idx = fold.train, fold.test
         X_tr, y_tr = X_[train_idx], y_[train_idx]
         X_te = X_[test_idx]
@@ -767,8 +906,14 @@ def grr_functional(
                 penalty=riesz_penalty,
                 lam=lam_fold,
                 p_norm=riesz_p_norm,
+                offset=riesz_offset,
+                solver=riesz_solver,
+                l1_radius=riesz_l1_radius,
             )
-            fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            if grr.solver == "lbfgs":
+                fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            else:
+                fit_result = grr.fit(X_tr, max_iter=riesz_max_iter, tol=riesz_tol)
             riesz_fit_stats["success"].append(bool(fit_result.success))
             riesz_fit_stats["status"].append(str(getattr(fit_result, "status", "")))
             riesz_fit_stats["gradient_norm"].append(
@@ -780,10 +925,70 @@ def grr_functional(
             riesz_fit_stats["clip_binding_rate"].append(
                 float(getattr(fit_result, "clip_binding_rate", float("nan")))
             )
-            _raise_if_fit_failed(result=fit_result, what="Riesz GRR", fold_id=fold_id)
+            fold_status.append(
+                (fold_id, "riesz", str(fit_result.status), str(fit_result.message))
+            )
+            if not fit_result.success:
+                failure = str(fit_result.status) or "optimizer_failure"
+                break
 
-            alpha_te = grr.predict_alpha(X_te)
+            # Evaluate the representer only through a domain-checked wrapper:
+            # an evaluation-fold or counterfactual row outside the generator's
+            # domain is recorded ("domain_prediction") instead of clipped.
+            rep = _DomainCheckedRepresenter(grr)
+            alpha_te = rep.predict(X_te)
+
+            # m(alpha) is needed for Gaussian TMLE update for any functional.
+            # For AME we need derivatives; others only need predict().
+            m_alpha_te: NDArray[np.float64] | None
+            try:
+                m_alpha_te = np.asarray(
+                    m.m_from_function(X_te, predict=rep.predict, derivative=rep.derivative),
+                    dtype=float,
+                )
+            except NotImplementedError:
+                # The functional cannot be applied to alpha: TMLE is unavailable.
+                m_alpha_te = None
+                m_alpha_unavailable = True
+
+            # For Bernoulli TMLE with treatment-type functionals, cache cf values.
+            if "tmle" in ests and outcome_link_ == "logit" and isinstance(
+                m, (ATEFunctional, ATTFunctional, DIDFunctional)
+            ):
+                # Construct counterfactual regressors by toggling the treatment column.
+                t_idx = getattr(m, "treatment_index", 0)
+                X1 = X_te.copy()
+                X1[:, t_idx] = 1.0
+                X0 = X_te.copy()
+                X0[:, t_idx] = 0.0
+                alpha1 = cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))
+                alpha0 = cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))
+                alpha1[test_idx] = rep.predict(X1)
+                alpha0[test_idx] = rep.predict(X0)
+
+            if rep.n_outside > 0:
+                failure = DOMAIN_PREDICTION
+                fold_status.append(
+                    (
+                        fold_id,
+                        "prediction",
+                        DOMAIN_PREDICTION,
+                        f"{rep.n_outside} evaluation/counterfactual row(s) outside the "
+                        "domain of the fitted representer",
+                    )
+                )
+                break
+            if not np.all(np.isfinite(alpha_te)) or (
+                m_alpha_te is not None and not np.all(np.isfinite(m_alpha_te))
+            ):
+                failure = NONFINITE
+                fold_status.append(
+                    (fold_id, "prediction", NONFINITE, "non-finite representer value")
+                )
+                break
+
             alpha_obs[test_idx] = alpha_te
+            m_alpha[test_idx] = np.nan if m_alpha_te is None else m_alpha_te
 
             # ----- Held-out working-span imbalance (item H). On the eval fold
             # I_k the GRR balancing condition E[alpha*phi_j] = E[m(.,phi_j)]
@@ -802,33 +1007,6 @@ def grr_functional(
             kdiag = getattr(basis_r, "diagnostics", None)
             if callable(kdiag):
                 kernel_stats.append({k: v for k, v in kdiag(X_tr).items()})
-
-            # m(alpha) is needed for Gaussian TMLE update for any functional.
-            # For AME we need derivatives; others only need predict().
-            try:
-                m_alpha[test_idx] = m.m_from_function(
-                    X_te,
-                    predict=grr.predict_alpha,
-                    derivative=getattr(grr, "derivative_alpha", None),
-                )
-            except NotImplementedError:
-                # If the functional cannot be applied to alpha, TMLE will be unavailable.
-                m_alpha[test_idx] = np.nan
-
-            # For Bernoulli TMLE with treatment-type functionals, cache cf values.
-            if "tmle" in ests and outcome_link_ == "logit" and isinstance(
-                m, (ATEFunctional, ATTFunctional, DIDFunctional)
-            ):
-                # Construct counterfactual regressors by toggling the treatment column.
-                t_idx = getattr(m, "treatment_index", 0)
-                X1 = X_te.copy()
-                X1[:, t_idx] = 1.0
-                X0 = X_te.copy()
-                X0[:, t_idx] = 0.0
-                alpha1 = cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))
-                alpha0 = cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))
-                alpha1[test_idx] = grr.predict_alpha(X1)
-                alpha0[test_idx] = grr.predict_alpha(X0)
 
         elif riesz_method_ in {"nn_matching", "local_poly_nn_lsif"}:
             # Matching-based Riesz methods: currently implemented only for the ATE.
@@ -912,12 +1090,12 @@ def grr_functional(
                 p_norm=outcome_p_norm,
             )
             fit_result = out.fit(X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose)
-            _raise_if_fit_failed(
-                result=fit_result,
-                what="Outcome regression",
-                fold_id=fold_id,
-                tag=tag,
-            )
+            if not fit_result.success:
+                failure = f"outcome_{fit_result.status or 'optimizer_failure'}"
+                fold_status.append(
+                    (fold_id, f"outcome ({tag})", failure, str(fit_result.message))
+                )
+                break
 
             # Outcome coefficient budget on this fold's working span (item I).
             theta_out = getattr(out, "theta_", None)
@@ -937,6 +1115,7 @@ def grr_functional(
                 )
             except NotImplementedError:
                 m_mu.setdefault(tag, np.zeros(n, dtype=float))[test_idx] = np.nan
+                m_mu_unavailable.add(tag)
 
             # Cache cf values for Bernoulli TMLE if needed
             if "tmle" in ests and outcome_link_ == "logit" and isinstance(
@@ -952,10 +1131,29 @@ def grr_functional(
                 mu1_cache[test_idx] = out.predict(X1)
                 mu0_cache[test_idx] = out.predict(X0)
 
+    if riesz_fit_stats["success"]:
+        optimizer_diag = {k: list(v) for k, v in riesz_fit_stats.items()}
+    else:
+        optimizer_diag = {}
+    if failure is not None:
+        return _failed_estimate(
+            m=m,
+            n=n,
+            alpha=alpha,
+            null=null,
+            ests=ests,
+            need_outcome=need_outcome,
+            outcome_models=outcome_models_,
+            status=failure,
+            fold_status=fold_status,
+            optimizer=optimizer_diag,
+        )
+
     # ------------------------------------------------------------------
     # Compute estimators + inference
     # ------------------------------------------------------------------
     estimates: dict[str, SingleEstimate] = {}
+    nonfinite_scores: list[str] = []
 
     def _pi_correction(theta: float, psi: NDArray[np.float64]) -> NDArray[np.float64]:
         """First-step correction for the estimated pi in ATT/DID functionals.
@@ -976,6 +1174,9 @@ def grr_functional(
 
     def add_est(key: str, name: str, est: float, psi: NDArray[np.float64]) -> None:
         psi = _pi_correction(est, psi)
+        if not (np.isfinite(est) and np.all(np.isfinite(psi))):
+            nonfinite_scores.append(key)
+            return
         se, lo, hi, p = se_ci_pvalue(est, psi, alpha=alpha, null=null)
         estimates[key] = SingleEstimate(
             name=name,
@@ -1009,7 +1210,7 @@ def grr_functional(
             # outcome model (m_from_function raised NotImplementedError above).
             # RA/ARW would then propagate NaN into se_ci_pvalue, which rejects a
             # non-finite estimate with a message that does not name the cause.
-            if any(e in ests for e in ("ra", "arw")) and not np.all(np.isfinite(m_mu_tag)):
+            if any(e in ests for e in ("ra", "arw")) and tag in m_mu_unavailable:
                 raise RuntimeError(
                     "RA/ARW require applying the functional m to the outcome "
                     "regression, and m(gamma_hat) is not finite for this "
@@ -1028,7 +1229,7 @@ def grr_functional(
 
             if "tmle" in ests:
                 # If m(alpha) is not available, TMLE is not available.
-                if not np.all(np.isfinite(m_alpha)):
+                if m_alpha_unavailable:
                     raise RuntimeError(
                         "TMLE requires applying the functional m to the Riesz representer alpha. "
                         "This functional / basis combination does not support it."
@@ -1082,6 +1283,23 @@ def grr_functional(
             # both
             compute_for_tag("shared", suffix=" (shared)")
             compute_for_tag("separate", suffix=" (separate)")
+
+    if nonfinite_scores:
+        fold_status.append(
+            (-1, "score", NONFINITE, "non-finite estimate or score: " + ", ".join(nonfinite_scores))
+        )
+        return _failed_estimate(
+            m=m,
+            n=n,
+            alpha=alpha,
+            null=null,
+            ests=ests,
+            need_outcome=need_outcome,
+            outcome_models=outcome_models_,
+            status=NONFINITE,
+            fold_status=fold_status,
+            optimizer=optimizer_diag,
+        )
 
     # ------------------------------------------------------------------
     # Diagnostics: Love plot and balance table
@@ -1347,6 +1565,8 @@ def grr_functional(
         null=null,
         estimates=estimates,
         diagnostics=diagnostics,
+        status=OK,
+        fold_status=tuple(fold_status),
     )
 
 

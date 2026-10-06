@@ -28,6 +28,12 @@ class SingleEstimate:
 class FunctionalEstimate:
     """Container for estimates for the same estimand.
 
+    ``status`` is ``"ok"`` for a successful fit. Any other value (a solver
+    status such as ``"boundary"``, ``"degenerate_functional"``,
+    ``"domain_prediction"``, ``"nonfinite"``, or ``"outcome_<status>"``) means
+    that some cross-fitting fold failed: every estimate is then NaN, and
+    ``fold_status`` lists ``(fold, stage, status, message)`` per processed fold.
+
     Point estimates are stored in :attr:`estimates`. Standard entries can also
     be accessed with dictionary-style syntax, for example ``result["arw"]``, or
     convenience attributes such as ``result.arw``. When both shared-basis and
@@ -41,6 +47,14 @@ class FunctionalEstimate:
     estimand: str
     estimates: dict[str, SingleEstimate]
     diagnostics: dict[str, Any]
+    status: str = "ok"
+    fold_status: tuple = ()
+
+    @property
+    def success(self) -> bool:
+        """Whether every fold succeeded (``status == "ok"``)."""
+
+        return self.status == "ok"
 
     def _estimate(self, key: str) -> SingleEstimate:
         key = str(key)

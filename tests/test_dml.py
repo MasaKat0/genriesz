@@ -67,25 +67,37 @@ def test_grr_functional_ra_rw_arw_tmle_run():
     assert "rw" in s.lower()
 
 
-def test_grr_functional_raises_when_riesz_optimization_fails():
+@pytest.mark.parametrize(
+    "solver_kwargs, expected",
+    [
+        (dict(riesz_solver="lbfgs", max_iter=0), "optimizer_failure"),
+        (dict(riesz_max_iter=0), "maxit"),
+    ],
+    ids=["lbfgs", "fista"],
+)
+def test_grr_functional_reports_a_failed_riesz_fit_as_a_status(solver_kwargs, expected):
+    """A failed Riesz fit gives NaN estimates and a status, not an exception."""
+
     X, Y, _ = _make_synthetic_ate(n=120, d=2, seed=2)
     gen = SquaredGenerator(C=0.0).as_generator()
 
-    # riesz_penalty='l1' forces the numeric (L-BFGS) path: the SQ + l2 case is
-    # solved in closed form and cannot fail via max_iter.
-    with pytest.raises(RuntimeError, match="Riesz GRR optimization failed"):
-        grr_functional(
-            X=X,
-            Y=Y,
-            m=ATEFunctional(treatment_index=0),
-            basis=phi,
-            generator=gen,
-            cross_fit=False,
-            estimators=("rw",),
-            riesz_penalty="l1",
-            riesz_lam=1e-3,
-            max_iter=0,
-        )
+    res = grr_functional(
+        X=X,
+        Y=Y,
+        m=ATEFunctional(treatment_index=0),
+        basis=phi,
+        generator=gen,
+        cross_fit=False,
+        estimators=("rw", "arw"),
+        riesz_penalty="l1",
+        riesz_lam=1e-3,
+        **solver_kwargs,
+    )
+    assert res.status == expected
+    assert not res.success
+    assert set(res.estimates) == {"rw", "arw"}
+    assert all(np.isnan(e.estimate) and np.isnan(e.se) for e in res.estimates.values())
+    assert res.fold_status[0][1:3] == ("riesz", expected)
 
 
 def test_kfold_splits_rejects_more_folds_than_observations():
@@ -196,26 +208,29 @@ def test_cross_fitting_is_stratified_for_treatment_functionals():
     assert np.isfinite(res.arw.se) and res.arw.se > 0
 
 
-def test_training_fold_without_both_groups_fails_loudly():
+def test_training_fold_without_both_groups_is_a_degenerate_functional_status():
     # A single treated unit cannot be in every training fold: whichever test
     # fold receives it leaves its training fold all-control, and no split can
-    # avoid that. The failure must be an explicit error before any fold is
-    # fitted, not a silent degenerate fit.
+    # avoid that. The failure is the explicit status "degenerate_functional"
+    # (NaN estimates), recorded before any fold is fitted -- not a silent
+    # degenerate fit and not a fold silently dropped from the average.
     from genriesz import grr_att
 
     X, Y = _make_rare_treatment(n_treated=1)
-    with pytest.raises(ValueError, match="training fold contains"):
-        grr_att(
-            X=X,
-            Y=Y,
-            treatment_index=0,
-            basis=phi,
-            generator=SquaredGenerator(C=0.0).as_generator(),
-            cross_fit=True,
-            folds=5,
-            random_state=0,
-            estimators=("arw",),
-        )
+    res = grr_att(
+        X=X,
+        Y=Y,
+        treatment_index=0,
+        basis=phi,
+        generator=SquaredGenerator(C=0.0).as_generator(),
+        cross_fit=True,
+        folds=5,
+        random_state=0,
+        estimators=("arw",),
+    )
+    assert res.status == "degenerate_functional"
+    assert np.isnan(res.arw.estimate)
+    assert "training fold contains" in res.fold_status[0][3]
 
 
 def test_stratify_folds_true_requires_a_treatment_functional():
