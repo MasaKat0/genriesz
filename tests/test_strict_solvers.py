@@ -518,3 +518,13 @@ def test_pr4a_bp_example_reports_boundary_not_success():
     assert np.min(np.abs(r.alpha)) <= 1e-8
     r = fista_solve(problem, beta0=np.zeros(1), lam=0.0)
     assert r.status == "boundary"
+
+
+def test_offset_must_be_a_function_not_an_array():
+    X, _ = _probe_ate(50, 0.5, seed=9)
+    model = GRRGLM(
+        basis=_interaction_basis(X), generator=SquaredGenerator(), functional=ATEFunctional(0),
+        offset=np.zeros(len(X)),
+    )
+    with pytest.raises(TypeError, match="offset"):
+        model.fit(X)

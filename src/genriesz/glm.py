@@ -67,6 +67,11 @@ def evaluate_offset(offset: OffsetSpec, X: NDArray[np.float64]) -> NDArray[np.fl
     n = X.shape[0]
     if offset is None:
         return np.zeros(n, dtype=float)
+    if isinstance(offset, (np.ndarray, list, tuple)):
+        raise TypeError(
+            "offset must be None, a number, or a callable offset(X); an array of values "
+            "tied to the fitting rows cannot be evaluated at held-out or counterfactual rows."
+        )
     if callable(offset):
         out = np.asarray(offset(X), dtype=float)
         if out.ndim == 2 and out.shape[1] == 1:
