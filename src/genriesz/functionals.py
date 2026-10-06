@@ -133,11 +133,48 @@ def _as_prediction_vector(pred: ArrayLike, *, n: int, name: str = "predict") -> 
     return arr
 
 
+class _RecordingBasis:
+    """Wrap a basis and record every set of rows at which it is evaluated."""
+
+    def __init__(self, basis: Basis):
+        self._basis = basis
+        self.rows: list[NDArray[np.float64]] = []
+
+    def __getattr__(self, name: str):
+        return getattr(self._basis, name)
+
+    def __call__(self, X: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        self.rows.append(X_)
+        return self._basis(X_)
+
+    def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        self.rows.append(X_)
+        return self._basis.derivative(X_, coordinate)
+
+
 @dataclass(frozen=True)
 class LinearFunctional:
     """Base class for linear functionals used by GRR."""
 
     name: str
+
+    def evaluation_points(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        """Rows at which ``m(W_i, f)``, ``i = 1..n``, evaluates its argument ``f``.
+
+        The strict solvers require the fitted dual coordinate to be in the
+        domain at these rows (registration §1.3: counterfactual points). The
+        default records the rows at which :meth:`m_basis_matrix` evaluates the
+        basis; built-in functionals override it.
+        """
+
+        X_ = as_2d(X)
+        rec = _RecordingBasis(basis)
+        self.m_basis_matrix(X_, rec)  # type: ignore[arg-type]
+        if not rec.rows:
+            return np.zeros((0, X_.shape[1]))
+        return np.vstack(rec.rows)
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:  # pragma: no cover
         raise NotImplementedError
@@ -268,6 +305,14 @@ class ATEFunctional(LinearFunctional):
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
         return np.asarray(basis(X1) - basis(X0), dtype=float)
 
+    def evaluation_points(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        """Both treatment arms of every row: ``(1, Z_i)`` and ``(0, Z_i)``."""
+
+        X_ = as_2d(X)
+        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
+        return np.vstack([X1, X0])
+
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
         X_ = as_2d(X)
         n = X_.shape[0]
@@ -329,16 +374,35 @@ class ATTFunctional(LinearFunctional):
         X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
         return (D / self.pi) * (basis(X1) - basis(X0))
 
+    def evaluation_points(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        """Both arms of the treated rows only (``m`` vanishes on control rows)."""
+
+        X_ = as_2d(X)
+        _check_treatment_index(X_, self.treatment_index)
+        Xt = X_[X_[:, self.treatment_index] != 0.0]
+        X1 = _toggle_treatment(Xt, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(Xt, treatment_index=self.treatment_index, value=0.0)
+        return np.vstack([X1, X0])
+
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
+        # Only the treated rows contribute (D = 0 elsewhere), so the function is
+        # evaluated at those rows only: a value outside its domain at a
+        # counterfactual row of a control unit is irrelevant to m.
         X_ = as_2d(X)
         n = X_.shape[0]
         _check_treatment_index(X_, self.treatment_index)
         D = X_[:, self.treatment_index].reshape(-1)
-        X1 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=1.0)
-        X0 = _toggle_treatment(X_, treatment_index=self.treatment_index, value=0.0)
-        mu1 = _as_prediction_vector(predict(X1), n=n)
-        mu0 = _as_prediction_vector(predict(X0), n=n)
-        return (D / self.pi) * (mu1 - mu0)
+        out = np.zeros(n, dtype=float)
+        idx = np.flatnonzero(D != 0.0)
+        if idx.size == 0:
+            return out
+        Xt = X_[idx]
+        X1 = _toggle_treatment(Xt, treatment_index=self.treatment_index, value=1.0)
+        X0 = _toggle_treatment(Xt, treatment_index=self.treatment_index, value=0.0)
+        mu1 = _as_prediction_vector(predict(X1), n=idx.size)
+        mu0 = _as_prediction_vector(predict(X0), n=idx.size)
+        out[idx] = (D[idx] / self.pi) * (mu1 - mu0)
+        return out
 
 
 @dataclass(frozen=True)
@@ -354,6 +418,11 @@ class AMEFunctional(LinearFunctional):
 
     def m_basis_matrix(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
         return np.asarray(basis.derivative(X, self.coordinate), dtype=float)
+
+    def evaluation_points(self, X: ArrayLike, basis: Basis) -> NDArray[np.float64]:
+        """The rows themselves (the derivative is taken at ``X_i``)."""
+
+        return as_2d(X)
 
     def m_from_predictor(self, X: ArrayLike, predict: PredictFn) -> NDArray[np.float64]:
         raise NotImplementedError(

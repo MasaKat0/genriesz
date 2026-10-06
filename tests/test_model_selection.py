@@ -820,6 +820,7 @@ def test_squared_loss_score_is_nan_when_a_fold_fails_to_fit():
         tol=1e-8,
         want_kernel=False,
         want_squared_loss=True,
+        riesz_max_iter=0,  # the strict-solver counterpart of max_iter
     )
     assert row["success"] is False
     assert np.isnan(row["squared_loss_validation"])

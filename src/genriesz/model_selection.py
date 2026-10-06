@@ -44,7 +44,8 @@ from numpy.typing import ArrayLike, NDArray
 from .basis import Basis, _median_pairwise_distance
 from .functionals import AMEFunctional, LinearFunctional
 from .generators import BregmanGenerator
-from .glm import GRRGLM, OutcomeGLM
+from .glm import GRRGLM, OffsetSpec, OutcomeGLM, offset_from_alpha
+from .solvers import CV_FAILED, OK
 from .utils import Fold, is_binary_y, kfold_splits, stratified_kfold_splits
 
 # Default candidate grids (design section 3.4 / coverage design "Candidate 集合").
@@ -271,6 +272,10 @@ class GRRCVResult:
     # is diagnostic metadata, not identity, so two results with equal scalar
     # fields still compare equal.
     fold_provenance: list[dict] = field(default_factory=list, kw_only=True, compare=False)
+    # "ok", or "cv_failed" when no candidate could be fitted and scored and the
+    # caller asked for a status instead of an exception (raise_on_failure=False);
+    # the hyper-parameter fields are then NaN/None.
+    status: str = field(default=OK, kw_only=True)
 
 
 def _effective_sample_size(w: NDArray[np.float64]) -> float:
@@ -394,6 +399,26 @@ def make_candidate_basis(
     return cwp(**overrides)
 
 
+def resolve_riesz_offset(
+    generator: BregmanGenerator,
+    offset: OffsetSpec,
+    alpha_ref,
+) -> OffsetSpec:
+    """The dual-coordinate offset for ``generator``.
+
+    ``offset`` is a dual-coordinate offset ``u_ref`` (specific to one
+    generator); ``alpha_ref`` is a generator-free reference representer
+    ``X -> alpha_ref(X)``, converted per generator by
+    :func:`~genriesz.offset_from_alpha`. At most one may be given.
+    """
+
+    if offset is not None and alpha_ref is not None:
+        raise ValueError("Pass either riesz_offset or riesz_alpha_ref, not both.")
+    if alpha_ref is not None:
+        return offset_from_alpha(generator, alpha_ref)
+    return offset
+
+
 def score_grr_candidate(
     *,
     X_train: NDArray[np.float64],
@@ -414,6 +439,11 @@ def score_grr_candidate(
     tol: float,
     want_kernel: bool,
     want_squared_loss: bool = False,
+    riesz_offset: OffsetSpec = None,
+    riesz_solver: str = "auto",
+    riesz_l1_radius: float | None = None,
+    riesz_max_iter: int | None = None,
+    riesz_tol: float | None = None,
 ) -> dict:
     """Evaluate one candidate over the inner folds and aggregate diagnostics.
 
@@ -430,6 +460,13 @@ def score_grr_candidate(
     is usable for that score only if the risk is finite on *every* fold; a single
     non-finite fold drops it out of selection (so candidates are never compared on
     a partial-fold average).
+
+    Each candidate is fitted with the same solver contract as the outer refit
+    (``riesz_offset``, ``riesz_solver``, ``riesz_l1_radius``, ``riesz_max_iter``,
+    ``riesz_tol``; ``max_iter``/``tol`` apply to ``riesz_solver="lbfgs"`` and to
+    the outcome model). With a strict solver, an inner-validation row (or a
+    counterfactual row evaluated by ``m``) outside the domain of the fitted
+    representer, or a non-finite value there, makes the fold count as failed.
     """
 
     risks: list[float] = []
@@ -465,8 +502,14 @@ def score_grr_candidate(
             penalty=riesz_penalty,
             lam=lam,
             p_norm=riesz_p_norm,
+            offset=riesz_offset,
+            solver=riesz_solver,
+            l1_radius=riesz_l1_radius,
         )
-        fr = grr.fit(X_itr, max_iter=max_iter, tol=tol)
+        if grr.solver == "lbfgs":
+            fr = grr.fit(X_itr, max_iter=max_iter, tol=tol)
+        else:
+            fr = grr.fit(X_itr, max_iter=riesz_max_iter, tol=riesz_tol)
         if not fr.success or grr.beta_ is None:
             all_success = False
             continue
@@ -474,15 +517,23 @@ def score_grr_candidate(
         Phi_iva = np.asarray(cb(X_iva), dtype=float)
         M_iva = np.asarray(m.m_basis_matrix(X_iva, cb), dtype=float)
         beta = grr.beta_
-        v_iva = Phi_iva @ beta
+        v_iva = grr.predict_v(X_iva)
 
-        # Unpenalized Bregman-Riesz validation risk.
-        try:
-            g_star, alpha_iva = generator.conjugate(X_iva, v_iva)
-            risks.append(float(np.mean(g_star - (M_iva @ beta))))
-        except Exception:
-            all_success = False
-            continue
+        # Unpenalized Bregman-Riesz validation risk (up to the candidate-free
+        # constant -mean m(W, u_ref)).
+        if grr.solver == "lbfgs":
+            try:
+                g_star, alpha_iva = generator.conjugate(X_iva, v_iva)
+            except Exception:
+                all_success = False
+                continue
+        else:
+            alpha_iva, outside, nonfinite = grr.classify(X_iva)
+            if np.any(outside) or np.any(nonfinite):
+                all_success = False
+                continue
+            g_star, _, _ = generator.dual_eval(X_iva, v_iva)
+        risks.append(float(np.mean(g_star - (M_iva @ beta))))
 
         # Generator-agnostic squared-loss (LSIF) validation risk of the fitted
         # representer alpha_hat = generator.inv_grad(phi @ beta):
@@ -494,14 +545,12 @@ def score_grr_candidate(
         # functional that cannot express m(alpha) without a representer derivative
         # raises a clear error rather than masquerading as a failed fit.
         if want_squared_loss:
-            def _representer(
-                XX: NDArray[np.float64],
-                _cb: Basis = cb,
-                _beta: NDArray[np.float64] = beta,
-                _gen: BregmanGenerator = generator,
-            ) -> NDArray[np.float64]:
-                phi = np.asarray(_cb(XX), dtype=float)
-                return np.asarray(_gen.inv_grad(XX, phi @ _beta), dtype=float)
+            def _representer(XX: NDArray[np.float64], _grr: GRRGLM = grr) -> NDArray[np.float64]:
+                # Strict: NaN outside the domain (the risk is then non-finite and
+                # the candidate is dropped); legacy: the generator's own link.
+                if _grr.solver == "lbfgs":
+                    return np.asarray(_grr.predict_alpha(XX), dtype=float)
+                return np.asarray(_grr.predict_alpha(XX, out_of_domain="nan"), dtype=float)
 
             try:
                 m_rep = np.asarray(
@@ -746,6 +795,13 @@ def select_grr_hyperparams(
     outcome_lam: float = 1e-3,
     max_iter: int = 500,
     tol: float = 1e-8,
+    riesz_offset: OffsetSpec = None,
+    riesz_alpha_ref=None,
+    riesz_solver: str = "auto",
+    riesz_l1_radius: float | None = None,
+    riesz_max_iter: int | None = None,
+    riesz_tol: float | None = None,
+    raise_on_failure: bool = True,
 ) -> GRRCVResult:
     """Select Riesz hyper-parameters on the outer *training* sample only.
 
@@ -768,6 +824,16 @@ def select_grr_hyperparams(
     ``riesz_lam`` is the penalty used to fit each scored candidate and, when
     ``config.lam_grid is None``, the sole lambda candidate -- so the returned
     ``lam`` is then ``riesz_lam`` itself.
+
+    Every candidate is fitted with the solver contract of the outer refit:
+    ``riesz_offset`` (a dual-coordinate offset; not allowed with a generator
+    grid) or ``riesz_alpha_ref`` (a reference representer, converted to each
+    candidate generator's offset), ``riesz_solver``, ``riesz_l1_radius``,
+    ``riesz_max_iter`` and ``riesz_tol``.
+
+    When no candidate can be fitted and scored, a ``RuntimeError`` is raised
+    (``raise_on_failure=True``, the default) or a result with
+    ``status="cv_failed"`` is returned (``raise_on_failure=False``).
     """
 
     if config.selection_score == "squared_loss_validation" and isinstance(m, AMEFunctional):
@@ -777,6 +843,13 @@ def select_grr_hyperparams(
             "which the LSIF risk does not provide. Use 'bregman_validation' or "
             "'bias_variance' for average-derivative functionals."
         )
+
+    if riesz_offset is not None and config.generator_grid is not None:
+        raise ValueError(
+            "riesz_offset is a dual-coordinate offset of one generator; with a generator "
+            "grid, pass the generator-free reference representer riesz_alpha_ref instead."
+        )
+    resolve_riesz_offset(generator, riesz_offset, riesz_alpha_ref)  # validates the pair
 
     X_tr = np.asarray(X_train, dtype=float)
     y_tr = np.asarray(y_train, dtype=float).reshape(-1)
@@ -956,6 +1029,13 @@ def select_grr_hyperparams(
                         tol=tol,
                         want_kernel=want_kernel,
                         want_squared_loss=config.selection_score == "squared_loss_validation",
+                        riesz_offset=resolve_riesz_offset(
+                            gen_candidate, riesz_offset, riesz_alpha_ref
+                        ),
+                        riesz_solver=riesz_solver,
+                        riesz_l1_radius=riesz_l1_radius,
+                        riesz_max_iter=riesz_max_iter,
+                        riesz_tol=riesz_tol,
                     )
                     # Report the candidate at its outer-training resolution -- the
                     # values it is refit with -- not the per-fold ones.
@@ -991,6 +1071,21 @@ def select_grr_hyperparams(
         # story and a warning about "the selection below" would describe a
         # selection that never happens.
         pool = [r for r in path if r["success"] and np.isfinite(r["criterion"])]
+        if not pool and not raise_on_failure:
+            return GRRCVResult(
+                sigma=None,
+                lam=float("nan"),
+                n_centers=None,
+                selection_score=config.selection_score,
+                best_score=float("nan"),
+                n_admissible=0,
+                n_candidates=len(path),
+                path=path if config.return_path else [],
+                modifies_estimand=modifies_estimand,
+                strict_nested=bool(config.strict_nested),
+                fold_provenance=fold_provenance,
+                status=CV_FAILED,
+            )
         if not pool:
             raise RuntimeError(
                 "No Riesz candidate could be fitted and scored on this training "

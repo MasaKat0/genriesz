@@ -40,7 +40,7 @@ def _branch_treated(x: np.ndarray) -> int:
 
 def _bp(omega: float) -> object:
     # C = 0: with C = 1 several BP fits on this design end at the domain boundary
-    # (reported as "boundary" by the strict solver; the legacy path clipped).
+    # (reported as "uncertified_numerical_boundary" by the strict solver; the legacy path clipped).
     return BPGenerator(C=0.0, omega=omega, branch_fn=_branch_treated).as_generator()
 
 

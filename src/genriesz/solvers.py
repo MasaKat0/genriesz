@@ -17,31 +17,55 @@ the empirical objective (``eq:beta_erm`` in the paper, up to the constant
 whose loss gradient is the empirical imbalance
 :math:`\widehat\Delta_j = \frac1n\sum_i \alpha_i \phi_j(X_i) - b_j`. The
 two-sample density-ratio objective has the same form with the sums taken over
-the denominator sample and ``b`` the numerator mean of ``phi``.
+the denominator sample and ``b`` the numerator mean of ``phi``. Coefficients are
+always deviations from the offset; penalties and the ``l1`` ball act on them.
 
-Two solvers are provided. Both keep every iterate inside the domain of the
-generator (every row's dual coordinate in the open range of ``g'``), never clip,
-and return an explicit status instead of raising:
+Feasibility. A coefficient vector is feasible when, at every fitting row *and*
+at every additional evaluation point required by the problem (``check_*`` in
+:class:`DualProblem`: the counterfactual rows at which the functional evaluates
+the dual coordinate, or the numerator sample of a density ratio), the dual
+coordinate lies in the open range of ``g'`` on the row's branch and the
+representer value lies in the open domain of ``g`` on that branch (so an exp
+underflow to ``|alpha| = C`` is infeasible) and is finite.
+
+Two solvers are provided. Both keep every iterate feasible, never clip, and
+return an explicit status instead of raising:
 
 - :func:`newton_solve` -- damped Newton for no penalty, ridge, and ``l_q``
   penalties with ``q >= 2``. Backtracking halves the step until the trial point
-  is in the domain, finite, and satisfies the Armijo condition (at most
-  ``max_halvings`` halvings, then ``"linesearch"``).
-- :func:`fista_solve` -- FISTA (accelerated proximal gradient) for the exact
-  ``l1`` penalty, optionally over the ``l1`` ball ``||beta||_1 <= R1``, and for
-  ``l_q`` with ``1 < q < 2``. Backtracking doubles the Lipschitz estimate until
-  the proximal point is in the domain and satisfies the sufficient-decrease
-  condition. An extrapolated point outside the domain is discarded (``y =
-  beta_k`` and the momentum is reset), and the momentum is also reset by the
-  gradient-based adaptive restart test.
+  is feasible, finite, and satisfies the Armijo condition (coefficient
+  ``1e-4``; at most ``max_halvings`` halvings, then ``"linesearch"``).
+- :func:`fista_solve` -- projected proximal gradient with acceleration (FISTA)
+  for ``h = lam ||.||_1 + I{||.||_1 <= R}`` (either part may be absent) with an
+  optional ridge term in the smooth part, and for ``l_q`` with ``1 < q < 2``.
+  The update is ``beta+ = prox_{h/L}(y - grad f(y)/L)``: soft-thresholding at
+  ``max(lam/L, tau)``, with ``tau`` the level that puts the result on the ball.
+  ``L`` doubles until ``beta+`` is feasible and the sufficient-decrease
+  condition holds. As registered, the extrapolation is discarded (``y = beta_k``,
+  ``t = 1``, and ``beta+`` is recomputed from ``beta_k``) when the extrapolated
+  point is infeasible and at an adaptive restart. **Deviation from the
+  registration (§1.3 A-3):** the restart test is the gradient-mapping form of
+  O'Donoghue and Candes (2015), ``(y - beta+)'(beta+ - beta_k) > 0``, i.e.
+  ``G(y)'(beta+ - beta_k) > 0`` with ``G(y) = L (y - beta+)``, instead of the
+  registered ``grad f(y)'(beta+ - beta_k) > 0``. The two coincide when
+  ``h = 0``; with an ``l1`` term, ``grad f`` does not vanish at the solution
+  (it equals ``-lam * sign(beta)`` on the support), the registered test then
+  fires at almost every step, and FISTA degrades to an unaccelerated proximal
+  gradient (an RKHS ``l1`` example needed more than 100000 iterations instead
+  of about 2300). The stopping quantity is the registered proximal
+  residual ``rho = L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` with the
+  last ``L``; the subdifferential residual (with the normal cone of an active
+  ball) is reported as well.
 
 Statuses (:data:`STATUSES`):
 
 ``"ok"``
-    The first-order criterion is met at an interior point.
-``"boundary"``
-    An iterate has a row numerically at the boundary of the domain of ``g``
-    (see :meth:`BregmanGenerator.boundary_mask`). Never applied to SQ.
+    The first-order criterion is met at a feasible point.
+``"uncertified_numerical_boundary"``
+    An iterate has a fitting row within ``boundary_tol`` of the boundary of the
+    domain of ``g`` (see :meth:`BregmanGenerator.boundary_mask`; never for SQ).
+    This is a numerical finding; it does not establish that no minimizer
+    exists. (Exported as :data:`BOUNDARY`.)
 ``"maxit"``
     The iteration limit was reached.
 ``"linesearch"``
@@ -50,9 +74,14 @@ Statuses (:data:`STATUSES`):
     The Newton system is numerically singular (or, for the arbitrary-link
     objective, the final Hessian is not positive definite).
 ``"infeasible_start"``
-    The starting point is outside the domain (e.g. BKL with ``u_ref = 0``).
+    The starting point is infeasible (e.g. BKL with ``u_ref = 0``).
 ``"nonfinite"``
     A non-finite objective, gradient, curvature or representer value.
+``"domain_prediction"``
+    An additional evaluation point (a counterfactual row evaluated by the
+    functional, or a numerator row of a density ratio) reached the boundary of
+    the domain: the iterates are blocked by the requirement that these points
+    stay in the domain.
 
 A solver status is a statement about the optimization run on this sample. It is
 not evidence that the population problem, or even this sample's problem, has no
@@ -70,7 +99,7 @@ from numpy.typing import NDArray
 from .generators import DomainError
 
 OK = "ok"
-BOUNDARY = "boundary"
+BOUNDARY = "uncertified_numerical_boundary"
 MAXIT = "maxit"
 LINESEARCH = "linesearch"
 SINGULAR = "singular"
@@ -78,6 +107,7 @@ INFEASIBLE_START = "infeasible_start"
 NONFINITE = "nonfinite"
 DEGENERATE_FUNCTIONAL = "degenerate_functional"
 DOMAIN_PREDICTION = "domain_prediction"
+CV_FAILED = "cv_failed"
 
 #: Every status the strict solvers and the high-level estimators can report.
 STATUSES = (
@@ -90,6 +120,7 @@ STATUSES = (
     NONFINITE,
     DEGENERATE_FUNCTIONAL,
     DOMAIN_PREDICTION,
+    CV_FAILED,
 )
 
 #: Statuses that count as a successful fit. ``"closed_form"`` and
@@ -106,32 +137,49 @@ class _Point:
     finite: bool = False
     loss: float = float("nan")
     grad: NDArray[np.float64] | None = None
+    imbalance: NDArray[np.float64] | None = None
     v: NDArray[np.float64] | None = None
     alpha: NDArray[np.float64] | None = None
     dalpha: NDArray[np.float64] | None = None
+    check_v: NDArray[np.float64] | None = None
+    check_alpha: NDArray[np.float64] | None = None
 
     @property
     def ok(self) -> bool:
         return self.feasible and self.finite
 
 
+def _alpha_ok(generator, X, alpha) -> tuple[bool, bool]:
+    """``(finite, in_domain)`` of representer values on their rows."""
+
+    fin = np.isfinite(alpha)
+    if not np.all(fin):
+        return False, True
+    return True, bool(np.all(generator.alpha_domain(X, alpha)))
+
+
 @dataclass
 class DualProblem:
-    """Smooth part of the coefficient problem, ``mean g*(u_ref + Phi beta) - b' beta``.
+    """Smooth part ``mean g*(u_ref + Phi beta) - b' beta + (ridge/2)||beta||^2``.
 
     Parameters
     ----------
     generator:
         A :class:`~genriesz.generators.BregmanGenerator` (uses ``link_domain``,
-        ``dual_eval`` and ``boundary_mask``).
+        ``dual_eval``, ``alpha_domain`` and ``boundary_mask``).
     X:
-        Rows at which the generator is evaluated (only used to select branches).
+        Fitting rows (used to select branches).
     Phi:
         Design matrix ``(n, p)``.
     offset:
         Offset ``u_ref(X_i)``, shape ``(n,)``.
     target:
         The vector ``b``, shape ``(p,)``.
+    ridge:
+        Ridge weight included in the smooth part (used by FISTA).
+    check_X, check_Phi, check_offset:
+        Additional evaluation points that must stay feasible (counterfactual
+        rows evaluated by the functional, numerator rows of a density ratio).
     """
 
     generator: object
@@ -139,16 +187,29 @@ class DualProblem:
     Phi: NDArray[np.float64]
     offset: NDArray[np.float64]
     target: NDArray[np.float64]
+    ridge: float = 0.0
+    check_X: NDArray[np.float64] | None = None
+    check_Phi: NDArray[np.float64] | None = None
+    check_offset: NDArray[np.float64] | None = None
 
     def __post_init__(self) -> None:
         self.Phi = np.asarray(self.Phi, dtype=float)
         n, p = self.Phi.shape
         self.offset = np.asarray(self.offset, dtype=float).reshape(-1)
         self.target = np.asarray(self.target, dtype=float).reshape(-1)
+        self.ridge = float(self.ridge)
         if self.offset.shape != (n,):
             raise ValueError(f"offset must have shape ({n},). Got {self.offset.shape}.")
         if self.target.shape != (p,):
             raise ValueError(f"target must have shape ({p},). Got {self.target.shape}.")
+        if self.check_X is not None:
+            self.check_Phi = np.asarray(self.check_Phi, dtype=float)
+            self.check_offset = np.asarray(self.check_offset, dtype=float).reshape(-1)
+            m = self.check_Phi.shape[0]
+            if self.check_Phi.shape != (m, p) or self.check_offset.shape != (m,):
+                raise ValueError("check_Phi/check_offset do not match check_X and p.")
+            if len(self.check_X) != m:
+                raise ValueError("check_X and check_Phi must have the same number of rows.")
 
     @property
     def n(self) -> int:
@@ -157,6 +218,41 @@ class DualProblem:
     @property
     def p(self) -> int:
         return int(self.Phi.shape[1])
+
+    def restrict(self, S: NDArray[np.bool_], target: NDArray[np.float64]) -> DualProblem:
+        """The same problem on the coordinates ``S`` with a new ``target``."""
+
+        return DualProblem(
+            generator=self.generator,
+            X=self.X,
+            Phi=self.Phi[:, S],
+            offset=self.offset,
+            target=target,
+            ridge=self.ridge,
+            check_X=self.check_X,
+            check_Phi=None if self.check_Phi is None else self.check_Phi[:, S],
+            check_offset=self.check_offset,
+        )
+
+    @property
+    def has_checks(self) -> bool:
+        return self.check_X is not None and len(self.check_X) > 0
+
+    def check_points(self, beta: NDArray[np.float64]):
+        """``(feasible, finite, v, alpha)`` of the additional evaluation points."""
+
+        if not self.has_checks:
+            return True, True, None, None
+        assert self.check_Phi is not None and self.check_offset is not None
+        v = self.check_offset + self.check_Phi @ beta
+        if not np.all(self.generator.link_domain(self.check_X, v)):
+            return False, True, v, None
+        try:
+            _, a, _ = self.generator.dual_eval(self.check_X, v)
+        except DomainError:
+            return False, True, v, None
+        fin, dom = _alpha_ok(self.generator, self.check_X, a)
+        return dom, fin, v, a
 
     def evaluate(self, beta: NDArray[np.float64]) -> _Point:
         beta = np.asarray(beta, dtype=float).reshape(-1)
@@ -173,12 +269,20 @@ class DualProblem:
             # like a link_domain violation: backtrack, or report
             # "infeasible_start". Any other exception propagates.
             return _Point(beta=beta, feasible=False, v=v)
-        loss = float(np.mean(g_star) - self.target @ beta)
-        grad = self.Phi.T @ alpha / self.n - self.target
+        fin_a, dom_a = _alpha_ok(self.generator, self.X, alpha)
+        if not dom_a:
+            return _Point(beta=beta, feasible=False, v=v)
+        dom_c, fin_c, cv, ca = self.check_points(beta)
+        if not dom_c:
+            return _Point(beta=beta, feasible=False, v=v)
+        imbalance = self.Phi.T @ alpha / self.n - self.target
+        loss = float(np.mean(g_star) - self.target @ beta) + 0.5 * self.ridge * float(beta @ beta)
+        grad = imbalance + self.ridge * beta
         finite = bool(
-            np.isfinite(loss)
+            fin_a
+            and fin_c
+            and np.isfinite(loss)
             and np.all(np.isfinite(grad))
-            and np.all(np.isfinite(alpha))
             and np.all(np.isfinite(dalpha))
         )
         return _Point(
@@ -187,37 +291,69 @@ class DualProblem:
             finite=finite,
             loss=loss,
             grad=grad,
+            imbalance=imbalance,
             v=v,
             alpha=alpha,
             dalpha=dalpha,
+            check_v=cv,
+            check_alpha=ca,
         )
 
     def hessian(self, pt: _Point) -> NDArray[np.float64]:
         assert pt.dalpha is not None
-        return (self.Phi.T * pt.dalpha) @ self.Phi / self.n
+        H = (self.Phi.T * pt.dalpha) @ self.Phi / self.n
+        if self.ridge:
+            H = H + self.ridge * np.eye(self.p)
+        return H
 
     def at_boundary(self, pt: _Point, tol: float) -> NDArray[np.bool_]:
         assert pt.v is not None and pt.alpha is not None
         return np.asarray(self.generator.boundary_mask(self.X, pt.v, pt.alpha, tol=tol), bool)
 
-    def margin(self, pt: _Point) -> NDArray[np.float64]:
-        assert pt.alpha is not None
+    def check_at_boundary(self, pt: _Point, tol: float) -> int:
+        """Number of additional evaluation points numerically at the domain boundary."""
+
+        if not self.has_checks or pt.check_alpha is None:
+            return 0
+        return int(np.sum(self.generator.boundary_mask(
+            self.check_X, pt.check_v, pt.check_alpha, tol=tol)))
+
+    def _margins(self, X, v, alpha) -> NDArray[np.float64]:
+        """Per-row margins (``alpha``-side and dual-side) stacked as columns."""
+
+        cols = []
         fn = getattr(self.generator, "boundary_margin", None)
-        if not callable(fn):
-            return np.full(pt.alpha.shape[0], np.inf)
-        return np.asarray(fn(self.X, pt.alpha), dtype=float)
+        if callable(fn):
+            cols.append(np.asarray(fn(X, alpha), dtype=float))
+        fn = getattr(self.generator, "dual_margin", None)
+        if callable(fn):
+            cols.append(np.asarray(fn(X, v), dtype=float))
+        if not cols:
+            return np.full((alpha.shape[0], 1), np.inf)
+        return np.column_stack(cols)
 
     def margin_ok(self, ref: _Point, trial: _Point, shrink: float) -> bool:
-        """Fraction-to-the-boundary rule: no row's margin shrinks below ``shrink`` times."""
+        """Fraction-to-the-boundary rule over fitting rows and evaluation points.
+
+        No row's distance to the domain boundary (in ``alpha`` and in the dual
+        coordinate) may shrink below ``shrink`` times its current value.
+        """
 
         if shrink <= 0.0:
             return True
-        m0 = self.margin(ref)
-        fin = np.isfinite(m0)
-        if not np.any(fin):
-            return True
-        m1 = self.margin(trial)
-        return bool(np.all(m1[fin] >= shrink * m0[fin]))
+        pairs = [(self.X, ref.v, ref.alpha, trial.v, trial.alpha)]
+        if self.has_checks and ref.check_alpha is not None and trial.check_alpha is not None:
+            pairs.append((self.check_X, ref.check_v, ref.check_alpha, trial.check_v,
+                          trial.check_alpha))
+        for X, v0, a0, v1, a1 in pairs:
+            m0 = self._margins(X, v0, a0)
+            fin = np.isfinite(m0)
+            if not np.any(fin):
+                continue
+            m1 = self._margins(X, v1, a1)
+            if not np.all(m1[fin] >= shrink * m0[fin]):
+                return False
+        return True
 
 
 @dataclass
@@ -235,12 +371,15 @@ class SolverResult:
     objective:
         Penalized objective at ``beta`` (exact ``l1``, no smoothing).
     gradient:
-        Loss gradient at ``beta`` (the empirical imbalance ``Delta``).
+        Loss gradient at ``beta`` without penalty terms: the empirical
+        imbalance ``Delta``.
     kkt_residual:
-        First-order residual used for the stopping rule: the maximum absolute
-        entry of the full gradient for smooth penalties, and the
-        subdifferential residual (including the normal cone of an active
-        ``l1`` ball) for ``l1``.
+        Subdifferential residual of ``0 in grad L + lam subdiff||beta||_1 +
+        N_B(beta)`` (with the smooth penalty in ``grad L``); for smooth
+        penalties without a ball, ``max_j |dF/dbeta_j|``.
+    prox_residual:
+        FISTA only: ``L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` with
+        the last ``L`` (the registered stopping quantity).
     alpha, v:
         Representer values and dual coordinates on the fitting rows.
     n_boundary:
@@ -261,6 +400,7 @@ class SolverResult:
     objective: float = float("nan")
     gradient: NDArray[np.float64] | None = None
     kkt_residual: float = float("nan")
+    prox_residual: float = float("nan")
     alpha: NDArray[np.float64] | None = None
     v: NDArray[np.float64] | None = None
     n_boundary: int = 0
@@ -421,9 +561,7 @@ def lq_residual(
     return float(np.max(np.abs(grad + lam * np.sign(beta) * np.abs(beta) ** (q - 1.0))))
 
 
-# ---------------------------------------------------------------------------
-# Damped Newton
-# ---------------------------------------------------------------------------
+
 def _accept_newton(F: float, Ft: float, slope: float, step: float, armijo: float,
                    gnorm: float, gnorm_t: float) -> bool:
     """Armijo, or -- when the objective change is below rounding -- gradient decrease."""
@@ -449,17 +587,17 @@ def newton_solve(
     singular_rtol: float = 1e-13,
     margin_shrink: float = 0.01,
 ) -> SolverResult:
-    """Damped Newton for ``F = loss + (lam/q)||beta||_q^q`` with ``q >= 2`` (or no penalty).
+    """Damped Newton for ``F = smooth part + (lam/q)||beta||_q^q`` with ``q >= 2``.
 
-    Stops with ``"ok"`` when ``max_j |dF/dbeta_j| <= tol * tol_scale`` at an
-    interior point. ``tol_scale`` lets the caller express the registered
+    Stops with ``"ok"`` when ``max_j |dF/dbeta_j| <= tol * tol_scale`` at a
+    feasible point. ``tol_scale`` lets the caller express the registered
     unpenalized criterion ``max_j|Delta_j| <= tol * max(1, max_j|b_j|)``.
 
-    A trial step is accepted when every row is in the domain, everything is
-    finite, the Armijo condition holds (or, when the objective change is below
-    rounding, the gradient norm decreases), and no row's distance to the
-    domain boundary shrinks below ``margin_shrink`` times its current value.
-    The step is halved otherwise, at most ``max_halvings`` times.
+    A trial step is accepted when it is feasible (see :class:`DualProblem`),
+    everything is finite, the Armijo condition holds (or, when the objective
+    change is below rounding, the gradient norm decreases), and no fitting row's
+    distance to the domain boundary shrinks below ``margin_shrink`` times its
+    current value. The step is halved otherwise, at most ``max_halvings`` times.
     """
 
     pen_val, pen_grad, pen_hess = _smooth_penalty(float(lam), q)
@@ -470,8 +608,8 @@ def newton_solve(
             beta=beta,
             status=INFEASIBLE_START,
             n_iter=0,
-            message="the starting point is outside the domain of the generator "
-            "(some dual coordinate is outside the range of g' on its branch)",
+            message="the starting point is outside the domain of the generator at a "
+            "fitting row or at an evaluation point required by the problem",
         )
     if not pt.finite:
         return SolverResult(beta=beta, status=NONFINITE, n_iter=0,
@@ -488,6 +626,12 @@ def newton_solve(
         nb = int(np.sum(problem.at_boundary(pt, boundary_tol)))
         if nb > 0:
             status, message = BOUNDARY, f"{nb} row(s) at the domain boundary"
+            break
+        nc = problem.check_at_boundary(pt, boundary_tol)
+        if nc > 0:
+            status = DOMAIN_PREDICTION
+            message = (f"{nc} evaluation point(s) (counterfactual or numerator rows) reached "
+                       "the domain boundary")
             break
         H = problem.hessian(pt) + np.diag(pen_hess(pt.beta))
         if not np.all(np.isfinite(H)):
@@ -534,7 +678,7 @@ def newton_solve(
         n_iter=it,
         message=message,
         objective=float(pt.loss + pen_val(pt.beta)),
-        gradient=pt.grad,
+        gradient=pt.imbalance,
         kkt_residual=float(np.max(np.abs(G))) if G.size else 0.0,
         alpha=pt.alpha,
         v=pt.v,
@@ -555,24 +699,23 @@ def _polish_on_support(
     max_iter: int = 50,
     max_halvings: int = 60,
 ) -> NDArray[np.float64] | None:
-    """Newton refinement of an l1 solution on its support with the signs fixed.
+    """Newton refinement of a FISTA solution on its support with the signs fixed.
 
-    Minimizes ``loss(beta_S) + lam sigma' beta_S`` over the support ``S`` of
-    ``beta`` (signs ``sigma``); with ``radius`` (an active ball) also subject to
-    ``sigma' beta_S = radius``, by equality-constrained Newton steps. Returns
-    the refined full vector, or ``None`` when the refinement did not reach
-    ``tol``. The caller re-validates the result on the full problem.
+    With ``lam > 0`` or an active ball, the support ``S`` is the set of nonzero
+    coordinates and ``loss(beta_S) + lam sigma' beta_S`` is minimized over it
+    (with ``radius``, subject to ``sigma' beta_S = radius`` by
+    equality-constrained Newton steps). With ``lam = 0`` and an inactive ball,
+    every coordinate is refined. The ridge term of ``problem`` is included.
+    Returns the refined full vector, or ``None`` when the refinement did not
+    reach ``tol``; the caller re-validates it on the full problem.
     """
 
-    S = beta != 0.0
+    if lam > 0.0 or radius is not None:
+        S = beta != 0.0
+    else:
+        S = np.ones(beta.shape[0], dtype=bool)
     sigma = np.sign(beta[S])
-    sub = DualProblem(
-        generator=problem.generator,
-        X=problem.X,
-        Phi=problem.Phi[:, S],
-        offset=problem.offset,
-        target=problem.target[S] - lam * sigma,
-    )
+    sub = problem.restrict(S, problem.target[S] - lam * sigma)
     if radius is None:
         sr = newton_solve(
             sub, beta0=beta[S], tol=tol, boundary_tol=boundary_tol, margin_shrink=margin_shrink
@@ -621,7 +764,7 @@ def _polish_on_support(
 
 
 # ---------------------------------------------------------------------------
-# FISTA (exact l1, optional l1 ball; l_q with 1 < q < 2)
+# Projected proximal gradient with acceleration (FISTA)
 # ---------------------------------------------------------------------------
 def fista_solve(
     problem: DualProblem,
@@ -632,28 +775,28 @@ def fista_solve(
     radius: float | None = None,
     max_iter: int = 100_000,
     max_backtracks: int = 60,
-    tol: float = 1e-10,
+    tol: float = 1e-8,
     boundary_tol: float = 1e-8,
     lipschitz_decrease: float = 0.9,
     polish: bool = True,
     polish_tol: float = 1e-12,
     margin_shrink: float = 0.01,
 ) -> SolverResult:
-    """FISTA with domain-feasible backtracking and adaptive restart.
+    """Projected FISTA for ``f + h``, ``f`` = smooth part of ``problem`` (incl. ridge).
 
-    Minimizes ``loss(beta) + lam ||beta||_1`` (``q = 1``) over
-    ``{||beta||_1 <= radius}`` (``radius=None``: no constraint), or ``loss +
-    (lam/q)||beta||_q^q`` for ``1 < q < 2`` (no ball). Stops with ``"ok"`` when
-    the constrained first-order residual (:func:`l1_kkt_residual`, or
-    :func:`lq_residual`) is ``<= tol`` at an interior point.
+    ``h = lam ||.||_1 + I{||.||_1 <= radius}`` for ``q = 1`` (``lam = 0``: the
+    projection onto the ball; ``radius=None``: no ball), or
+    ``(lam/q)||.||_q^q`` for ``1 < q < 2`` (no ball). Stops with ``"ok"`` when the
+    proximal residual ``rho`` (see the module docstring) is ``<= tol`` at a
+    feasible point. The registered tolerances are ``1e-6 * lam`` for ``l1`` and
+    ``1e-8`` for ridge or ball only.
 
     With ``polish=True`` and ``q = 1``, an ``"ok"`` solution is refined by
     Newton on its support with the signs fixed (equality-constrained to the
-    sphere ``||beta||_1 = R1`` when the ball is active), to drive the residual
-    toward ``polish_tol``. The refinement is kept only if it stays in the
-    domain and the ball, keeps the signs, and does not increase the full
-    constrained residual (which also checks every off-support coordinate);
-    ``polished`` records whether it was kept.
+    sphere ``||beta||_1 = R`` when the ball is active), toward ``polish_tol``.
+    The refinement is kept only if it is feasible, stays in the ball, keeps the
+    signs, and does not increase the proximal residual; ``polished`` records
+    whether it was kept.
     """
 
     q = float(q)
@@ -673,10 +816,17 @@ def fista_solve(
             return prox_l1_ball(z, step, lam, radius)
         return prox_lq(z, step, lam, q)
 
-    def residual(grad: NDArray[np.float64], b: NDArray[np.float64]) -> tuple[float, bool, float]:
+    def prox_residual(p: _Point, Lc: float) -> float:
+        assert p.grad is not None
+        if p.beta.size == 0:
+            return 0.0
+        return float(Lc * np.max(np.abs(p.beta - prox(p.beta - p.grad / Lc, 1.0 / Lc))))
+
+    def subgrad_residual(p: _Point) -> tuple[float, bool, float]:
+        assert p.grad is not None
         if q == 1.0:
-            return l1_kkt_residual(grad, b, lam, radius)
-        return lq_residual(grad, b, lam, q), False, 0.0
+            return l1_kkt_residual(p.grad, p.beta, lam, radius)
+        return lq_residual(p.grad, p.beta, lam, q), False, 0.0
 
     beta = np.asarray(beta0, dtype=float).reshape(-1).copy()
     if radius is not None and float(np.sum(np.abs(beta))) > radius:
@@ -688,7 +838,8 @@ def fista_solve(
             beta=beta,
             status=INFEASIBLE_START,
             n_iter=0,
-            message="the starting point is outside the domain of the generator",
+            message="the starting point is outside the domain of the generator at a "
+            "fitting row or at an evaluation point required by the problem",
         )
     if not pt.finite:
         return SolverResult(beta=beta, status=NONFINITE, n_iter=0,
@@ -707,20 +858,25 @@ def fista_solve(
     it = 0
     n_restarts = 0
     n_extrapolation_resets = 0
-    res, active, mu = residual(pt.grad, pt.beta)
+    rho = prox_residual(pt, L)
     while it < max_iter:
         nb = int(np.sum(problem.at_boundary(pt, boundary_tol)))
         if nb > 0:
             status, message = BOUNDARY, f"{nb} row(s) at the domain boundary"
             break
-        if res <= tol:
+        nc = problem.check_at_boundary(pt, boundary_tol)
+        if nc > 0:
+            status = DOMAIN_PREDICTION
+            message = (f"{nc} evaluation point(s) (counterfactual or numerator rows) reached "
+                       "the domain boundary")
+            break
+        if rho <= tol:
             status, message = OK, ""
             break
         L = L * lipschitz_decrease
         new = None
         for _ in range(max_backtracks + 1):
-            z = y_pt.beta - y_pt.grad / L
-            b_new = prox(z, 1.0 / L)
+            b_new = prox(y_pt.beta - y_pt.grad / L, 1.0 / L)
             cand = problem.evaluate(b_new)
             if cand.ok and problem.margin_ok(y_pt, cand, margin_shrink):
                 d = b_new - y_pt.beta
@@ -734,52 +890,56 @@ def fista_solve(
             status = LINESEARCH
             message = f"no acceptable step after {max_backtracks} backtracking doublings"
             break
-        # Gradient-based adaptive restart (O'Donoghue and Candes, 2015).
-        if float((y_pt.beta - new.beta) @ (new.beta - pt.beta)) > 0.0:
-            t_new = 1.0
-            y = new.beta
+        if y_pt is not pt and float((y_pt.beta - new.beta) @ (new.beta - pt.beta)) > 0.0:
+            # Adaptive restart (gradient-mapping test; see the module docstring
+            # for the deviation from the registered test): y = beta_k, t = 1,
+            # and the step is recomputed from beta_k.
+            y_pt, t = pt, 1.0
             n_restarts += 1
-        else:
-            t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
-            y = new.beta + ((t - 1.0) / t_new) * (new.beta - pt.beta)
-        y_cand = new if y is new.beta else problem.evaluate(y)
+            continue
+        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
+        y_cand = problem.evaluate(new.beta + ((t - 1.0) / t_new) * (new.beta - pt.beta))
         if not y_cand.ok:
-            # Discard an extrapolation that leaves the domain.
-            y_cand = new
-            t_new = 1.0
+            # Registered: an infeasible extrapolated point is discarded.
+            y_cand, t_new = new, 1.0
             n_extrapolation_resets += 1
         pt, y_pt, t = new, y_cand, t_new
-        res, active, mu = residual(pt.grad, pt.beta)
+        rho = prox_residual(pt, L)
 
     polished = False
     if status == OK and polish and q == 1.0 and np.any(pt.beta != 0.0):
+        _, active0, _ = subgrad_residual(pt)
         b_pol = _polish_on_support(
             problem,
             pt.beta,
             lam=lam,
-            radius=radius if active else None,
+            radius=radius if active0 else None,
             tol=polish_tol,
             boundary_tol=boundary_tol,
             margin_shrink=margin_shrink,
         )
         if b_pol is not None:
             cand = problem.evaluate(b_pol)
-            same_signs = bool(np.all(np.sign(b_pol) == np.sign(pt.beta)))
+            same_signs = bool(np.all(np.sign(b_pol)[pt.beta != 0.0] == np.sign(pt.beta)[
+                pt.beta != 0.0]))
             in_ball = radius is None or float(np.sum(np.abs(b_pol))) <= radius * (1.0 + 1e-12)
             if cand.ok and same_signs and in_ball:
-                r_pol, act_pol, mu_pol = residual(cand.grad, cand.beta)
-                if r_pol <= res and not np.any(problem.at_boundary(cand, boundary_tol)):
-                    pt, res, active, mu = cand, r_pol, act_pol, mu_pol
+                rho_pol = prox_residual(cand, L)
+                if (rho_pol <= rho and not np.any(problem.at_boundary(cand, boundary_tol))
+                        and problem.check_at_boundary(cand, boundary_tol) == 0):
+                    pt, rho = cand, rho_pol
                     polished = True
 
+    res_sub, active, mu = subgrad_residual(pt)
     return SolverResult(
         beta=pt.beta,
         status=status,
         n_iter=it,
         message=message,
         objective=float(pt.loss + penalty(pt.beta)),
-        gradient=pt.grad,
-        kkt_residual=float(res),
+        gradient=pt.imbalance,
+        kkt_residual=float(res_sub),
+        prox_residual=float(rho),
         alpha=pt.alpha,
         v=pt.v,
         n_boundary=int(np.sum(problem.at_boundary(pt, boundary_tol))),

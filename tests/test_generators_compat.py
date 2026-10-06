@@ -100,7 +100,7 @@ def _imbalance(gen, X: np.ndarray, Phi: np.ndarray, M: np.ndarray, beta: np.ndar
 # excluded on purpose: uncapped it raises at v = 0, and its density-ratio route
 # is the logistic classifier tested at the bottom of this file. BP uses C = 0:
 # with C = 1 the sample problem on these Gaussian designs has no interior
-# minimizer (the strict solver reports "boundary"), which the legacy L-BFGS
+# minimizer (the strict solver reports "uncertified_numerical_boundary"), which the legacy L-BFGS
 # path used to hide by clipping the link.
 BALANCING_GENERATORS = [
     ("sq", lambda: SquaredGenerator(C=0.0)),
@@ -260,8 +260,16 @@ def test_bregman_route_does_call_the_generator_link():
     assert res.class_prior_ratio is None
 
     sentinel = np.full(len(X_den), 3.0)
-    res.generator.inv_grad = lambda *_a, **_k: sentinel
+    # The strict route evaluates the link through the generator's exact
+    # dual_eval (alpha = (g')^{-1}(v)); the legacy route through inv_grad.
+    res.generator.dual_eval = lambda _X, v: (np.zeros_like(v), sentinel, np.ones_like(v))
     assert np.allclose(res.predict_ratio(X_den), sentinel)
+
+    legacy = fit_density_ratio(
+        X_num, X_den, generator="sq", sigma=1.0, n_centers=40, lam=1e-2, solver="legacy"
+    )
+    legacy.generator.inv_grad = lambda *_a, **_k: sentinel
+    assert np.allclose(legacy.predict_ratio(X_den), sentinel)
 
 
 def test_bounded_bkl_is_not_misrouted_to_the_classifier():

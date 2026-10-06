@@ -29,7 +29,7 @@ class FunctionalEstimate:
     """Container for estimates for the same estimand.
 
     ``status`` is ``"ok"`` for a successful fit. Any other value (a solver
-    status such as ``"boundary"``, ``"degenerate_functional"``,
+    status such as ``"uncertified_numerical_boundary"``, ``"degenerate_functional"``,
     ``"domain_prediction"``, ``"nonfinite"``, or ``"outcome_<status>"``) means
     that some cross-fitting fold failed: every estimate is then NaN, and
     ``fold_status`` lists ``(fold, stage, status, message)`` per processed fold.

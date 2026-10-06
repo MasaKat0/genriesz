@@ -141,8 +141,10 @@ def test_branchwise_generator_needs_branch_fn():
 
 
 @pytest.mark.skipif(not HAS_CVXPY, reason="cvxpy not installed")
-@pytest.mark.parametrize("C, grr_status, verdict", [(1.0, "boundary", "uncertified_boundary"),
-                                                    (0.0, "ok", "interior")])
+@pytest.mark.parametrize(
+    "C, grr_status, verdict",
+    [(1.0, "uncertified_numerical_boundary", "uncertified_boundary"), (0.0, "ok", "interior")],
+)
 def test_solver_status_and_weight_program_agree_on_the_probe_design(C, grr_status, verdict):
     """BP(C=1) under weak overlap: the GRR solver stops at the boundary and the
     weight program's numerical solution has weights on the boundary. Neither is

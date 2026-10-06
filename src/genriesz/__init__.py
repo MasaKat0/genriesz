@@ -32,7 +32,7 @@ from .certificates import WeightProgramCertificate, weight_program_certificate
 
 # Density ratio and covariate shift
 from .density_ratio import DensityRatioResult, fit_density_ratio
-from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional
+from .estimation import grr_ame, grr_ate, grr_att, grr_did, grr_functional, rw_full_inference
 
 # Functionals
 from .functionals import (
@@ -93,6 +93,7 @@ __all__ = [
     "grr_att",
     "grr_did",
     "grr_ame",
+    "rw_full_inference",
     "GRRGLM",
     "weight_program_certificate",
     "WeightProgramCertificate",

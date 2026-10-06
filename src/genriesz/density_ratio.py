@@ -67,8 +67,16 @@ from .generators import (
     SquaredGenerator,
     coerce_generator,
 )
-from .glm import DomainError, OffsetSpec, _branch_cache_of, _Penalty, evaluate_offset
-from .solvers import NONFINITE, OK, DualProblem, SolverResult, fista_solve, newton_solve
+from .glm import (
+    DomainError,
+    OffsetSpec,
+    _branch_cache_of,
+    _Penalty,
+    classify_predictions,
+    evaluate_offset,
+    run_strict_solver,
+)
+from .solvers import NONFINITE, OK, SolverResult
 from .utils import as_2d, kfold_splits, sigmoid, solve_stationarity
 
 #: Accepted values of ``fit_density_ratio(solver=...)``.
@@ -176,19 +184,27 @@ class DensityRatioResult:
         Phi = np.asarray(self.basis(X_), dtype=float)
         return evaluate_offset(self.offset, X_) + Phi @ self.beta
 
-    def domain_mask(self, X: ArrayLike) -> NDArray[np.bool_]:
-        """Rows at which the fitted ratio is defined (dual coordinate in the link's range)."""
+    def classify(
+        self, X: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
+        """``(ratio, outside, nonfinite)`` at the rows of ``X`` (strict fits).
+
+        ``outside``: the dual coordinate is outside the range of ``g'``, or the
+        ratio is outside the open domain of ``g`` (e.g. UKL underflow to
+        ``C``); ``nonfinite``: overflow. The ratio is NaN on both.
+        """
 
         X_ = as_2d(X, name='X')
-        v = self.predict_v(X_)
+        return classify_predictions(self.generator, X_, self.predict_v(X_))
+
+    def domain_mask(self, X: ArrayLike) -> NDArray[np.bool_]:
+        """Rows at which the fitted ratio is defined and finite."""
+
+        X_ = as_2d(X, name='X')
         if self.class_prior_ratio is not None:
-            return np.isfinite(v)
-        ok = np.asarray(self.generator.link_domain(X_, v), dtype=bool)
-        if np.any(ok):
-            _, a, _ = self.generator.dual_eval(X_[ok], v[ok])
-            idx = np.flatnonzero(ok)
-            ok[idx[~np.isfinite(a)]] = False
-        return ok
+            return np.isfinite(self.predict_v(X_))
+        _, outside, nonfinite = self.classify(X_)
+        return ~(outside | nonfinite)
 
     def predict_ratio(
         self,
@@ -223,15 +239,13 @@ class DensityRatioResult:
         elif self.solver == "legacy":
             r = self.generator.inv_grad(X_, v)
         else:
-            ok = self.domain_mask(X_)
-            if not np.all(ok) and out_of_domain == "raise":
+            r, outside, nonfinite = classify_predictions(self.generator, X_, v)
+            if out_of_domain == "raise" and (np.any(outside) or np.any(nonfinite)):
                 raise DomainError(
-                    f"{int(np.sum(~ok))}/{ok.shape[0]} row(s) are outside the domain of the "
-                    f"fitted density ratio (generator '{self.generator.name}')."
+                    f"{int(np.sum(outside))}/{r.shape[0]} row(s) are outside the domain of the "
+                    f"fitted density ratio (generator '{self.generator.name}') and "
+                    f"{int(np.sum(nonfinite))} have a non-finite value."
                 )
-            r = np.full(v.shape[0], np.nan)
-            if np.any(ok):
-                r[ok] = self.generator.inv_grad(X_[ok], v[ok])
         r = np.asarray(r, dtype=float).reshape(-1)
         if clip_nonnegative:
             r = np.maximum(r, 0.0)
@@ -417,46 +431,34 @@ def _fit_strict(
     """
 
     u0 = evaluate_offset(offset, X_den)
+    u_num = evaluate_offset(offset, X_num)
     p = Phi_den.shape[1]
     beta0 = np.zeros(p, dtype=float)
-    if not np.all(np.isfinite(u0)):
+    if not (np.all(np.isfinite(u0)) and np.all(np.isfinite(u_num))):
         return SolverResult(beta=beta0, status=NONFINITE, n_iter=0,
-                            message="the offset is not finite on the denominator sample")
-    problem = DualProblem(
-        generator=generator, X=X_den, Phi=Phi_den, offset=u0, target=Phi_num.mean(axis=0)
-    )
-    lam = 0.0 if penalty.penalty is None else float(penalty.lam)
-    q = None if lam == 0.0 else penalty.p_norm
-    kind = solver
-    if kind == "auto":
-        kind = "fista" if (l1_radius is not None or (q is not None and q < 2.0)) else "newton"
+                            message="the offset is not finite on the samples")
+    # The numerator rows enter the objective through v (linearly) and the ratio
+    # must be defined there: they are evaluation points the solver keeps in the
+    # domain.
     with _branch_cache_of(generator):
-        if kind == "newton":
-            if l1_radius is not None or (q is not None and q < 2.0):
-                raise ValueError("solver='newton' needs a smooth penalty and no l1_radius.")
-            scale = max(1.0, float(np.max(np.abs(problem.target)))) if q is None else 1.0
-            return newton_solve(
-                problem,
-                beta0=beta0,
-                lam=lam,
-                q=q,
-                max_iter=500 if max_iter is None else int(max_iter),
-                tol=1e-10 if tol is None else float(tol),
-                tol_scale=scale,
-            )
-        qf = 1.0 if q is None else float(q)
-        if qf >= 2.0:
-            raise ValueError("solver='fista' supports the l1 and l_q (1 < q < 2) penalties.")
-        default_tol = 1e-6 * lam if lam > 0.0 else 1e-10
-        return fista_solve(
-            problem,
+        res, _ = run_strict_solver(
+            generator=generator,
+            X=X_den,
+            Phi=Phi_den,
+            offset=u0,
+            target=Phi_num.mean(axis=0),
+            penalty=penalty,
+            solver=solver,
+            l1_radius=l1_radius,
             beta0=beta0,
-            lam=lam,
-            q=qf,
-            radius=l1_radius,
-            max_iter=100_000 if max_iter is None else int(max_iter),
-            tol=default_tol if tol is None else float(tol),
+            max_iter=max_iter,
+            tol=tol,
+            boundary_tol=1e-8,
+            check_X=X_num,
+            check_Phi=Phi_num,
+            check_offset=u_num,
         )
+    return res
 
 
 def fit_density_ratio(

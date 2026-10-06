@@ -86,7 +86,10 @@ def test_branch_fn_is_called_once_per_row_per_fit():
     # Guard against a vacuous test: the optimizer must have evaluated fun/jac
     # several times, which is exactly when the old code paid n calls each.
     assert fr.n_iter >= 2
-    assert branch.calls == len(X)
+    # One branch evaluation per fitting row, plus one per counterfactual row
+    # (both arms of every row for the ATE) that the strict solver keeps in the
+    # domain -- each cached once for the whole fit.
+    assert branch.calls == 3 * len(X)
 
 
 def test_branch_cache_is_scoped_to_the_block():
@@ -158,7 +161,9 @@ def test_solver_keeps_a_single_cache_entry_even_for_non_float_input():
     ).fit(X)
 
     assert fr.success
-    assert sizes == [0]  # computed exactly once, on an empty cache
+    # Computed exactly once per array: the fitting rows, then the stacked
+    # counterfactual rows that the strict solver keeps in the domain.
+    assert sizes == [0, 1]
 
 
 def test_branch_cache_nesting_restores_the_outer_cache():
@@ -257,7 +262,8 @@ def test_fit_results_are_bit_identical_with_and_without_the_cache(
     beta_u, kkt_u, bind_u, calls_u = run(disable_cache=True)
 
     # The disabled run really is uncached, so the comparison below has teeth.
-    assert calls_c == len(X)
+    # Strict solvers also evaluate the counterfactual rows (2n for the ATE).
+    assert calls_c == (len(X) if solver == "lbfgs" else 3 * len(X))
     assert calls_u > calls_c
 
     assert np.array_equal(beta_c, beta_u)

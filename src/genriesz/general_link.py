@@ -1,6 +1,7 @@
 r"""Generalized Riesz regression with an arbitrary (possibly incompatible) link.
 
-For a generator ``g`` and a link ``alpha_beta(x) = link(x, phi(x)'beta)`` that
+For a generator ``g`` and a link ``alpha_beta(x) = link(x, v_beta(x))`` with the
+index ``v_beta(x) = v_ref(x) + phi(x)'beta`` (``v_ref`` a fixed index offset) that
 need not be the generator's own (compatible) link, the empirical objective is
 the sample analogue of ``BD_g(alpha_beta)`` (``eq:bd_emp_beta``),
 
@@ -12,7 +13,7 @@ the sample analogue of ``BD_g(alpha_beta)`` (``eq:bd_emp_beta``),
 Proposition ``prop:arbitrary_pair_foc`` gives its gradient as the empirical
 imbalance in the *tangent* directions
 :math:`\psi_{j,\beta} = g''(\alpha_\beta)\,\partial_{\beta_j}\alpha_\beta =
-g''(\alpha_\beta)\,\mathrm{link}'(\eta)\,\phi_j`:
+g''(\alpha_\beta)\,\mathrm{link}'(v_\beta)\,\phi_j`:
 
 .. math::
 
@@ -52,8 +53,8 @@ from numpy.typing import ArrayLike, NDArray
 
 from .basis import Basis
 from .functionals import LinearFunctional
-from .generators import BregmanGenerator
-from .glm import _ensure_basis_fitted
+from .generators import BregmanGenerator, DomainError
+from .glm import OffsetSpec, _ensure_basis_fitted, evaluate_offset
 from .solvers import BOUNDARY, INFEASIBLE_START, LINESEARCH, MAXIT, NONFINITE, OK, SINGULAR
 from .utils import as_2d
 
@@ -151,16 +152,24 @@ class GRRGeneralLink:
         Bregman generator; uses ``g``, ``grad``, ``grad2``, ``grad3``,
         ``alpha_domain`` and ``boundary_mask``.
     link, dlink, d2link:
-        ``link(X, eta)`` returns ``alpha`` row-wise for the index
-        ``eta = phi(X)' beta``; ``dlink`` and ``d2link`` are its first and second
-        derivatives in ``eta`` (both are needed for the analytic Hessian).
+        ``link(X, v)`` returns ``alpha`` row-wise for the index
+        ``v = v_ref(X) + phi(X)' beta``; ``dlink`` and ``d2link`` are its first
+        and second derivatives in ``v`` (both are needed for the analytic
+        Hessian).
+    index_offset:
+        Fixed index offset ``v_ref`` (``None``, a constant, or a callable
+        ``X -> (n,)``; registration §1.3 A-1: ``v_ref = link^{-1}(alpha_ref)``
+        per sign component, e.g. ``v_ref = 1`` for I-UKLlin). Coefficients are
+        deviations from it: ``beta = 0`` gives ``alpha_ref``, and the penalty
+        acts on ``beta``. It is evaluated, unchanged, at the fitting rows, at
+        the counterfactual rows evaluated by ``m``, and at prediction rows.
     basis, functional:
         Regressors ``phi`` and the linear functional ``m``.
     penalty, lam:
         ``None`` or ``"l2"`` (``lam/2 ||beta||^2``).
     boundary_tol:
         Distance to the domain boundary below which the status is
-        ``"boundary"`` (never for SQ).
+        ``"uncertified_numerical_boundary"`` (never for SQ).
     """
 
     def __init__(
@@ -175,6 +184,7 @@ class GRRGeneralLink:
         penalty: str | None = None,
         lam: float = 0.0,
         boundary_tol: float = 1e-8,
+        index_offset: OffsetSpec = None,
     ):
         if penalty not in (None, "l2"):
             raise ValueError("GRRGeneralLink supports penalty=None or 'l2'.")
@@ -188,6 +198,7 @@ class GRRGeneralLink:
         self.functional = functional
         self.lam = 0.0 if penalty is None else float(lam)
         self.boundary_tol = float(boundary_tol)
+        self.index_offset = index_offset
         self.beta_: NDArray[np.float64] | None = None
         self.fit_result_: GeneralLinkFitResult | None = None
 
@@ -195,7 +206,7 @@ class GRRGeneralLink:
     # Pointwise pieces
     # ------------------------------------------------------------------
     def _alpha_at(self, X: NDArray[np.float64], beta: NDArray[np.float64]):
-        eta = np.asarray(self.basis(X), dtype=float) @ beta
+        eta = evaluate_offset(self.index_offset, X) + np.asarray(self.basis(X), dtype=float) @ beta
         alpha = np.asarray(self.link(X, eta), dtype=float).reshape(-1)
         return eta, alpha
 
@@ -451,10 +462,50 @@ class GRRGeneralLink:
         self.fit_result_ = res
         return res
 
-    def predict_alpha(self, X: ArrayLike) -> NDArray[np.float64]:
-        """``alpha(x) = link(x, phi(x)' beta)``; raises if not fitted successfully."""
+    def classify(
+        self, X: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.bool_], NDArray[np.bool_]]:
+        """``(alpha, outside, nonfinite)`` of the fitted representer at ``X``.
+
+        ``outside``: a finite value outside the open domain of ``g`` or on the
+        wrong branch; ``nonfinite``: a non-finite link value. ``alpha`` is NaN on
+        both.
+        """
 
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
-        _, a = self._alpha_at(as_2d(X), self.beta_)
-        return a
+        X_ = as_2d(X)
+        with np.errstate(over="ignore", invalid="ignore"):
+            _, a = self._alpha_at(X_, self.beta_)
+        nonfinite = ~np.isfinite(a)
+        outside = np.zeros(a.shape[0], dtype=bool)
+        fin = ~nonfinite
+        if np.any(fin):
+            outside[fin] = ~np.asarray(self.generator.alpha_domain(X_[fin], a[fin]), bool)
+        alpha = np.where(outside | nonfinite, np.nan, a)
+        return alpha, outside, nonfinite
+
+    def domain_mask(self, X: ArrayLike) -> NDArray[np.bool_]:
+        """Rows at which the fitted representer is finite and in the domain of ``g``."""
+
+        _, outside, nonfinite = self.classify(X)
+        return ~(outside | nonfinite)
+
+    def predict_alpha(self, X: ArrayLike, *, out_of_domain: str = "raise") -> NDArray[np.float64]:
+        """``alpha(x) = link(x, v_ref(x) + phi(x)' beta)``, validated.
+
+        ``out_of_domain="raise"`` (default) raises :class:`DomainError` when a
+        row is outside the domain of ``g`` (including the wrong sign branch) or
+        non-finite; ``"nan"`` returns NaN there. Raises if not fitted
+        successfully.
+        """
+
+        if out_of_domain not in {"raise", "nan"}:
+            raise ValueError("out_of_domain must be 'raise' or 'nan'")
+        alpha, outside, nonfinite = self.classify(X)
+        if out_of_domain == "raise" and (np.any(outside) or np.any(nonfinite)):
+            raise DomainError(
+                f"{int(np.sum(outside))}/{alpha.shape[0]} row(s) are outside the domain of "
+                f"generator '{self.generator.name}' and {int(np.sum(nonfinite))} are non-finite."
+            )
+        return alpha

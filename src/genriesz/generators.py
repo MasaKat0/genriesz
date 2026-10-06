@@ -534,8 +534,8 @@ class BregmanGenerator:
         """Mask of rows numerically at the boundary of the domain of ``g``.
 
         A fit whose final iterate has any such row is reported with status
-        ``"boundary"`` rather than ``"ok"``. The generic implementation knows no
-        boundary (as for SQ, whose domain is the whole real line).
+        ``"uncertified_numerical_boundary"`` rather than ``"ok"``. The generic
+        implementation knows no boundary (as for SQ, whose domain is the whole real line).
         """
 
         X_ = as_2d(X)
@@ -555,6 +555,17 @@ class BregmanGenerator:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return np.full(a.shape[0], np.inf)
+
+    def dual_margin(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        """Distance of ``v`` to the finite end of the range of ``g'`` on its branch.
+
+        ``+inf`` when the range is unbounded on the relevant side. Used with
+        :meth:`boundary_margin` by the fraction-to-the-boundary rule.
+        """
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.full(v_.shape[0], np.inf)
 
     def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         """Third derivative of ``g`` in ``alpha`` (central differences of ``grad2``).
@@ -801,7 +812,7 @@ class BPGenerator(BregmanGenerator):
 
     The derivative of ``g`` stays bounded (``-> -k``) as ``|alpha| -> C``, so a
     fitted representer can approach the boundary at a finite dual coordinate;
-    the solvers report this as status ``"boundary"``.
+    the solvers report this as status ``"uncertified_numerical_boundary"``.
 
     As with UKL, ``branch_fn`` can be supplied to select the sign.
 
@@ -918,6 +929,11 @@ class BPGenerator(BregmanGenerator):
         om = self.omega
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.sign(a) * (1.0 + om) * (om - 1.0) * np.power(t, om - 2.0)
+
+    def dual_margin(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return self._k + self._sign(X_, v_) * v_
 
     def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
@@ -1198,6 +1214,11 @@ class BKLGenerator(BregmanGenerator):
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return _bkl_grad3_exact(a, self.C)
+
+    def dual_margin(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return -self._branch_sign(X_, v_) * v_
 
     def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)

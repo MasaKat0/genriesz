@@ -373,32 +373,55 @@ def test_bkl_without_offset_is_infeasible_start_and_with_offset_fits():
     assert r.status == "ok"
 
 
-@pytest.mark.parametrize("n", [1000, 4000])
-@pytest.mark.parametrize("s", [0.5, 1.25])
-def test_bkl_with_positive_c_fits_the_probe_design_without_domain_errors(n, s):
-    """The registration probe found BKL(C=1) failing with domain_error in every case."""
+def _include_cols(X_):
+    X_ = np.atleast_2d(X_)
+    d = X_[:, [0]]
+    z = X_[:, 1:]
+    F = np.concatenate([np.ones((len(X_), 1)), z, z[:, [1]] ** 2 - 1.0], axis=1)
+    return np.concatenate([d * F, (1 - d) * F], axis=1)
 
-    X, _ = _probe_ate(n, s, seed=1)
 
-    def cols(X_):
-        X_ = np.atleast_2d(X_)
-        d = X_[:, [0]]
-        z = X_[:, 1:]
-        F = np.concatenate([np.ones((len(X_), 1)), z, z[:, [1]] ** 2 - 1.0], axis=1)
-        return np.concatenate([d * F, (1 - d) * F], axis=1)
-
+def _bkl_include_model():
     gen = BKLGenerator(C=1.0, branch_fn=_treated)
     off = offset_from_alpha(gen, lambda X_: np.where(X_[:, 0] == 1.0, 2.0, -2.0))
-    model = GRRGLM(
-        basis=CallableBasis(cols), generator=gen, functional=ATEFunctional(0),
+    return GRRGLM(
+        basis=CallableBasis(_include_cols), generator=gen, functional=ATEFunctional(0),
         penalty=None, offset=off,
     )
+
+
+@pytest.mark.parametrize("n", [1000, 4000])
+def test_bkl_with_positive_c_fits_the_probe_design_without_domain_errors(n):
+    """The registration probe found BKL(C=1) failing with domain_error in every case."""
+
+    X, _ = _probe_ate(n, 0.5, seed=1)
+    model = _bkl_include_model()
     r = model.fit(X)
     assert r.status == "ok", r.message
-    M = ATEFunctional(0).m_basis_matrix(X, CallableBasis(cols))
+    M = ATEFunctional(0).m_basis_matrix(X, CallableBasis(_include_cols))
     scale = max(1.0, float(np.max(np.abs(M.mean(axis=0)))))
     assert r.kkt_residual <= 1e-10 * scale
     assert r.max_abs_imbalance <= 1e-10 * scale
+    # Every counterfactual row evaluated by m is inside the domain at the solution.
+    cf = ATEFunctional(0).evaluation_points(X, model.basis)
+    assert np.all(model.domain_mask(cf))
+
+
+@pytest.mark.parametrize("n", [1000, 4000])
+def test_bkl_probe_with_counterfactual_rows_outside_the_domain_is_not_ok(n):
+    """Review regression (E-12 probe, n=1000, s=1.25, Include): the unconstrained
+    minimizer over the fitting rows puts counterfactual rows outside the BKL
+    domain. The solver must not return "ok" there."""
+
+    X, _ = _probe_ate(n, 1.25, seed=1)
+    model = _bkl_include_model()
+    r = model.fit(X)
+    assert r.status == "domain_prediction", r.message
+    assert model.beta_ is None
+    # The last iterate is still feasible at every counterfactual row.
+    model.beta_ = r.beta
+    cf = ATEFunctional(0).evaluation_points(X, model.basis)
+    assert np.all(model.domain_mask(cf))
 
 
 def test_newton_reports_maxit_and_linesearch():
@@ -447,26 +470,44 @@ def test_prediction_outside_the_bp_domain_raises_or_returns_nan():
 # 7. No silent clipping
 # ---------------------------------------------------------------------------
 def test_built_in_links_are_exact_by_default_and_clip_only_on_request():
+    # C = 0 and abs=0: the tiny values are compared relatively, not absorbed by
+    # an absolute tolerance (with C = 1, 1 + exp(-40) == 1 in float64).
     X = np.ones((1, 1))
-    ukl = UKLGenerator(C=1.0, branch_fn=_pos)
-    assert ukl.inv_grad(X, np.array([-40.0]))[0] - 1.0 == pytest.approx(np.exp(-40.0), rel=1e-12)
-    assert UKLGenerator(C=1.0, branch_fn=_pos, legacy_clip=True).inv_grad(
+    ukl = UKLGenerator(C=0.0, branch_fn=_pos)
+    assert ukl.inv_grad(X, np.array([-40.0]))[0] == pytest.approx(np.exp(-40.0), rel=1e-12, abs=0)
+    assert UKLGenerator(C=0.0, branch_fn=_pos, legacy_clip=True).inv_grad(
         X, np.array([-40.0])
-    )[0] - 1.0 == pytest.approx(1e-12)
-    bp = BPGenerator(C=1.0, omega=0.5, branch_fn=_pos)  # k = 3
+    )[0] == pytest.approx(1e-12, rel=1e-12, abs=0)
+    bp = BPGenerator(C=0.0, omega=0.5, branch_fn=_pos)  # k = 3
     with pytest.raises(DomainError):
         bp.inv_grad(X, np.array([-3.5]))
-    legacy = BPGenerator(C=1.0, omega=0.5, branch_fn=_pos, legacy_clip=True)
-    assert legacy.inv_grad(X, np.array([-3.5]))[0] == pytest.approx(1.0 + 1e-12)
+    legacy = BPGenerator(C=0.0, omega=0.5, branch_fn=_pos, legacy_clip=True)
+    # The legacy clip w >= 1e-6 gives |alpha| = (1e-6)^(1/omega) = 1e-12.
+    assert legacy.inv_grad(X, np.array([-3.5]))[0] == pytest.approx(1e-12, rel=1e-12, abs=0)
     pu = PUGenerator(C=1.0, branch_fn=_pos)
-    assert pu.inv_grad(X, np.array([-30.0]))[0] == pytest.approx(expit(-30.0), rel=1e-12)
-    assert np.isnan(ukl.g(X, np.array([0.5]))[0])  # |alpha| < C is outside the domain
+    assert pu.inv_grad(X, np.array([-30.0]))[0] == pytest.approx(
+        expit(-30.0), rel=1e-12, abs=0
+    )
+    assert np.isnan(UKLGenerator(C=1.0, branch_fn=_pos).g(X, np.array([0.5]))[0])
+
+
+def test_ukl_underflow_to_c_is_a_domain_failure_not_a_valid_prediction():
+    """exp(u) underflows to 0 for u < -745: alpha = C exactly, outside |alpha| > C."""
+
+    from genriesz.glm import classify_predictions
+
+    gen = UKLGenerator(C=1.0, branch_fn=_pos)
+    X = np.ones((3, 1))
+    alpha, outside, nonfinite = classify_predictions(gen, X, np.array([-800.0, 0.0, 800.0]))
+    assert list(outside) == [True, False, False]
+    assert list(nonfinite) == [False, False, True]
+    assert np.isnan(alpha[0]) and np.isnan(alpha[2]) and alpha[1] == 2.0
 
 
 def test_bp_no_longer_clips_silently_on_the_probe_design():
     """Probe: legacy BP(C=1) 'converged' with 25-31% of rows clipped (weak overlap).
 
-    The strict solver either reaches an interior KKT point or says "boundary";
+    The strict solver either reaches an interior KKT point or says "uncertified_numerical_boundary";
     it never reports success with a clipped link.
     """
 
@@ -496,7 +537,7 @@ def test_bp_no_longer_clips_silently_on_the_probe_design():
         functional=ATEFunctional(0),
         penalty=None,
     ).fit(X)
-    assert strict.status == "boundary"
+    assert strict.status == "uncertified_numerical_boundary"
     assert not strict.success and strict.n_boundary > 0
 
 
@@ -504,7 +545,7 @@ def test_pr4a_bp_example_reports_boundary_not_success():
     """PR-4a §8 [S2] remark: BP(omega=1, C=0), n=2, phi=(1,-1), b=3/2, lambda=0.
 
     On B_dom = (-2, 2) the objective beta^2/4 + 1 - 3 beta/2 decreases toward the
-    boundary, so no GRR minimizer exists. The solver must say "boundary".
+    boundary, so no GRR minimizer exists. The solver must say "uncertified_numerical_boundary".
     """
 
     gen = BPGenerator(C=0.0, omega=1.0, branch_fn=_pos)
@@ -513,11 +554,11 @@ def test_pr4a_bp_example_reports_boundary_not_success():
         generator=gen, X=X, Phi=X.copy(), offset=np.zeros(2), target=np.array([1.5])
     )
     r = newton_solve(problem, beta0=np.zeros(1))
-    assert r.status == "boundary"
+    assert r.status == "uncertified_numerical_boundary"
     assert 2.0 - r.beta[0] < 1e-7
     assert np.min(np.abs(r.alpha)) <= 1e-8
     r = fista_solve(problem, beta0=np.zeros(1), lam=0.0)
-    assert r.status == "boundary"
+    assert r.status == "uncertified_numerical_boundary"
 
 
 def test_offset_must_be_a_function_not_an_array():

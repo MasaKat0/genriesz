@@ -59,9 +59,9 @@ from .matching import (
     local_polynomial_nn_lsif_inverse_propensity_weights,
     nn_matching_inverse_propensity_weights,
 )
-from .model_selection import GRRCVConfig, select_grr_hyperparams
+from .model_selection import GRRCVConfig, resolve_riesz_offset, select_grr_hyperparams
 from .results import FunctionalEstimate, SingleEstimate
-from .solvers import DEGENERATE_FUNCTIONAL, DOMAIN_PREDICTION, NONFINITE, OK
+from .solvers import CV_FAILED, DEGENERATE_FUNCTIONAL, DOMAIN_PREDICTION, NONFINITE, OK
 from .utils import (
     Fold,
     as_1d_of_length,
@@ -309,27 +309,34 @@ class _DomainCheckedRepresenter:
     The functional ``m`` evaluates the representer at rows it chooses (the
     evaluation fold, counterfactual rows with the treatment toggled, ...). Every
     such row outside the domain of the fitted representer is counted in
-    ``n_outside`` and returned as NaN, so the caller can report
-    ``"domain_prediction"`` instead of an exception or a clipped value. The
+    ``n_outside`` (outside the domain: wrong branch, outside the range of ``g'``,
+    or a value outside the open domain such as an underflow to ``|alpha| = C``)
+    or ``n_nonfinite`` (overflow), and returned as NaN, so the caller can report
+    ``"domain_prediction"`` or ``"nonfinite"`` instead of an exception or a
+    clipped value. The
     legacy ``solver="lbfgs"`` path is evaluated as before.
     """
 
     def __init__(self, grr: GRRGLM):
         self.grr = grr
         self.n_outside = 0
+        self.n_nonfinite = 0
+
+    def _record(self, X: ArrayLike) -> NDArray[np.float64]:
+        alpha, outside, nonfinite = self.grr.classify(X)
+        self.n_outside += int(np.sum(outside))
+        self.n_nonfinite += int(np.sum(nonfinite))
+        return alpha
 
     def predict(self, X: ArrayLike) -> NDArray[np.float64]:
         if self.grr.solver == "lbfgs":
             return self.grr.predict_alpha(X)
-        out = self.grr.predict_alpha(X, out_of_domain="nan")
-        self.n_outside += int(np.sum(np.isnan(out)))
-        return out
+        return self._record(X)
 
     def derivative(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
         if self.grr.solver == "lbfgs":
             return self.grr.derivative_alpha(X, coordinate)
-        a = self.grr.predict_alpha(X, out_of_domain="nan")
-        self.n_outside += int(np.sum(np.isnan(a)))
+        self._record(X)
         return self.grr.derivative_alpha(X, coordinate, out_of_domain="nan")
 
 
@@ -396,6 +403,7 @@ def grr_functional(
     riesz_lam: float = 1e-3,
     riesz_p_norm: float | None = None,
     riesz_offset: OffsetSpec = None,
+    riesz_alpha_ref: Callable | None = None,
     riesz_solver: str = "auto",
     riesz_l1_radius: float | None = None,
     riesz_max_iter: int | None = None,
@@ -472,6 +480,11 @@ def grr_functional(
         Offset ``u_ref`` of the Riesz model (see :class:`~genriesz.GRRGLM`): a
         fixed function, never fitted on the estimation sample, evaluated at
         training, evaluation and counterfactual rows.
+    riesz_alpha_ref:
+        Alternative to ``riesz_offset``: a fixed reference representer
+        ``X -> alpha_ref(X)``; each fold's generator (also each candidate of
+        ``riesz_generator_grid``) uses the offset ``g'(alpha_ref)``
+        (:func:`~genriesz.offset_from_alpha`).
     riesz_solver:
         ``"auto"`` (default; damped Newton or FISTA, strict statuses),
         ``"newton"``, ``"fista"``, or ``"lbfgs"`` (legacy path of releases
@@ -544,8 +557,8 @@ def grr_functional(
         requested estimate is NaN (no silent averaging over the remaining
         folds) and ``status`` names the first failure:
 
-        - a Riesz solver status (``"boundary"``, ``"maxit"``, ``"linesearch"``,
-          ``"singular"``, ``"infeasible_start"``, ``"nonfinite"``,
+        - a Riesz solver status (``"uncertified_numerical_boundary"``,
+          ``"maxit"``, ``"linesearch"``, ``"singular"``, ``"infeasible_start"``, ``"nonfinite"``,
           ``"degenerate_functional"``, or a legacy status with
           ``riesz_solver="lbfgs"``);
         - ``"degenerate_functional"`` when a training fold of a treatment-type
@@ -554,6 +567,8 @@ def grr_functional(
           an evaluation-fold row or at a counterfactual row that ``m``
           evaluates;
         - ``"nonfinite"`` for a non-finite representer value or score;
+        - ``"cv_failed"`` when the inner Riesz CV could fit and score no
+          candidate on an outer training fold;
         - ``"outcome_<status>"`` when an outcome regression failed.
 
         ``fold_status`` lists ``(fold, stage, status, message)`` for each fold
@@ -824,8 +839,8 @@ def grr_functional(
     # ------------------------------------------------------------------
     m_alpha_unavailable = False
     m_mu_unavailable: set[str] = set()
-    if riesz_cv_active and riesz_offset is not None:
-        raise ValueError("riesz_offset is not supported together with the inner Riesz CV.")
+    if riesz_offset is not None and riesz_alpha_ref is not None:
+        raise ValueError("Pass either riesz_offset or riesz_alpha_ref, not both.")
 
     for fold_id, fold in enumerate(splits):
         if failure is not None:
@@ -858,7 +873,26 @@ def grr_functional(
                     outcome_lam=outcome_lam,
                     max_iter=max_iter,
                     tol=tol,
+                    riesz_offset=riesz_offset,
+                    riesz_alpha_ref=riesz_alpha_ref,
+                    riesz_solver=riesz_solver,
+                    riesz_l1_radius=riesz_l1_radius,
+                    riesz_max_iter=riesz_max_iter,
+                    riesz_tol=riesz_tol,
+                    raise_on_failure=False,
                 )
+                if sel.status != OK:
+                    failure = CV_FAILED
+                    fold_status.append(
+                        (
+                            fold_id,
+                            "riesz_cv",
+                            CV_FAILED,
+                            f"no Riesz candidate could be fitted and scored "
+                            f"({sel.n_candidates} candidate(s))",
+                        )
+                    )
+                    break
                 lam_fold = sel.lam
                 overrides: dict[str, object] = {}
                 if sel.sigma is not None:
@@ -906,7 +940,7 @@ def grr_functional(
                 penalty=riesz_penalty,
                 lam=lam_fold,
                 p_norm=riesz_p_norm,
-                offset=riesz_offset,
+                offset=resolve_riesz_offset(generator_fold, riesz_offset, riesz_alpha_ref),
                 solver=riesz_solver,
                 l1_radius=riesz_l1_radius,
             )
@@ -957,14 +991,19 @@ def grr_functional(
             ):
                 # Construct counterfactual regressors by toggling the treatment column.
                 t_idx = getattr(m, "treatment_index", 0)
-                X1 = X_te.copy()
+                # ATT/DID: m vanishes on control rows, so the counterfactual
+                # representer is needed (and domain-checked) on treated rows only.
+                rows = np.arange(len(test_idx))
+                if not isinstance(m, ATEFunctional):
+                    rows = np.flatnonzero(X_te[:, t_idx] != 0.0)
+                X1 = X_te[rows].copy()
                 X1[:, t_idx] = 1.0
-                X0 = X_te.copy()
+                X0 = X_te[rows].copy()
                 X0[:, t_idx] = 0.0
                 alpha1 = cf_cache.setdefault("alpha1", np.zeros(n, dtype=float))
                 alpha0 = cf_cache.setdefault("alpha0", np.zeros(n, dtype=float))
-                alpha1[test_idx] = rep.predict(X1)
-                alpha0[test_idx] = rep.predict(X0)
+                alpha1[test_idx[rows]] = rep.predict(X1)
+                alpha0[test_idx[rows]] = rep.predict(X0)
 
             if rep.n_outside > 0:
                 failure = DOMAIN_PREDICTION
@@ -978,7 +1017,7 @@ def grr_functional(
                     )
                 )
                 break
-            if not np.all(np.isfinite(alpha_te)) or (
+            if rep.n_nonfinite > 0 or not np.all(np.isfinite(alpha_te)) or (
                 m_alpha_te is not None and not np.all(np.isfinite(m_alpha_te))
             ):
                 failure = NONFINITE
@@ -1567,6 +1606,65 @@ def grr_functional(
         diagnostics=diagnostics,
         status=OK,
         fold_status=tuple(fold_status),
+    )
+
+
+# ----------------------------------------------------------------------
+# RW_full (registration §1.4)
+# ----------------------------------------------------------------------
+
+def rw_full_inference(
+    *,
+    grr: GRRGLM,
+    X: ArrayLike,
+    Y: ArrayLike,
+    alpha: float = 0.05,
+    null: float = 0.0,
+) -> SingleEstimate:
+    """In-sample Riesz weighting with the registered influence-function SE.
+
+    ``grr`` must be a :class:`GRRGLM` fitted successfully on the full sample
+    ``X``. The estimate is ``theta = P_n alpha_hat Y``. The SE is the sample SD
+    of
+
+        psi_i = m(W_i, gamma_hat) + alpha_hat(X_i) (Y_i - gamma_hat(X_i)) - theta,
+
+    divided by ``sqrt(n)``, where ``gamma_hat`` is OLS on the same span (the
+    fitted Riesz basis ``grr.basis``) on the full sample (registration §1.4,
+    RW_full). For ATT/DID functionals with ``pi_is_estimated=True`` the
+    influence function gains ``-(theta/pi)(D - pi)``, as in
+    :func:`grr_functional`.
+
+    This differs from ``grr_functional(..., estimators=("rw",))``, whose RW SE
+    uses ``alpha_hat * Y - theta`` with cross-fitted ``alpha_hat``. A representer
+    value outside the domain at a sample row or at a counterfactual row raises
+    :class:`~genriesz.DomainError`.
+    """
+
+    if grr.beta_ is None:
+        raise RuntimeError("grr is not fitted successfully.")
+    X_ = as_2d(X)
+    n = X_.shape[0]
+    y_ = as_1d_of_length(Y, n=n, name="Y")
+    m = grr.functional
+    alpha_hat = grr.predict_alpha(X_)
+    # The functional's counterfactual rows must be in the domain too.
+    m.m_from_function(X_, predict=grr.predict_alpha, derivative=grr.derivative_alpha)
+    ols = OutcomeGLM(basis=grr.basis, link="identity", penalty="l2", lam=0.0)
+    ols.fit(X_, y_)
+    gamma = ols.predict(X_)
+    m_gamma = np.asarray(
+        m.m_from_function(X_, predict=ols.predict, derivative=ols.derivative), dtype=float
+    )
+    theta = float(np.mean(alpha_hat * y_))
+    psi = m_gamma + alpha_hat * (y_ - gamma) - theta
+    if isinstance(m, (ATTFunctional, DIDFunctional)) and bool(m.pi_is_estimated):
+        D = X_[:, m.treatment_index].astype(float)
+        psi = psi - (theta / float(m.pi)) * (D - float(m.pi))
+    se, lo, hi, p = se_ci_pvalue(theta, psi, alpha=alpha, null=null)
+    return SingleEstimate(
+        name="RW_full", estimate=theta, se=float(se), ci_low=float(lo), ci_high=float(hi),
+        p_value=float(p),
     )
 
 

@@ -128,7 +128,7 @@ def test_fit_density_ratio_reports_route():
         X_num, X_den, generator="bkl", n_centers=20, sigma=1.0, lam=1e-2,
         offset=float(np.log(1.0 / 3.0)),
     )
-    assert res_c1.status == "boundary" and not res_c1.success
+    assert res_c1.status == "uncertified_numerical_boundary" and not res_c1.success
 
 
 def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():

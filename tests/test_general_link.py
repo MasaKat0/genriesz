@@ -88,18 +88,22 @@ PAIRS = {
 }
 
 
-def _model(name):
+# Registered index offsets (§1.3 A-4): v_ref = link^{-1}(alpha_ref) with |alpha_ref| = 2,
+# i.e. 0 for the exponential link and 1 for the linear link s(1 + v).
+V_REF = {"I-SQexp": 0.0, "I-BKLexp": 0.0, "I-UKLlin": 1.0, "C-UKL": 0.0}
+
+
+def _model(name, *, index_offset="registered"):
     make_gen, link, dlink, d2link = PAIRS[name]
+    off = V_REF[name] if index_offset == "registered" else index_offset
     return GRRGeneralLink(
-        make_gen(), link, dlink, d2link, basis=CallableBasis(_cols), functional=ATEFunctional(0)
+        make_gen(), link, dlink, d2link, basis=CallableBasis(_cols), functional=ATEFunctional(0),
+        index_offset=off,
     )
 
 
 def _beta_inside(name: str) -> np.ndarray:
-    beta = np.zeros(8)
-    if name == "I-UKLlin":
-        beta[[0, 4]] = 0.5  # alpha = s * 1.5: inside |alpha| > 1
-    return beta
+    return np.zeros(8)
 
 
 @pytest.mark.parametrize("name", list(PAIRS))
@@ -113,12 +117,12 @@ def test_gradient_is_the_tangent_imbalance_and_matches_finite_differences(name):
     # prop:arbitrary_pair_foc: Delta(alpha, psi_j), psi_j = g''(alpha) link'(eta) phi_j.
     gen = model.generator
     Phi = _cols(X)
-    eta = Phi @ beta
+    eta = V_REF[name] + Phi @ beta
     alpha = model.link(X, eta)
 
     def psi_basis(Z):
         Z = np.atleast_2d(Z)
-        e = _cols(Z) @ beta
+        e = V_REF[name] + _cols(Z) @ beta
         a = model.link(Z, e)
         return (gen.grad2(Z, a) * model.dlink(Z, e))[:, None] * _cols(Z)
 
@@ -167,7 +171,9 @@ def test_incompatible_pair_balances_tangents_but_not_regressors(name):
     assert r.tangent_imbalance <= 1e-10
     assert r.hessian_min_eig > 0.0
     assert r.regressor_imbalance > 1e-3
-    assert np.allclose(model.predict_alpha(X[:5]), model.link(X[:5], _cols(X[:5]) @ r.beta))
+    assert np.allclose(
+        model.predict_alpha(X[:5]), model.link(X[:5], V_REF[name] + _cols(X[:5]) @ r.beta)
+    )
 
 
 def test_failures_are_statuses_not_exceptions_or_warnings():
@@ -180,18 +186,46 @@ def test_failures_are_statuses_not_exceptions_or_warnings():
         warnings.simplefilter("error")  # no floating-point warning may escape
         r_lin = _model("I-UKLlin").fit(X, beta0=_beta_inside("I-UKLlin"))
         r_sq = _model("I-SQexp").fit(X)
-    assert r_lin.status == "boundary" and r_lin.n_boundary > 0
+    assert r_lin.status == "uncertified_numerical_boundary" and r_lin.n_boundary > 0
     assert r_sq.status in {"linesearch", "nonfinite", "maxit"}
     assert not r_sq.success
 
 
-def test_i_ukllin_start_on_the_boundary_is_infeasible():
+def test_i_ukllin_registered_index_offset_gives_the_reference_at_beta_zero():
+    """v_ref = 1: beta = 0 is alpha_ref = s * 2, inside |alpha| > 1."""
+
     X = _dgp13(300, seed=4)
     model = _model("I-UKLlin")
-    r = model.fit(X)  # beta = 0 gives |alpha| = 1 = C: not in the open domain
+    assert model.objective(X, np.zeros(8)) == model.objective(X, np.zeros(8))  # finite
+    model.beta_ = np.zeros(8)
+    assert np.allclose(model.predict_alpha(X), 2.0 * (2.0 * X[:, 0] - 1.0))
+    # The offset is part of the index everywhere: also at the counterfactual rows.
+    X1 = X.copy()
+    X1[:, 0] = 1.0 - X1[:, 0]
+    assert np.allclose(model.predict_alpha(X1), 2.0 * (2.0 * X1[:, 0] - 1.0))
+    # Without the offset, beta = 0 gives |alpha| = 1 = C: not in the open domain.
+    bare = _model("I-UKLlin", index_offset=None)
+    r = bare.fit(X)
     assert r.status == "infeasible_start"
     with pytest.raises(RuntimeError, match="not fit"):
-        model.predict_alpha(X)
+        bare.predict_alpha(X)
+
+
+def test_prediction_validates_branch_and_domain():
+    """A value on the wrong branch (or inside |alpha| <= C) is a domain failure."""
+
+    from genriesz import DomainError
+
+    X = _dgp13(300, seed=5)
+    model = _model("I-UKLlin")
+    model.beta_ = np.zeros(8)
+    model.beta_[0] = -10.0  # treated arm: v = 1 - 10 < 0 -> alpha = 1 + v < 0 on the + branch
+    treated = X[X[:, 0] == 1.0][:3]
+    alpha, outside, nonfinite = model.classify(treated)
+    assert np.all(outside) and not np.any(nonfinite) and np.all(np.isnan(alpha))
+    with pytest.raises(DomainError):
+        model.predict_alpha(treated)
+    assert np.all(np.isnan(model.predict_alpha(treated, out_of_domain="nan")))
 
 
 def test_rejects_unsupported_penalty():
