@@ -28,6 +28,7 @@ from .basis import (
     RBFRandomFourierBasis,
     TreatmentInteractionBasis,
 )
+from .certificates import WeightProgramCertificate, weight_program_certificate
 
 # Density ratio and covariate shift
 from .density_ratio import DensityRatioResult, fit_density_ratio
@@ -93,6 +94,8 @@ __all__ = [
     "grr_did",
     "grr_ame",
     "GRRGLM",
+    "weight_program_certificate",
+    "WeightProgramCertificate",
     "GRRGeneralLink",
     "GeneralLinkFitResult",
     "OutcomeGLM",

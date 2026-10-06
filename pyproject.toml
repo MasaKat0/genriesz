@@ -45,6 +45,11 @@ torch = [
   "torch>=2.0",
 ]
 
+# genriesz.certificates (weight-program check); a scipy backend is used without it
+certificates = [
+  "cvxpy>=1.4",
+]
+
 scorematchingriesz = [
   "torch>=2.0",
 ]
