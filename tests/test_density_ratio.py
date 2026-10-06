@@ -91,6 +91,7 @@ def test_fit_density_ratio_bkl_can_return_values_below_one():
         random_state=3,
         max_iter=120,
         tol=1e-6,
+        solver="legacy",  # the logistic-classification route
     )
 
     vals = res.predict_ratio(np.array([[1.5], [2.0]]), clip_nonnegative=True)
@@ -108,9 +109,26 @@ def test_fit_density_ratio_reports_route():
     # BKL is fit as a probabilistic classifier; the result must say so because
     # predictions then bypass generator.inv_grad entirely.
     res_bkl = fit_density_ratio(
-        X_num, X_den, generator="bkl", n_centers=20, sigma=1.0, lam=1e-2
+        X_num, X_den, generator="bkl", n_centers=20, sigma=1.0, lam=1e-2, solver="legacy"
     )
     assert res_bkl.route == "logistic_classification"
+    # The strict default solves the Bregman objective with the BKL link instead.
+    # BKL needs |alpha| > C and an offset with u_ref < 0: alpha_ref = 1 here.
+    from genriesz import BKLGenerator
+
+    C = 0.1
+    res_strict = fit_density_ratio(
+        X_num, X_den, generator=BKLGenerator(C=C, branch_fn=lambda x: 1),
+        n_centers=20, sigma=1.0, lam=1e-2, offset=float(np.log((1.0 - C) / (1.0 + C))),
+    )
+    assert res_strict.route == "bregman" and res_strict.status == "ok"
+    # By name, BKL has C = 1 and cannot represent ratios below 1: the strict fit
+    # says so instead of clipping.
+    res_c1 = fit_density_ratio(
+        X_num, X_den, generator="bkl", n_centers=20, sigma=1.0, lam=1e-2,
+        offset=float(np.log(1.0 / 3.0)),
+    )
+    assert res_c1.status == "boundary" and not res_c1.success
 
 
 def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():
@@ -215,7 +233,7 @@ def test_cv_excludes_a_linalgerror_candidate_instead_of_aborting(monkeypatch, re
         lam_grid=[1e-3, 1e-1],  # the 1e-3 candidate raises LinAlgError
         cv=True,
         folds=3,
-        random_state=0,
+        random_state=0,        solver="legacy",
     )
 
     # The surviving candidate is selected and the failures are reported, not raised.
@@ -260,7 +278,7 @@ def test_cv_excludes_a_candidate_that_fails_while_being_scored(monkeypatch, recw
         lam_grid=[1e-3, 1e-1],
         cv=True,
         folds=3,
-        random_state=0,
+        random_state=0,        solver="legacy",
     )
 
     assert res.lam == 1e-1  # the candidate that failed to score was excluded

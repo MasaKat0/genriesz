@@ -220,7 +220,9 @@ def _shifted_samples(n: int = 250, seed: int = 5):
 
 def test_bkl_density_ratio_takes_the_logistic_classification_route():
     X_num, X_den = _shifted_samples()
-    res = fit_density_ratio(X_num, X_den, generator="bkl", sigma=1.0, n_centers=40, lam=1e-2)
+    res = fit_density_ratio(
+        X_num, X_den, generator="bkl", sigma=1.0, n_centers=40, lam=1e-2, solver="legacy"
+    )
 
     assert res.route == "logistic_classification"
     assert res.class_prior_ratio is not None
@@ -236,7 +238,9 @@ def test_logistic_route_never_calls_the_generator_link():
     """The docstring promises `generator.inv_grad` is unused on this route."""
 
     X_num, X_den = _shifted_samples(seed=6)
-    res = fit_density_ratio(X_num, X_den, generator="bkl", sigma=1.0, n_centers=40, lam=1e-2)
+    res = fit_density_ratio(
+        X_num, X_den, generator="bkl", sigma=1.0, n_centers=40, lam=1e-2, solver="legacy"
+    )
     assert isinstance(res.generator, BKLGenerator)
 
     def _boom(*_args, **_kwargs):
@@ -277,7 +281,9 @@ def test_route_and_class_prior_ratio_agree():
 
     X_num, X_den = _shifted_samples(seed=9)
     for spec in ("sq", "ukl", "bp", "bkl"):
-        res = fit_density_ratio(X_num, X_den, generator=spec, sigma=1.0, n_centers=40, lam=1e-2)
+        res = fit_density_ratio(
+            X_num, X_den, generator=spec, sigma=1.0, n_centers=40, lam=1e-2, solver="legacy"
+        )
         is_classifier = res.route == "logistic_classification"
         assert is_classifier == (res.class_prior_ratio is not None)
         assert is_classifier == (spec == "bkl")

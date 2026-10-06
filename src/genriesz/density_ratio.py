@@ -30,11 +30,23 @@ numerator/denominator samples.
 By default we use a Gaussian-kernel RKHS basis. You can optionally select the
 RBF bandwidth ``sigma`` and regularization ``lam`` via cross validation.
 
+With an offset ``u_ref`` (a fixed function, never fitted on the samples used
+here) the dual coordinate is ``v(x) = u_ref(x) + phi(x)^T beta``; the offset adds
+only a constant to the objective.
+
 Notes
 -----
-- For general generators we solve the convex problem numerically (L-BFGS-B).
-- For the squared generator (``SquaredGenerator`` / ``generator='sq'``) with an
-  L2 penalty, the objective is quadratic and we use a closed-form ridge solve.
+- By default (``solver="auto"``) the objective -- the empirical
+  ``eq:cs_bd_empirical`` of the paper -- is solved for every generator by the
+  strict solvers of :mod:`genriesz.solvers` (damped Newton, or FISTA for
+  ``l1``). They keep every iterate in the generator's domain and return an
+  explicit ``status`` on the result instead of raising; nothing is clipped.
+- ``solver="legacy"`` keeps the three routes of releases <= 0.2.6: a closed-form
+  ridge solve for SQ, a logistic classifier for BKL
+  (``route="logistic_classification"``), and L-BFGS-B otherwise. They raise on
+  failure.
+- ``predict_ratio`` no longer clips at zero by default; ``clip_nonnegative=True``
+  restores the old behavior on request.
 
 """
 
@@ -55,8 +67,12 @@ from .generators import (
     SquaredGenerator,
     coerce_generator,
 )
-from .glm import DomainError, _branch_cache_of, _Penalty
+from .glm import DomainError, OffsetSpec, _branch_cache_of, _Penalty, evaluate_offset
+from .solvers import NONFINITE, OK, DualProblem, SolverResult, fista_solve, newton_solve
 from .utils import as_2d, kfold_splits, sigmoid, solve_stationarity
+
+#: Accepted values of ``fit_density_ratio(solver=...)``.
+DENSITY_RATIO_SOLVERS = ("auto", "newton", "fista", "legacy")
 
 
 def _positive_branch(_x: NDArray[np.float64]) -> int:
@@ -108,6 +124,19 @@ class DensityRatioResult:
         when the BKL generator was requested: the model is then fit as a
         probabilistic classifier and predictions use
         ``class_prior_ratio * exp(v)`` -- ``generator.inv_grad`` is NOT used.
+        The logistic route exists only with ``solver="legacy"``.
+    status:
+        ``"ok"`` for a successful strict fit (always ``"ok"`` for the legacy
+        routes, which raise on failure). Any other value is a solver status
+        (see :data:`genriesz.solvers.STATUSES`) or ``"cv_failed"``; the result
+        then cannot predict and ``beta`` holds the last iterate.
+    fit:
+        The :class:`~genriesz.solvers.SolverResult` of the strict fit
+        (``None`` for the legacy routes).
+    offset:
+        The offset specification used for ``v``.
+    solver:
+        The solver that produced ``beta``.
     """
 
     basis: Basis
@@ -123,15 +152,51 @@ class DensityRatioResult:
     standardize: bool | None = None
     class_prior_ratio: float | None = None
     route: str = "bregman"
+    status: str = OK
+    fit: SolverResult | None = None
+    offset: OffsetSpec = None
+    solver: str = "legacy"
+
+    @property
+    def success(self) -> bool:
+        return self.status == OK
+
+    def _require_success(self) -> None:
+        if self.status != OK:
+            raise RuntimeError(
+                f"The density-ratio fit failed with status {self.status!r}; it has no "
+                "prediction. Inspect result.fit for the solver diagnostics."
+            )
 
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
-        """Predict the linear score v(x) = phi(x)^T beta."""
+        """Predict the dual coordinate v(x) = u_ref(x) + phi(x)^T beta."""
 
+        self._require_success()
         X_ = as_2d(X, name='X')
         Phi = np.asarray(self.basis(X_), dtype=float)
-        return Phi @ self.beta
+        return evaluate_offset(self.offset, X_) + Phi @ self.beta
 
-    def predict_ratio(self, X: ArrayLike, *, clip_nonnegative: bool = True) -> NDArray[np.float64]:
+    def domain_mask(self, X: ArrayLike) -> NDArray[np.bool_]:
+        """Rows at which the fitted ratio is defined (dual coordinate in the link's range)."""
+
+        X_ = as_2d(X, name='X')
+        v = self.predict_v(X_)
+        if self.class_prior_ratio is not None:
+            return np.isfinite(v)
+        ok = np.asarray(self.generator.link_domain(X_, v), dtype=bool)
+        if np.any(ok):
+            _, a, _ = self.generator.dual_eval(X_[ok], v[ok])
+            idx = np.flatnonzero(ok)
+            ok[idx[~np.isfinite(a)]] = False
+        return ok
+
+    def predict_ratio(
+        self,
+        X: ArrayLike,
+        *,
+        clip_nonnegative: bool = False,
+        out_of_domain: str = "raise",
+    ) -> NDArray[np.float64]:
         """Predict the density ratio r_hat(x).
 
         Parameters
@@ -139,17 +204,34 @@ class DensityRatioResult:
         X:
             Points at which to evaluate the ratio.
         clip_nonnegative:
-            If True, clip predictions at 0. This is often used for squared-loss
-            density ratio estimators.
+            If True, clip predictions at 0 (the default of releases <= 0.2.6,
+            now opt-in). A squared-loss ratio can be negative; clipping it
+            changes the estimator, so it is never done silently.
+        out_of_domain:
+            Strict fits only: ``"raise"`` (default) raises :class:`DomainError`
+            when a row lies outside :meth:`domain_mask`; ``"nan"`` returns NaN
+            there.
         """
 
+        if out_of_domain not in {"raise", "nan"}:
+            raise ValueError("out_of_domain must be 'raise' or 'nan'")
         X_ = as_2d(X, name='X')
         v = self.predict_v(X_)
         if self.class_prior_ratio is not None:
             z = np.clip(v, -700.0, 700.0)
             r = float(self.class_prior_ratio) * np.exp(z)
-        else:
+        elif self.solver == "legacy":
             r = self.generator.inv_grad(X_, v)
+        else:
+            ok = self.domain_mask(X_)
+            if not np.all(ok) and out_of_domain == "raise":
+                raise DomainError(
+                    f"{int(np.sum(~ok))}/{ok.shape[0]} row(s) are outside the domain of the "
+                    f"fitted density ratio (generator '{self.generator.name}')."
+                )
+            r = np.full(v.shape[0], np.nan)
+            if np.any(ok):
+                r[ok] = self.generator.inv_grad(X_[ok], v[ok])
         r = np.asarray(r, dtype=float).reshape(-1)
         if clip_nonnegative:
             r = np.maximum(r, 0.0)
@@ -314,6 +396,69 @@ def _fit_numeric(
     return np.asarray(res.x, dtype=float)
 
 
+def _fit_strict(
+    *,
+    X_num: NDArray[np.float64],
+    X_den: NDArray[np.float64],
+    Phi_num: NDArray[np.float64],
+    Phi_den: NDArray[np.float64],
+    generator: BregmanGenerator,
+    penalty: _Penalty,
+    offset: OffsetSpec,
+    solver: str,
+    l1_radius: float | None,
+    max_iter: int | None,
+    tol: float | None,
+) -> SolverResult:
+    """Strict solve of ``mean_den g*(u_ref + Phi beta) - mean_num(Phi) beta + pen(beta)``.
+
+    This is the empirical ``eq:cs_bd_empirical`` (the denominator sample plays
+    the role of the source sample ``X_i``, the numerator of the target sample).
+    """
+
+    u0 = evaluate_offset(offset, X_den)
+    p = Phi_den.shape[1]
+    beta0 = np.zeros(p, dtype=float)
+    if not np.all(np.isfinite(u0)):
+        return SolverResult(beta=beta0, status=NONFINITE, n_iter=0,
+                            message="the offset is not finite on the denominator sample")
+    problem = DualProblem(
+        generator=generator, X=X_den, Phi=Phi_den, offset=u0, target=Phi_num.mean(axis=0)
+    )
+    lam = 0.0 if penalty.penalty is None else float(penalty.lam)
+    q = None if lam == 0.0 else penalty.p_norm
+    kind = solver
+    if kind == "auto":
+        kind = "fista" if (l1_radius is not None or (q is not None and q < 2.0)) else "newton"
+    with _branch_cache_of(generator):
+        if kind == "newton":
+            if l1_radius is not None or (q is not None and q < 2.0):
+                raise ValueError("solver='newton' needs a smooth penalty and no l1_radius.")
+            scale = max(1.0, float(np.max(np.abs(problem.target)))) if q is None else 1.0
+            return newton_solve(
+                problem,
+                beta0=beta0,
+                lam=lam,
+                q=q,
+                max_iter=500 if max_iter is None else int(max_iter),
+                tol=1e-10 if tol is None else float(tol),
+                tol_scale=scale,
+            )
+        qf = 1.0 if q is None else float(q)
+        if qf >= 2.0:
+            raise ValueError("solver='fista' supports the l1 and l_q (1 < q < 2) penalties.")
+        default_tol = 1e-6 * lam if lam > 0.0 else 1e-10
+        return fista_solve(
+            problem,
+            beta0=beta0,
+            lam=lam,
+            q=qf,
+            radius=l1_radius,
+            max_iter=100_000 if max_iter is None else int(max_iter),
+            tol=default_tol if tol is None else float(tol),
+        )
+
+
 def fit_density_ratio(
     X_num: ArrayLike,
     X_den: ArrayLike,
@@ -343,6 +488,12 @@ def fit_density_ratio(
     max_iter: int = 500,
     tol: float = 1e-8,
     verbose: bool = False,
+    # Strict solver (registration §1.3 A-5)
+    offset: OffsetSpec = None,
+    solver: str = "auto",
+    l1_radius: float | None = None,
+    solver_max_iter: int | None = None,
+    solver_tol: float | None = None,
 ) -> DensityRatioResult:
     """Estimate a density ratio under covariate shift.
 
@@ -367,12 +518,27 @@ def fit_density_ratio(
         If ``cv=True``, choose (sigma, lam) by cross validation.
         This is currently implemented only for the default Gaussian RKHS basis.
     max_iter, tol, verbose:
-        L-BFGS-B controls for the general (non-squared) case.
+        L-BFGS-B controls of the legacy routes (``solver="legacy"``).
+    offset:
+        Offset ``u_ref``: ``None``, a constant, or a callable ``X -> (n,)``. It
+        must be fixed before estimation (not fitted on ``X_num``/``X_den``).
+        BKL needs ``u_ref < 0`` (positive branch), e.g. ``offset=np.log(1/3)``
+        for ``alpha_ref = 2C``.
+    solver:
+        ``"auto"`` (default), ``"newton"``, ``"fista"``: strict solvers with
+        statuses (see the module notes). ``"legacy"``: the routes of releases
+        <= 0.2.6.
+    l1_radius:
+        Optional coefficient restriction ``||beta||_1 <= l1_radius`` (strict).
+    solver_max_iter, solver_tol:
+        Strict-solver limits (``None``: the registered defaults).
 
     Returns
     -------
     DensityRatioResult
-        A fitted model with :meth:`~DensityRatioResult.predict_ratio`.
+        A fitted model with :meth:`~DensityRatioResult.predict_ratio`. For the
+        strict solvers, a failed fit is returned with its ``status`` (and no
+        prediction) instead of raising.
     """
 
     Xn = as_2d(X_num, name='X_num')
@@ -380,6 +546,13 @@ def fit_density_ratio(
 
     if Xn.shape[1] != Xd.shape[1]:
         raise ValueError('X_num and X_den must have the same number of columns')
+
+    solver_ = str(solver).lower()
+    if solver_ not in DENSITY_RATIO_SOLVERS:
+        raise ValueError(f"solver must be one of {DENSITY_RATIO_SOLVERS}. Got {solver!r}.")
+    strict = solver_ != "legacy"
+    if not strict and (offset is not None or l1_radius is not None):
+        raise ValueError("offset and l1_radius require a strict solver (solver != 'legacy').")
 
     # Coerce generator
     gen = _coerce_generator(
@@ -423,12 +596,27 @@ def fit_density_ratio(
         lam_: float,
         *,
         verbose_: bool,
-    ) -> NDArray[np.float64]:
+    ) -> NDArray[np.float64] | SolverResult:
         """Dispatch to the right solver for the (already fitted) basis ``b``."""
 
         Phi_num = np.asarray(b(Xn_fit), dtype=float)
         Phi_den = np.asarray(b(Xd_fit), dtype=float)
         pen_local = _Penalty(penalty, lam=float(lam_), p_norm=p_norm)
+
+        if strict:
+            return _fit_strict(
+                X_num=Xn_fit,
+                X_den=Xd_fit,
+                Phi_num=Phi_num,
+                Phi_den=Phi_den,
+                generator=gen,
+                penalty=pen_local,
+                offset=offset,
+                solver=solver_,
+                l1_radius=l1_radius,
+                max_iter=solver_max_iter,
+                tol=solver_tol,
+            )
 
         # Closed-form only for the squared generator + L2 (or no) penalty.
         if isinstance(gen, SquaredGenerator) and (
@@ -476,7 +664,39 @@ def fit_density_ratio(
         beta_hat = solve_beta(b, Xn, Xd, lam_, verbose_=verbose)
         return b, beta_hat
 
-    route = "logistic_classification" if isinstance(gen, BKLGenerator) else "bregman"
+    route = (
+        "logistic_classification" if (isinstance(gen, BKLGenerator) and not strict) else "bregman"
+    )
+    use_prior = isinstance(gen, BKLGenerator) and not strict
+
+    def _result(
+        b, beta_or_fit, lam_used: float, sig_used: float | None, *, std
+    ) -> DensityRatioResult:
+        if isinstance(beta_or_fit, SolverResult):
+            fit_res: SolverResult | None = beta_or_fit
+            beta_vec = np.asarray(beta_or_fit.beta, dtype=float)
+            status = beta_or_fit.status
+        else:
+            fit_res = None
+            beta_vec = np.asarray(beta_or_fit, dtype=float)
+            status = OK
+        return DensityRatioResult(
+            basis=b,
+            generator=gen,
+            beta=beta_vec,
+            penalty=None if penalty is None else str(penalty),
+            lam=float(lam_used),
+            p_norm=float(_Penalty(penalty, lam=float(lam_used), p_norm=p_norm).p_norm),
+            centers=centers,
+            sigma=sig_used,
+            standardize=std,
+            class_prior_ratio=(float(len(Xd)) / float(len(Xn)) if use_prior else None),
+            route=route,
+            status=status,
+            fit=fit_res,
+            offset=offset,
+            solver=solver_,
+        )
 
     if not cv:
         if sigma_used is None and basis is None:
@@ -484,20 +704,9 @@ def fit_density_ratio(
         b, beta_hat = fit_for_params(
             float(sigma_used) if sigma_used is not None else 1.0, float(lam)
         )
-        return DensityRatioResult(
-            basis=b,
-            generator=gen,
-            beta=np.asarray(beta_hat, dtype=float),
-            penalty=None if penalty is None else str(penalty),
-            lam=float(lam),
-            p_norm=float(pen.p_norm),
-            centers=centers,
-            sigma=sigma_used,
-            standardize=bool(standardize) if basis is None else None,
-            class_prior_ratio=(
-                float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None
-            ),
-            route=route,
+        return _result(
+            b, beta_hat, float(lam), sigma_used,
+            std=bool(standardize) if basis is None else None,
         )
 
     # Cross-validation
@@ -563,6 +772,30 @@ def fit_density_ratio(
                 # explicitly because it derives from ValueError, not from
                 # RuntimeError, so a singular solve would otherwise escape and
                 # kill the whole sweep.
+                if strict:
+                    fit_res = solve_beta(b, Xn[tr_n], Xd[tr_d], lam_, verbose_=False)
+                    assert isinstance(fit_res, SolverResult)
+                    score = float('inf')
+                    if fit_res.status != OK:
+                        n_failed_fits += 1
+                        last_failure = f"status {fit_res.status}: {fit_res.message}"
+                    else:
+                        Xd_te = Xd[te_d]
+                        v_d = evaluate_offset(offset, Xd_te) + np.asarray(
+                            b(Xd_te), dtype=float
+                        ) @ fit_res.beta
+                        v_n = evaluate_offset(offset, Xn[te_n]) + np.asarray(
+                            b(Xn[te_n]), dtype=float
+                        ) @ fit_res.beta
+                        if np.all(gen.link_domain(Xd_te, v_d)):
+                            g_star_v, _, _ = gen.dual_eval(Xd_te, v_d)
+                            score = float(np.mean(g_star_v) - np.mean(v_n))
+                        else:
+                            n_failed_fits += 1
+                            last_failure = "validation rows outside the domain"
+                    scores.append(score if np.isfinite(score) else float('inf'))
+                    continue
+
                 try:
                     beta = solve_beta(b, Xn[tr_n], Xd[tr_d], lam_, verbose_=False)
 
@@ -599,6 +832,23 @@ def fit_density_ratio(
             UserWarning,
             stacklevel=2,
         )
+    if best is None and strict:
+        return DensityRatioResult(
+            basis=basis_obj,
+            generator=gen,
+            beta=np.full(basis_obj.n_features, np.nan),
+            penalty=None if penalty is None else str(penalty),
+            lam=float('nan'),
+            p_norm=float(pen.p_norm),
+            centers=centers,
+            sigma=None,
+            standardize=bool(standardize),
+            route=route,
+            status="cv_failed",
+            fit=None,
+            offset=offset,
+            solver=solver_,
+        )
     if best is None:
         raise RuntimeError(
             "Cross-validation failed to find a finite score "
@@ -607,19 +857,4 @@ def fit_density_ratio(
 
     sig_star, lam_star = best
     b, beta_hat = fit_for_params(sig_star, lam_star)
-
-    return DensityRatioResult(
-        basis=b,
-        generator=gen,
-        beta=np.asarray(beta_hat, dtype=float),
-        penalty=None if penalty is None else str(penalty),
-        lam=float(lam_star),
-        p_norm=float(_Penalty(penalty, lam=float(lam_star), p_norm=p_norm).p_norm),
-        centers=centers,
-        sigma=float(sig_star),
-        standardize=bool(standardize),
-        class_prior_ratio=(
-            float(len(Xd)) / float(len(Xn)) if isinstance(gen, BKLGenerator) else None
-        ),
-        route=route,
-    )
+    return _result(b, beta_hat, float(lam_star), float(sig_star), std=bool(standardize))
