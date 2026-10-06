@@ -42,6 +42,7 @@ from .functionals import (
     DIDFunctional,
     LinearFunctional,
 )
+from .general_link import GeneralLinkFitResult, GRRGeneralLink
 
 # Generators
 from .generators import (
@@ -92,6 +93,8 @@ __all__ = [
     "grr_did",
     "grr_ame",
     "GRRGLM",
+    "GRRGeneralLink",
+    "GeneralLinkFitResult",
     "OutcomeGLM",
     "offset_from_alpha",
     "STATUSES",
