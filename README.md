@@ -287,23 +287,27 @@ The current result object stores aggregate out-of-fold diagnostics when `cross_f
 
 By default (`riesz_solver="auto"`), the Riesz coefficients are fitted by a
 **damped Newton** method (no penalty, ridge, `l_q` with `q >= 2`) or by
-**FISTA** (exact `l1`, optionally over an `l1` ball `riesz_l1_radius`). Both keep
-every iterate inside the generator's domain, never clip, and stop at a
-first-order residual of about `1e-10` where attainable.
+**projected FISTA** (exact `l1`, and any penalty with an `l1` ball
+`riesz_l1_radius`; a ridge term goes into the smooth part). Both keep every
+iterate feasible -- at the fitting rows, at the counterfactual rows that the
+functional evaluates, and (density ratios) at the numerator rows -- never clip,
+and stop at a first-order residual of about `1e-10` where attainable (FISTA
+reports both the registered proximal residual and the subdifferential residual
+with the normal cone of an active ball).
 
 Failures are reported, not raised and not averaged away:
 
 ```python
 res = grr_ate(X=X, Y=Y, basis=basis, generator=gen)
 if not res.success:                 # res.status != "ok"
-    print(res.status)               # e.g. "boundary", "maxit", "domain_prediction"
+    print(res.status)               # e.g. "maxit", "domain_prediction"
     print(res.fold_status)          # (fold, stage, status, message) per fold
     # every res.estimates[...] is NaN in that case
 ```
 
-Statuses: `ok`, `boundary`, `maxit`, `linesearch`, `singular`,
-`infeasible_start`, `nonfinite`, `degenerate_functional`, `domain_prediction`,
-and `outcome_<status>`. Evaluation-fold rows and the counterfactual rows that the
+Statuses: `ok`, `uncertified_numerical_boundary`, `maxit`, `linesearch`,
+`singular`, `infeasible_start`, `nonfinite`, `degenerate_functional`,
+`domain_prediction`, `cv_failed`, and `outcome_<status>`. Evaluation-fold rows and the counterfactual rows that the
 functional evaluates are checked against the domain of the fitted representer.
 
 A fixed **offset** `u_ref` shifts the dual coordinate,
@@ -321,9 +325,15 @@ res = grr_ate(X=X, Y=Y, basis=basis, generator=gen, riesz_offset=offset,
               riesz_penalty=None)
 ```
 
+With a generator grid in the inner CV, pass the generator-free reference
+representer instead, `riesz_alpha_ref=lambda X: ...`; every candidate then uses
+its own offset `g'(alpha_ref)`. The inner CV fits candidates with the same
+solver, offset and constraints as the outer refit.
+
 Further tools: `GRRGLM(offset=..., solver=..., l1_radius=...)` (low level),
-`GRRGeneralLink` (an arbitrary, possibly incompatible link, with the gradient and
-Hessian of the Bregman objective), `weight_program_certificate` (the sample
+`GRRGeneralLink` (an arbitrary, possibly incompatible link with a fixed index
+offset `index_offset`, with the gradient and Hessian of the Bregman objective),
+`rw_full_inference` (in-sample RW with the OLS influence-function SE), `weight_program_certificate` (the sample
 balancing-weight program; its `"uncertified_boundary"` verdict is numerical, not
 a proof of nonexistence; uses `cvxpy` if installed, `pip install
 "genriesz[certificates]"`), and `fold_ids=` for an explicit cross-fitting

@@ -148,13 +148,19 @@ succeeded. Any other value means some fold failed; every estimate is then NaN
    * - Status
      - Meaning
    * - ``"ok"``
-     - First-order criterion met at an interior point (Newton:
+     - First-order criterion met at a feasible point (Newton:
        ``max_j |dF/dbeta_j| <= 1e-10``, scaled by ``max(1, max_j|b_j|)`` without
-       a penalty; FISTA: constrained ``l1`` residual ``<= 1e-6 * lam``, then
-       refined by Newton on the support).
-   * - ``"boundary"``
-     - An iterate reached the boundary of the generator's domain
-       (``|alpha| - C <= 1e-8``; also ``s v >= -1e-12`` for BKL; never for SQ).
+       a penalty; FISTA: the registered proximal residual
+       ``rho = L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` at most
+       ``1e-6 * lam`` for ``l1`` and ``1e-8`` for ridge or ball only, then
+       refined by Newton on the support). ``fit_result.kkt_residual`` reports
+       the subdifferential residual of
+       ``0 in grad f + lam subdiff||beta||_1 + N_B(beta)`` and
+       ``fit_result.prox_residual`` reports ``rho``.
+   * - ``"uncertified_numerical_boundary"``
+     - An iterate reached the boundary of the generator's domain at a fitting
+       row (``|alpha| - C <= 1e-8``; also ``s v >= -1e-12`` for BKL; never for
+       SQ). A numerical finding; it does not establish nonexistence.
    * - ``"maxit"`` / ``"linesearch"``
      - Iteration limit / backtracking budget exhausted.
    * - ``"singular"``
@@ -168,10 +174,33 @@ succeeded. Any other value means some fold failed; every estimate is then NaN
      - The functional vanishes on the training data, or a training fold of a
        treatment-type functional lacks one group.
    * - ``"domain_prediction"``
-     - The fitted representer is undefined at an evaluation-fold row or at a
-       counterfactual row that ``m`` evaluates.
+     - The fitted representer is undefined (wrong branch, outside the open
+       domain, e.g. an exp underflow to ``|alpha| = C``) at an evaluation-fold
+       row or at a counterfactual row that ``m`` evaluates; or, during the
+       fit, such a counterfactual row (or a density-ratio numerator row)
+       reached the domain boundary, which blocks the iterates.
+   * - ``"cv_failed"``
+     - The inner Riesz CV could fit and score no candidate on a training fold.
    * - ``"outcome_<status>"``
      - An outcome regression failed.
+
+Feasibility covers every evaluation point: the fitting rows, the counterfactual
+rows returned by ``functional.evaluation_points`` (both treatment arms for the
+ATE; the treated rows' arms for the ATT/DID) and, for density ratios, the
+numerator rows. Iterates never leave this set, and an ``"ok"`` fit is defined
+on all of it.
+
+**Deviation from the registration (§1.3 A-3).** FISTA's adaptive restart uses
+the gradient-mapping test ``(y - beta+)'(beta+ - beta_k) > 0`` (O'Donoghue and
+Candes, 2015) instead of the registered ``grad f(y)'(beta+ - beta_k) > 0``. They
+coincide without an ``l1`` term; with one, ``grad f`` does not vanish at the
+solution, the registered test fires at almost every step, and FISTA loses its
+acceleration. The restart action is the registered one (``y = beta_k``,
+``t = 1``, step recomputed from ``beta_k``).
+
+**RW_full.** The cross-fitted ``"rw"`` estimate of :func:`genriesz.grr_functional`
+uses ``alpha_hat * Y - theta`` as its score. The registered in-sample RW_full SE
+(OLS on the same span, §1.4) is computed by :func:`genriesz.rw_full_inference`.
 
 A solver status describes the optimization on one sample. It is not evidence
 that the population problem has no solution. For the sample problem,

@@ -9,6 +9,7 @@ Core estimation
 .. autofunction:: genriesz.grr_att
 .. autofunction:: genriesz.grr_did
 .. autofunction:: genriesz.grr_ame
+.. autofunction:: genriesz.rw_full_inference
 
 Functionals
 -----------
@@ -103,7 +104,7 @@ Low-level solvers
 -----------------
 
 .. autoclass:: genriesz.GRRGLM
-   :members: fit, predict_v, predict_alpha, domain_mask, derivative_alpha
+   :members: fit, predict_v, predict_alpha, classify, domain_mask, derivative_alpha
 .. autofunction:: genriesz.offset_from_alpha
 .. autoclass:: genriesz.OutcomeGLM
 
@@ -120,7 +121,7 @@ Arbitrary loss-link pairs
 
 .. autoclass:: genriesz.GRRGeneralLink
    :members: fit, objective, gradient, hessian, tangent_imbalance, regressor_imbalance,
-             predict_alpha
+             predict_alpha, classify, domain_mask
 .. autoclass:: genriesz.GeneralLinkFitResult
 
 Sample weight program
