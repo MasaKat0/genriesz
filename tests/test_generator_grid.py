@@ -39,7 +39,9 @@ def _branch_treated(x: np.ndarray) -> int:
 
 
 def _bp(omega: float) -> object:
-    return BPGenerator(C=1.0, omega=omega, branch_fn=_branch_treated).as_generator()
+    # C = 0: with C = 1 several BP fits on this design end at the domain boundary
+    # (reported as "boundary" by the strict solver; the legacy path clipped).
+    return BPGenerator(C=0.0, omega=omega, branch_fn=_branch_treated).as_generator()
 
 
 def test_config_rejects_generator_grid_without_squared_loss_score():

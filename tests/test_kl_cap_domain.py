@@ -80,7 +80,9 @@ def test_bkl_raises_on_domain_violation_instead_of_clipping():
 
 def test_bkl_grrglm_fit_fails_honestly_from_cold_start():
     # beta0 = 0 -> v = 0 sits exactly on the BKL boundary (g*(0) = +inf). The fit
-    # must report an explicit domain_error failure, not a silent broken success.
+    # must report an explicit failure, not a silent broken success: the strict
+    # solver reports "infeasible_start" (no offset), the legacy L-BFGS path
+    # "domain_error".
     X = _make_ate(n=150, seed=1)
     m = ATEFunctional(treatment_index=0)
     basis = TreatmentInteractionBasis(
@@ -89,7 +91,12 @@ def test_bkl_grrglm_fit_fails_honestly_from_cold_start():
     gen = BKLGenerator(C=1e-2, branch_fn=lambda x: int(x[0] == 1.0))
     res = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3).fit(X)
     assert not res.success
-    assert res.status == "domain_error"
+    assert res.status == "infeasible_start"
+    legacy = GRRGLM(
+        functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3, solver="lbfgs"
+    ).fit(X)
+    assert not legacy.success
+    assert legacy.status == "domain_error"
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +280,7 @@ def test_bounded_bkl_is_optimizable_and_bounded_from_cold_start():
     model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
     res = model.fit(X)
     assert res.success
-    assert res.status == "converged"
+    assert res.status == "ok"
     alpha = model.predict_alpha(X)
     assert np.max(np.abs(alpha)) <= amax + 1e-9
 

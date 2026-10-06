@@ -83,7 +83,9 @@ def test_sq_closed_form_matches_numeric_lbfgs_solution():
         )
 
     sq = SquaredGenerator(C=0.0)
-    model_cf = GRRGLM(functional=m, basis=make_basis(), generator=sq, penalty="l2", lam=1e-2)
+    model_cf = GRRGLM(
+        functional=m, basis=make_basis(), generator=sq, penalty="l2", lam=1e-2, solver="lbfgs"
+    )
     res_cf = model_cf.fit(X)
     assert res_cf.status == "closed_form"
     assert res_cf.success
@@ -96,7 +98,8 @@ def test_sq_closed_form_matches_numeric_lbfgs_solution():
         name="sq-numeric",
     )
     model_num = GRRGLM(
-        functional=m, basis=make_basis(), generator=gen_numeric, penalty="l2", lam=1e-2
+        functional=m, basis=make_basis(), generator=gen_numeric, penalty="l2", lam=1e-2,
+        solver="lbfgs",
     )
     res_num = model_num.fit(X, max_iter=500, tol=1e-12)
     assert res_num.success
@@ -213,12 +216,24 @@ def test_singular_closed_form_without_a_stationary_point_fails_instead_of_succee
         basis=_DuplicateColumnBasis(),
         generator=SquaredGenerator(C=0.0),
         penalty=None,  # lam = 0 -> A stays singular
+        solver="lbfgs",
     )
     res = model.fit(X)
 
     assert not res.success
     assert res.status == "singular"
     assert "unbounded below" in res.message
+
+    # The strict Newton path reports the same status (its Hessian is singular).
+    strict = GRRGLM(
+        functional=_UnrepresentableFunctional(),
+        basis=_DuplicateColumnBasis(),
+        generator=SquaredGenerator(C=0.0),
+        penalty=None,
+    )
+    res_strict = strict.fit(X)
+    assert res_strict.status == "singular"
+    assert strict.beta_ is None
 
     # No solution was ever computed, so the model must not be predictable: the
     # old behaviour kept beta_ = beta0 (zeros) and predict_alpha() silently
@@ -280,7 +295,12 @@ def test_domain_violation_yields_explicit_failure_not_silent_success():
         base_basis=PolynomialBasis(degree=1, include_bias=True), treatment_index=0
     ).fit(X)
     gen = BregmanGenerator(g=g_dom, name="bounded-domain")
-    model = GRRGLM(functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3)
+    # Legacy path: L-BFGS wraps the generator's failure into "domain_error". The
+    # strict solvers' counterpart ("infeasible_start") is tested in
+    # test_strict_solvers.py.
+    model = GRRGLM(
+        functional=m, basis=basis, generator=gen, penalty="l2", lam=1e-3, solver="lbfgs"
+    )
 
     bad_start = np.full(basis.n_features, 50.0)
     res = model.fit(X, beta0=bad_start)
@@ -350,6 +370,7 @@ def test_optimizer_failure_leaves_the_model_unpredictable():
         generator=SquaredGenerator(C=0.0).as_generator(),
         penalty="l1",
         lam=1e-2,
+        solver="lbfgs",
     )
     res = model.fit(X, max_iter=1)
 

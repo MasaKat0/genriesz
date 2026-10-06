@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterator
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from scipy.special import expit, xlogy
 
 from .utils import as_1d_of_length, as_2d
 
@@ -468,15 +469,129 @@ class BregmanGenerator:
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         return np.zeros(v_.shape[0], dtype=bool)
 
+    # ------------------------------------------------------------------
+    # Interface used by the strict solvers (genriesz.solvers)
+    # ------------------------------------------------------------------
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        """Mask of rows whose dual coordinate ``v`` lies in the open range of ``g'``.
+
+        The range is taken on the branch (sign component) allowed at each row.
+        The generic implementation knows no domain and only requires ``v`` to be
+        finite; built-in generators override it with their exact ranges.
+        """
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Return ``(g*(v), alpha, d alpha / d v)`` row-wise, without clipping.
+
+        ``alpha = (g')^{-1}(v)`` is the link and ``d alpha / d v = 1 / g''(alpha)``
+        its derivative, so the Hessian of ``mean g*(v)`` in ``beta`` is
+        ``Phi' diag(dalpha) Phi / n``. Rows outside :meth:`link_domain` are NaN in
+        all three outputs; callers must check the domain (the solvers do).
+
+        The generic implementation evaluates the user's ``inv_grad``, ``g`` and
+        ``grad2`` on the in-domain rows.
+        """
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        g_star = np.full(v_.shape[0], np.nan)
+        alpha = np.full(v_.shape[0], np.nan)
+        dalpha = np.full(v_.shape[0], np.nan)
+        ok = self.link_domain(X_, v_)
+        if np.any(ok):
+            Xo, vo = X_[ok], v_[ok]
+            a = self.inv_grad(Xo, vo)
+            g_star[ok] = vo * a - self.g(Xo, a)
+            alpha[ok] = a
+            dalpha[ok] = 1.0 / np.asarray(self.grad2(Xo, a), dtype=float)
+        return g_star, alpha, dalpha
+
+    def alpha_domain(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.bool_]:
+        """Mask of rows whose representer value lies in the open domain of ``g``.
+
+        Used by :class:`~genriesz.general_link.GRRGeneralLink`, whose link is not
+        the generator's own. The generic implementation only requires finiteness.
+        """
+
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.isfinite(a)
+
+    def boundary_mask(
+        self,
+        X: ArrayLike,
+        v: ArrayLike,
+        alpha: ArrayLike,
+        *,
+        tol: float = 1e-8,
+    ) -> NDArray[np.bool_]:
+        """Mask of rows numerically at the boundary of the domain of ``g``.
+
+        A fit whose final iterate has any such row is reported with status
+        ``"boundary"`` rather than ``"ok"``. The generic implementation knows no
+        boundary (as for SQ, whose domain is the whole real line).
+        """
+
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.zeros(a.shape[0], dtype=bool)
+
+    def boundary_margin(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        """Distance of ``alpha`` to the finite boundary of the domain of ``g``.
+
+        ``+inf`` when the domain has no finite boundary (SQ, generic). The
+        solvers use it for a fraction-to-the-boundary rule: one step may not
+        shrink any row's margin below ``margin_shrink`` (default ``0.01``) times
+        its current value, so that a single long step cannot land on the
+        boundary when the optimum is interior.
+        """
+
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.full(a.shape[0], np.inf)
+
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        """Third derivative of ``g`` in ``alpha`` (central differences of ``grad2``).
+
+        Built-in generators override this analytically. It is needed for the
+        Hessian of the arbitrary-link objective (:class:`GRRGeneralLink`).
+        """
+
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        eps = self._eps
+        return (self.grad2(X_, a + eps) - self.grad2(X_, a - eps)) / (2.0 * eps)
+
+    def _alpha_sign_ok(self, X: NDArray[np.float64], a: NDArray[np.float64]) -> NDArray[np.bool_]:
+        """Whether ``alpha`` lies on the branch selected by ``branch_fn`` (if any)."""
+
+        if self.branch_fn is None:
+            return np.ones(a.shape[0], dtype=bool)
+        return np.sign(a) == self._sign(X, a)
+
+
+def _xlogx(t: NDArray[np.float64]) -> NDArray[np.float64]:
+    """``t log t`` with its continuous extension ``0`` at ``t = 0`` (NaN for ``t < 0``)."""
+
+    with np.errstate(invalid="ignore"):
+        return np.where(t >= 0.0, xlogy(t, t), np.nan)
+
 
 class SquaredGenerator(BregmanGenerator):
     """Squared generator (SQ-Riesz).
 
     g(alpha) = (alpha - C)^2.
 
-    This generator has no strict domain constraints and induces a linear link
+    This generator has no domain constraints (its domain is the whole real
+    line, so no boundary rule applies) and induces the linear link
 
-        alpha = C + 0.5 * v.
+        alpha = C + 0.5 * v,    g*(v) = C v + v^2 / 4.
     """
 
     def __init__(self, C: float = 0.0):
@@ -502,24 +617,60 @@ class SquaredGenerator(BregmanGenerator):
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
         return np.full_like(a, 2.0, dtype=float)
 
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.zeros_like(a, dtype=float)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        g_star = self.C * v_ + 0.25 * v_ * v_
+        return g_star, self.C + 0.5 * v_, np.full_like(v_, 0.5, dtype=float)
+
+
+
 
 class UKLGenerator(BregmanGenerator):
     """Unnormalized KL generator (UKL-Riesz).
 
     The generator is::
 
-        g(alpha) = (|alpha| - C) log(|alpha| - C) - |alpha|,  with |alpha| > C.
+        g(alpha) = (|alpha| - C) log(|alpha| - C) - |alpha|,  with |alpha| > C >= 0.
 
-    The inverse gradient is branch-wise:
+    The inverse gradient is branch-wise. With ``s`` the branch sign and
+    ``u = s * v``::
 
-    - positive branch (sign +1): alpha =  C + exp(v)
-    - negative branch (sign -1): alpha = -C - exp(-v)
+        alpha = s (C + exp(u)),   g*(v) = C u + C + exp(u),   d alpha/d v = exp(u).
 
     If ``branch_fn`` is provided, it determines which branch is used for each
     observation.
+
+    Parameters
+    ----------
+    C:
+        Shift, ``C >= 0``.
+    branch_fn:
+        Branch selector returning 1 (positive) or 0 (negative).
+    legacy_clip:
+        ``False`` (default): the link, ``g`` and its derivatives are evaluated
+        exactly. Outside the domain ``g``/``grad``/``grad2`` return NaN and the
+        link raises :class:`DomainError`; nothing is clipped. ``True`` restores
+        the clipping of releases <= 0.2.6 (floors on ``|alpha| - C`` and on the
+        link argument), kept only so that old notebooks reproduce. A clipped
+        link is not ``(g')^{-1}`` where the clip binds, so the fitted
+        representer then targets a modified estimand.
     """
 
-    def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
+    def __init__(
+        self,
+        C: float = 1.0,
+        *,
+        branch_fn: BranchFn | None = None,
+        legacy_clip: bool = False,
+    ):
         if float(C) < 0:
             raise ValueError("C must be >= 0")
         if branch_fn is None:
@@ -531,6 +682,7 @@ class UKLGenerator(BregmanGenerator):
                 UserWarning,
                 stacklevel=2,
             )
+        self.legacy_clip = bool(legacy_clip)
         super().__init__(name="UKL", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
@@ -539,39 +691,88 @@ class UKLGenerator(BregmanGenerator):
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
-
-        # exp can underflow to 0 for large negative inputs; clip and floor.
-        z = np.clip(s * v_, -700.0, 700.0)
-        exp_term = np.exp(z)
-        exp_term = np.maximum(exp_term, 1e-12)
-        return s * (self.C + exp_term)
+        if self.legacy_clip:
+            z = np.clip(s * v_, -700.0, 700.0)
+            exp_term = np.maximum(np.exp(z), 1e-12)
+            return s * (self.C + exp_term)
+        # Exact: exp overflows to +inf for u > ~709, which the solvers report as
+        # "nonfinite" (it is not clipped to a finite stand-in).
+        with np.errstate(over="ignore"):
+            return s * (self.C + np.exp(s * v_))
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         z = self._sign(X_, v_) * v_
-        return (z <= np.log(1e-12)) | (z >= 700.0)
+        if self.legacy_clip:
+            return (z <= np.log(1e-12)) | (z >= 700.0)
+        return ~np.isfinite(z)
+
+    def _t(self, a: NDArray[np.float64]) -> NDArray[np.float64]:
+        t = np.abs(a) - self.C
+        if self.legacy_clip:
+            return np.maximum(t, 1e-12)
+        return np.where(t >= 0.0, t, np.nan)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
-        return t * np.log(t) - np.abs(a)
+        t = self._t(a)
+        return _xlogx(t) - np.abs(a)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
-        return np.sign(a) * np.log(t)
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return np.sign(a) * np.log(t)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
-        return 1.0 / t
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return 1.0 / t
+
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return -np.sign(a) / (t * t)
+
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        u = s * v_
+        with np.errstate(over="ignore"):
+            t = np.exp(u)
+        return self.C * u + self.C + t, s * (self.C + t), t
+
+    def alpha_domain(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.isfinite(a) & (np.abs(a) > self.C) & self._alpha_sign_ok(X_, a)
+
+    def boundary_mask(
+        self, X: ArrayLike, v: ArrayLike, alpha: ArrayLike, *, tol: float = 1e-8
+    ) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return (np.abs(a) - self.C) <= tol
+
+    def boundary_margin(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.abs(a) - self.C
 
 
 class BPGenerator(BregmanGenerator):
@@ -584,19 +785,42 @@ class BPGenerator(BregmanGenerator):
 
         g(alpha) = ( t^{1+omega} - (1+omega) t ) / omega,
 
-    with domain ``|alpha| > C`` and ``omega > 0``.
+    with domain ``|alpha| > C >= 0`` and ``omega > 0``. This equals the
+    manuscript's ``((|alpha|-C)^{1+omega} - (|alpha|-C))/omega - |alpha|`` up to
+    the constant ``-C``.
 
     The derivative is
 
-        g'(alpha) = sign(alpha) * (1+omega)/omega * ( t^omega - 1 ),
+        g'(alpha) = sign(alpha) * k * ( t^omega - 1 ),   k = (1+omega)/omega,
 
-    so the inverse gradient (branch-wise) can be written as
+    whose range on each branch is the open half-line ``s * v > -k``. With
+    ``u = s * v`` and ``w = 1 + u / k > 0``::
 
-        k = (1+omega)/omega
-        u = 1 + sign * v / k   (must be > 0)
-        alpha = sign * ( C + u^{1/omega} ).
+        alpha = s ( C + w^{1/omega} ),   g*(v) = C u + w^k,
+        d alpha / d v = w^{1/omega - 1} / (1 + omega).
+
+    The derivative of ``g`` stays bounded (``-> -k``) as ``|alpha| -> C``, so a
+    fitted representer can approach the boundary at a finite dual coordinate;
+    the solvers report this as status ``"boundary"``.
 
     As with UKL, ``branch_fn`` can be supplied to select the sign.
+
+    Parameters
+    ----------
+    C:
+        Shift, ``C >= 0``.
+    omega:
+        Power, ``omega > 0`` (``power`` is an alias).
+    branch_fn:
+        Branch selector returning 1 (positive) or 0 (negative).
+    legacy_clip:
+        ``False`` (default): the link, ``g`` and its derivatives are evaluated
+        exactly. Outside the domain ``g``/``grad``/``grad2`` return NaN and the
+        link raises :class:`DomainError`; nothing is clipped. ``True`` restores
+        the clipping of releases <= 0.2.6 (floors on ``|alpha| - C`` and on the
+        link argument), kept only so that old notebooks reproduce. A clipped
+        link is not ``(g')^{-1}`` where the clip binds, so the fitted
+        representer then targets a modified estimand.
     """
 
     def __init__(
@@ -606,6 +830,7 @@ class BPGenerator(BregmanGenerator):
         omega: float = 0.5,
         power: float | None = None,
         branch_fn: BranchFn | None = None,
+        legacy_clip: bool = False,
     ):
         if power is not None:
             omega = float(power)
@@ -614,6 +839,7 @@ class BPGenerator(BregmanGenerator):
         if float(omega) <= 0:
             raise ValueError("omega must be > 0")
         self.omega = float(omega)
+        self.legacy_clip = bool(legacy_clip)
         if branch_fn is None:
             warnings.warn(
                 "BPGenerator without branch_fn uses sign(v) to select the alpha branch. "
@@ -625,53 +851,112 @@ class BPGenerator(BregmanGenerator):
             )
         super().__init__(name=f"BP(omega={self.omega:g})", C=float(C), branch_fn=branch_fn)
 
+    @property
+    def _k(self) -> float:
+        return 1.0 + 1.0 / self.omega
+
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         """Branch-wise inverse gradient map for BP.
 
-        The theoretical domain restriction is ``t = 1 + sign*v/k > 0``. In finite
-        samples (and especially under cross fitting) the linear
-        predictor can violate this constraint. Instead of raising an exception,
-        we **clip** ``t`` to a small positive value.
+        The link is defined for ``w = 1 + sign*v/k > 0``. A violation raises
+        :class:`DomainError` (with ``legacy_clip=True`` it is instead clipped to
+        ``w = 1e-6``, the behavior of releases <= 0.2.6).
         """
 
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
-        k = 1.0 + 1.0 / self.omega
-
-        t = 1.0 + s * v_ / k
-        t = np.maximum(t, 1e-6)
-        return s * (self.C + np.power(t, 1.0 / self.omega))
+        w = 1.0 + s * v_ / self._k
+        if self.legacy_clip:
+            w = np.maximum(w, 1e-6)
+        elif not np.all(w > 0.0):
+            n_bad = int(np.sum(~(w > 0.0)))
+            raise DomainError(
+                f"BPGenerator domain violation: {n_bad}/{w.shape[0]} observation(s) "
+                f"have 1 + s*v/k <= 0, outside the range of g' on their branch."
+            )
+        return s * (self.C + np.power(w, 1.0 / self.omega))
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
-        k = 1.0 + 1.0 / self.omega
-        return (1.0 + s * v_ / k) <= 1e-6
+        w = 1.0 + s * v_ / self._k
+        if self.legacy_clip:
+            return w <= 1e-6
+        return ~(w > 0.0)
+
+    def _t(self, a: NDArray[np.float64]) -> NDArray[np.float64]:
+        t = np.abs(a) - self.C
+        if self.legacy_clip:
+            return np.maximum(t, 1e-12)
+        return np.where(t >= 0.0, t, np.nan)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
+        t = self._t(a)
         return (np.power(t, 1.0 + self.omega) - (1.0 + self.omega) * t) / self.omega
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
-        k = 1.0 + 1.0 / self.omega
-        return np.sign(a) * k * (np.power(t, self.omega) - 1.0)
+        t = self._t(a)
+        return np.sign(a) * self._k * (np.power(t, self.omega) - 1.0)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.abs(a) - self.C
-        t = np.maximum(t, 1e-12)
-        k = 1.0 + 1.0 / self.omega
-        return k * self.omega * np.power(t, self.omega - 1.0)
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return (1.0 + self.omega) * np.power(t, self.omega - 1.0)
+
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = self._t(a)
+        om = self.omega
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.sign(a) * (1.0 + om) * (om - 1.0) * np.power(t, om - 2.0)
+
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        return np.isfinite(v_) & (1.0 + s * v_ / self._k > 0.0)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        u = s * v_
+        w = 1.0 + u / self._k
+        w = np.where(w > 0.0, w, np.nan)
+        om = self.omega
+        with np.errstate(over="ignore"):
+            g_star = self.C * u + np.power(w, self._k)
+            alpha = s * (self.C + np.power(w, 1.0 / om))
+            dalpha = np.power(w, 1.0 / om - 1.0) / (1.0 + om)
+        return g_star, alpha, dalpha
+
+    def alpha_domain(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.isfinite(a) & (np.abs(a) > self.C) & self._alpha_sign_ok(X_, a)
+
+    def boundary_mask(
+        self, X: ArrayLike, v: ArrayLike, alpha: ArrayLike, *, tol: float = 1e-8
+    ) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return (np.abs(a) - self.C) <= tol
+
+    def boundary_margin(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.abs(a) - self.C
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +965,7 @@ class BPGenerator(BregmanGenerator):
 # only the inverse-link (inv_grad) differs: exact-and-raising vs bounded.
 # ---------------------------------------------------------------------------
 def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
-    """g(alpha) = t1 log t1 - t2 log t2, evaluated without cancellation.
+    """g(alpha) = t1 log t1 - t2 log t2, evaluated without cancellation (floored).
 
     Written literally, the two terms are each O(|alpha| log|alpha|) while their
     difference is only O(C log|alpha|), so the leading digits cancel: in float64
@@ -692,12 +977,9 @@ def _bkl_g(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
     where ``t1 log1p(2C/t1) -> 2C`` smoothly as ``t1 -> inf``. Both terms are
     then O(C log|alpha|) and no cancellation occurs.
 
-    The substitution is an identity wherever the ``1e-12`` floor on ``t1`` is
-    inactive, i.e. on the domain interior ``|alpha| > C + 1e-12`` -- everywhere
-    the link is actually evaluated. In the floored sliver ``t2 != t1 + 2C``, so
-    the two forms differ by ~1e-11; both are floored surrogates of a value that
-    the floor has already made arbitrary there, and this one is the closer of
-    the two to the un-floored limit for small ``C``.
+    This floored variant (``t1 >= 1e-12``) is used by :class:`BoundedBKLGenerator`
+    and by ``BKLGenerator(legacy_clip=True)``; :func:`_bkl_g_exact` is the
+    unfloored version.
     """
 
     t1 = np.maximum(np.abs(a) - C, 1e-12)
@@ -714,6 +996,38 @@ def _bkl_grad(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
 def _bkl_grad2(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
     denom = np.maximum(np.abs(a) * np.abs(a) - C * C, 1e-12)
     return (2.0 * C) / denom
+
+
+def _bkl_g_exact(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    """Unfloored BKL generator: closure value ``-2C log(2C)`` at ``|alpha| = C``, NaN below."""
+
+    A = np.abs(a)
+    t1 = A - C
+    with np.errstate(divide="ignore", invalid="ignore"):
+        inner = -t1 * np.log1p(2.0 * C / t1) - 2.0 * C * np.log(A + C)
+    out = np.where(t1 > 0.0, inner, np.nan)
+    return np.where(t1 == 0.0, -2.0 * C * np.log(2.0 * C), out)
+
+
+def _bkl_grad_exact(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    A = np.abs(a)
+    t1 = np.where(A - C >= 0.0, A - C, np.nan)
+    with np.errstate(divide="ignore"):
+        return np.sign(a) * (np.log(t1) - np.log(A + C))
+
+
+def _bkl_grad2_exact(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    A = np.abs(a)
+    denom = np.where(A >= C, (A - C) * (A + C), np.nan)
+    with np.errstate(divide="ignore"):
+        return (2.0 * C) / denom
+
+
+def _bkl_grad3_exact(a: NDArray[np.float64], C: float) -> NDArray[np.float64]:
+    A = np.abs(a)
+    denom = np.where(A >= C, (A - C) * (A + C), np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return -np.sign(a) * 4.0 * C * A / (denom * denom)
 
 
 def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float64]:
@@ -733,6 +1047,26 @@ def _bkl_abs_alpha_from_u(u: NDArray[np.float64], C: float) -> NDArray[np.float6
     return C * (1.0 + t) / denom
 
 
+def _bkl_dual(
+    u: NDArray[np.float64], C: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """``(g*, |alpha|, d|alpha|/du)`` of the exact BKL link for ``u < 0`` (NaN elsewhere).
+
+    With ``e = exp(u)``: ``|alpha| = C (1+e)/(1-e)``,
+    ``g* = C u + 2C log(2C) - 2C log(1-e)`` and ``d|alpha|/du = 2C e/(1-e)^2``.
+    ``g*`` diverges to ``+inf`` as ``u -> 0-``.
+    """
+
+    uu = np.where(u < 0.0, u, np.nan)
+    e = np.exp(uu)
+    one_minus_e = -np.expm1(uu)
+    with np.errstate(divide="ignore", over="ignore"):
+        A = C * (1.0 + e) / one_minus_e
+        g_star = C * uu + 2.0 * C * np.log(2.0 * C) - 2.0 * C * np.log(one_minus_e)
+        dA = 2.0 * C * e / (one_minus_e * one_minus_e)
+    return g_star, A, dA
+
+
 class BKLGenerator(BregmanGenerator):
     """Binary KL generator (BKL-Riesz).
 
@@ -749,27 +1083,43 @@ class BKLGenerator(BregmanGenerator):
     The inverse gradient is branch-wise. Let ``s`` be the desired sign branch
     (+1 or -1) and let ``u = s * v``. Since the log-ratio is always negative,
     the theoretical domain is ``u < 0`` and ``alpha`` diverges as ``u -> 0``.
+    In particular ``v = 0`` is never admissible, so a BKL fit needs a starting
+    point (or an offset ``u_ref``) with ``s * u_ref < 0``; the strict solvers
+    report ``"infeasible_start"`` otherwise.
 
     This is the **uncapped** (mathematically exact) link: a domain violation
     (``u >= 0``) raises :class:`DomainError` instead of being silently clipped.
     The previous clip mapped ``u`` to ``-1e-8``, which produced
     ``alpha ~ 2C / 1e-8 ~ 2e8``. That value is not ``(g')^{-1}(v)``, so it broke
     the conjugate identity ``d g*(v)/dv = alpha`` and destroyed the GRR weights.
-    Raising instead lets ``GRRGLM.fit`` report an explicit
-    ``status="domain_error"`` failure (see design item E / coverage-design
-    "KL系lossとcapの修正設計", 方針A).
 
-    Note that ``L-BFGS-B`` cannot optimize this uncapped objective directly: its
-    unconstrained line search steps out of the domain and hits the raise. For a
-    *usable* bounded-representer variant, use :class:`BoundedBKLGenerator`, which
-    keeps ``alpha`` bounded with a consistent objective/gradient but targets a
-    modified (bounded) estimand and is therefore a target-sensitivity candidate,
-    not an admissible one.
+    ``L-BFGS-B`` (``GRRGLM(solver="lbfgs")``) cannot optimize this uncapped
+    objective directly: its unconstrained line search steps out of the domain.
+    The default damped-Newton/FISTA solvers backtrack into the domain instead.
+    :class:`BoundedBKLGenerator` is a bounded variant that targets a modified
+    estimand.
 
     If ``branch_fn`` is provided, it selects the sign branch.
+
+    Parameters
+    ----------
+    C:
+        Shift, ``C > 0``.
+    branch_fn:
+        Branch selector returning 1 (positive) or 0 (negative).
+    legacy_clip:
+        ``False`` (default): ``g`` and its derivatives are exact, with NaN below
+        ``|alpha| = C``. ``True`` restores the ``1e-12`` floors of releases
+        <= 0.2.6 in ``g``/``grad``/``grad2``. The link is exact in both cases.
     """
 
-    def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
+    def __init__(
+        self,
+        C: float = 1.0,
+        *,
+        branch_fn: BranchFn | None = None,
+        legacy_clip: bool = False,
+    ):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for BKLGenerator")
         if branch_fn is None:
@@ -782,6 +1132,7 @@ class BKLGenerator(BregmanGenerator):
                 UserWarning,
                 stacklevel=2,
             )
+        self.legacy_clip = bool(legacy_clip)
         super().__init__(name="BKL", C=float(C), branch_fn=branch_fn)
 
     def _branch_sign(
@@ -806,13 +1157,12 @@ class BKLGenerator(BregmanGenerator):
             raise DomainError(
                 f"BKLGenerator domain violation: {n_bad}/{u.shape[0]} observation(s) "
                 f"have u = s*v >= 0, where the exact link alpha = (g')^{{-1}}(v) is "
-                f"undefined (alpha -> +inf). Use BoundedBKLGenerator for a bounded, "
-                f"optimizable variant."
+                f"undefined (alpha -> +inf). Use an offset (or a starting point) with "
+                f"s*v < 0, or BoundedBKLGenerator for a bounded variant."
             )
 
-        # Guard only the exp underflow tail (very negative u -> alpha -> C+),
-        # which does not affect the finite, well-defined side.
-        u = np.maximum(u, -700.0)
+        if self.legacy_clip:
+            u = np.maximum(u, -700.0)
         return s * _bkl_abs_alpha_from_u(u, self.C)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
@@ -832,17 +1182,57 @@ class BKLGenerator(BregmanGenerator):
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        return _bkl_g(a, self.C)
+        return _bkl_g(a, self.C) if self.legacy_clip else _bkl_g_exact(a, self.C)
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        return _bkl_grad(a, self.C)
+        return _bkl_grad(a, self.C) if self.legacy_clip else _bkl_grad_exact(a, self.C)
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        return _bkl_grad2(a, self.C)
+        return _bkl_grad2(a, self.C) if self.legacy_clip else _bkl_grad2_exact(a, self.C)
+
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return _bkl_grad3_exact(a, self.C)
+
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_) & (self._branch_sign(X_, v_) * v_ < 0.0)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._branch_sign(X_, v_)
+        g_star, A, dA = _bkl_dual(s * v_, self.C)
+        return g_star, s * A, dA
+
+    def alpha_domain(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.isfinite(a) & (np.abs(a) > self.C) & self._alpha_sign_ok(X_, a)
+
+    def boundary_mask(
+        self, X: ArrayLike, v: ArrayLike, alpha: ArrayLike, *, tol: float = 1e-8
+    ) -> NDArray[np.bool_]:
+        """Rows with ``|alpha| - C <= tol`` or ``s*v >= -1e-12`` (``|alpha|`` diverging)."""
+
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        u = self._branch_sign(X_, v_) * v_
+        return ((np.abs(a) - self.C) <= tol) | (u >= -1e-12)
+
+    def boundary_margin(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        return np.abs(a) - self.C
 
 
 class BoundedBKLGenerator(BregmanGenerator):
@@ -959,6 +1349,32 @@ class BoundedBKLGenerator(BregmanGenerator):
         return _bkl_grad2(a, self.C)
 
 
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        # Where the bound binds, alpha is constant in v (d alpha/d v = 0) and
+        # g*(v) = v alpha - g(alpha) is affine in v, as the envelope identity
+        # requires.
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._branch_sign(X_, v_)
+        u = s * v_
+        uc = np.clip(u, -700.0, self._u_min)
+        A = _bkl_abs_alpha_from_u(uc, self.C)
+        alpha = s * A
+        e = np.exp(uc)
+        dA = 2.0 * self.C * e / np.square(np.expm1(uc))
+        dA = np.where((u > self._u_min) | (u < -700.0), 0.0, dA)
+        g_star = v_ * alpha - _bkl_g(alpha, self.C)
+        return g_star, alpha, dA
+
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+
 class PUGenerator(BregmanGenerator):
     """PU generator (PU-Riesz).
 
@@ -972,15 +1388,37 @@ class PUGenerator(BregmanGenerator):
 
         g'(alpha) = sign(alpha) * C * log( |alpha| / (1-|alpha|) ).
 
-    The inverse gradient is a (scaled) logistic map.
+    The inverse gradient is a (scaled) logistic map: with ``u = s * v``,
+    ``alpha = s * sigmoid(u / C)``, ``g*(v) = C log(1 + exp(u / C))``.
 
     Notes
     -----
     This generator is primarily useful when you want the representer to be
     bounded (in absolute value) by 1.
+
+    Parameters
+    ----------
+    C:
+        Scale, ``C > 0``.
+    branch_fn:
+        Branch selector returning 1 (positive) or 0 (negative).
+    legacy_clip:
+        ``False`` (default): the link, ``g`` and its derivatives are evaluated
+        exactly. Outside the domain ``g``/``grad``/``grad2`` return NaN and the
+        link raises :class:`DomainError`; nothing is clipped. ``True`` restores
+        the clipping of releases <= 0.2.6 (floors on ``|alpha| - C`` and on the
+        link argument), kept only so that old notebooks reproduce. A clipped
+        link is not ``(g')^{-1}`` where the clip binds, so the fitted
+        representer then targets a modified estimand.
     """
 
-    def __init__(self, C: float = 1.0, *, branch_fn: BranchFn | None = None):
+    def __init__(
+        self,
+        C: float = 1.0,
+        *,
+        branch_fn: BranchFn | None = None,
+        legacy_clip: bool = False,
+    ):
         if float(C) <= 0:
             raise ValueError("C must be > 0 for PUGenerator")
         if branch_fn is None:
@@ -991,41 +1429,96 @@ class PUGenerator(BregmanGenerator):
                 UserWarning,
                 stacklevel=2,
             )
+        self.legacy_clip = bool(legacy_clip)
         super().__init__(name="PU", C=float(C), branch_fn=branch_fn)
 
     def inv_grad(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         s = self._sign(X_, v_)
-
-        z = np.clip(s * v_ / self.C, -700.0, 700.0)
-        a = 1.0 / (1.0 + np.exp(-z))
-        a = np.clip(a, 1e-10, 1.0 - 1e-10)
-        return s * a
+        if self.legacy_clip:
+            z = np.clip(s * v_ / self.C, -700.0, 700.0)
+            a = 1.0 / (1.0 + np.exp(-z))
+            a = np.clip(a, 1e-10, 1.0 - 1e-10)
+            return s * a
+        return s * expit(s * v_ / self.C)
 
     def domain_binding(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
         X_ = as_2d(X)
         v_ = as_1d_of_length(v, n=len(X_), name="v")
         z = self._sign(X_, v_) * v_ / self.C
-        return np.abs(z) >= np.log(1e10)
+        if self.legacy_clip:
+            return np.abs(z) >= np.log(1e10)
+        return ~np.isfinite(z)
+
+    def _t(self, a: NDArray[np.float64]) -> NDArray[np.float64]:
+        t = np.abs(a)
+        if self.legacy_clip:
+            return np.clip(t, 1e-10, 1.0 - 1e-10)
+        return np.where(t <= 1.0, t, np.nan)
 
     def g(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
-        return self.C * (t * np.log(t) + (1.0 - t) * np.log(1.0 - t))
+        t = self._t(a)
+        return self.C * (_xlogx(t) + _xlogx(1.0 - t))
 
     def grad(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
-        return np.sign(a) * self.C * (np.log(t) - np.log(1.0 - t))
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return np.sign(a) * self.C * (np.log(t) - np.log(1.0 - t))
 
     def grad2(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
         X_ = as_2d(X)
         a = as_1d_of_length(alpha, n=len(X_), name="alpha")
-        t = np.clip(np.abs(a), 1e-10, 1.0 - 1e-10)
-        return self.C / (t * (1.0 - t))
+        t = self._t(a)
+        with np.errstate(divide="ignore"):
+            return self.C / (t * (1.0 - t))
+
+    def grad3(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = self._t(a)
+        q = t * (1.0 - t)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.sign(a) * self.C * (2.0 * t - 1.0) / (q * q)
+
+    def link_domain(self, X: ArrayLike, v: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        return np.isfinite(v_)
+
+    def dual_eval(
+        self, X: ArrayLike, v: ArrayLike
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        X_ = as_2d(X)
+        v_ = as_1d_of_length(v, n=len(X_), name="v")
+        s = self._sign(X_, v_)
+        z = s * v_ / self.C
+        p = expit(z)
+        return self.C * np.logaddexp(0.0, z), s * p, p * (1.0 - p) / self.C
+
+    def alpha_domain(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = np.abs(a)
+        return np.isfinite(a) & (t > 0.0) & (t < 1.0) & self._alpha_sign_ok(X_, a)
+
+    def boundary_mask(
+        self, X: ArrayLike, v: ArrayLike, alpha: ArrayLike, *, tol: float = 1e-8
+    ) -> NDArray[np.bool_]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = np.abs(a)
+        return (t <= tol) | (1.0 - t <= tol)
+
+    def boundary_margin(self, X: ArrayLike, alpha: ArrayLike) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = as_1d_of_length(alpha, n=len(X_), name="alpha")
+        t = np.abs(a)
+        return np.minimum(t, 1.0 - t)
 
 
 _SQUARED_NAMES = frozenset({"sq", "squared", "lsif"})

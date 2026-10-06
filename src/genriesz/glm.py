@@ -14,7 +14,13 @@ The GRR objective for beta can be written as
 where ``g*`` is the convex conjugate of the generator and ``m(X,v)`` is linear
 in ``v``.
 
-We solve the resulting convex (often smooth) problem with L-BFGS-B.
+With an offset ``u_ref`` (a fixed function, never fitted on the estimation
+sample) the dual coordinate is ``v(x) = u_ref(x) + phi(x)^T beta``.
+
+By default the problem is solved by the strict solvers of
+:mod:`genriesz.solvers` (damped Newton for smooth penalties, FISTA for ``l1``),
+which keep every iterate in the domain of the generator and report an explicit
+status. ``solver="lbfgs"`` selects the L-BFGS-B path of releases <= 0.2.6.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import time
 import warnings
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 
@@ -32,7 +39,86 @@ from scipy import optimize
 from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError, SquaredGenerator
+from .solvers import (
+    NONFINITE,
+    OK,
+    DualProblem,
+    SolverResult,
+    fista_solve,
+    newton_solve,
+)
 from .utils import as_1d_of_length, as_2d, sigmoid, solve_stationarity
+
+#: Accepted values of ``GRRGLM(solver=...)``.
+GRR_SOLVERS = ("auto", "newton", "fista", "lbfgs")
+
+OffsetSpec = Callable[[NDArray[np.float64]], ArrayLike] | float | None
+
+
+def evaluate_offset(offset: OffsetSpec, X: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Evaluate an offset specification ``u_ref`` at the rows of ``X``.
+
+    ``None`` means no offset (zeros), a number is a constant offset, and a
+    callable ``offset(X)`` must return one finite value per row. The offset must
+    be a fixed function: it may not be fitted on the sample used to estimate
+    ``beta`` (it is evaluated, unchanged, at held-out and counterfactual rows).
+    """
+
+    n = X.shape[0]
+    if offset is None:
+        return np.zeros(n, dtype=float)
+    if callable(offset):
+        out = np.asarray(offset(X), dtype=float)
+        if out.ndim == 2 and out.shape[1] == 1:
+            out = out[:, 0]
+        if out.shape != (n,):
+            raise ValueError(f"offset(X) must return shape ({n},). Got {out.shape}.")
+        return out
+    val = float(offset)  # type: ignore[arg-type]
+    return np.full(n, val, dtype=float)
+
+
+def offset_derivative(
+    offset: OffsetSpec, X: NDArray[np.float64], coordinate: int
+) -> NDArray[np.float64]:
+    """Derivative of the offset in ``X[:, coordinate]``.
+
+    Zero for ``None`` and constant offsets. A callable offset must expose
+    ``offset.derivative(X, coordinate)``; otherwise :class:`NotImplementedError`
+    is raised (the derivative is needed only by derivative functionals such as
+    the AME, when ``m(alpha)`` is evaluated).
+    """
+
+    if offset is None or not callable(offset):
+        return np.zeros(X.shape[0], dtype=float)
+    deriv = getattr(offset, "derivative", None)
+    if not callable(deriv):
+        raise NotImplementedError(
+            "This offset has no derivative(X, coordinate) method, which is needed to "
+            "differentiate the fitted representer."
+        )
+    return np.asarray(deriv(X, coordinate), dtype=float).reshape(-1)
+
+
+def offset_from_alpha(
+    generator: BregmanGenerator,
+    alpha_ref: Callable[[NDArray[np.float64]], ArrayLike],
+) -> Callable[[NDArray[np.float64]], NDArray[np.float64]]:
+    """Offset ``u_ref = g'(alpha_ref)`` for a fixed reference representer.
+
+    ``alpha_ref(X)`` returns the reference values row-wise, for example
+    ``lambda X: np.where(X[:, 0] == 1, 2.0, -2.0)`` for ``alpha_ref = +-2`` in an
+    ATE problem. The coefficient vector ``beta = 0`` then reproduces
+    ``alpha_ref``, toward which a penalty shrinks. The result has a
+    ``derivative`` method only when ``alpha_ref`` has one.
+    """
+
+    def _offset(X: NDArray[np.float64]) -> NDArray[np.float64]:
+        X_ = as_2d(X)
+        a = np.asarray(alpha_ref(X_), dtype=float).reshape(-1)
+        return np.asarray(generator.grad(X_, a), dtype=float)
+
+    return _offset
 
 
 def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
@@ -74,7 +160,12 @@ class FitResult:
         initial point when no solution was ever computed) for diagnostics and
         shape introspection only.
     status:
-        One of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
+        Strict solvers (``solver`` in ``{"auto", "newton", "fista"}``): one of
+        :data:`genriesz.solvers.STATUSES` -- ``"ok"``, ``"boundary"``,
+        ``"maxit"``, ``"linesearch"``, ``"singular"``, ``"infeasible_start"``,
+        ``"nonfinite"``, ``"degenerate_functional"``. Only ``"ok"`` is a
+        success. Legacy ``solver="lbfgs"``:
+        one of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
         ``"domain_error"``, ``"domain_error_at_solution"``,
         ``"degenerate_functional"`` (the functional's basis evaluations are
         identically zero on the training data, e.g. an ATT fold with no treated
@@ -94,9 +185,24 @@ class FitResult:
         penalties; for l1 it is the exact subgradient residual.
     clip_binding_rate:
         Fraction of observations for which the generator's internal domain
-        clip was active at the solution (``nan`` when not applicable).
+        clip was active at the solution (``nan`` when not applicable; ``0.0``
+        for the strict solvers, which never clip).
     fit_time:
         Wall-clock seconds spent in ``fit``.
+    solver:
+        ``"newton"``, ``"fista"``, ``"lbfgs"`` or ``"closed_form"``.
+    max_abs_imbalance:
+        ``max_j |Delta_j|`` on the fitting sample, where ``Delta`` is the loss
+        gradient (the empirical Riesz imbalance of the regressors).
+    n_boundary:
+        Rows numerically at the domain boundary at ``beta`` (strict solvers).
+    l1_ball_active, ball_multiplier:
+        Whether the ``l1``-ball restriction is active at the solution and the
+        multiplier of its normal cone used in ``kkt_residual``.
+    polished:
+        Whether a FISTA solution was refined by Newton on its support.
+    hessian_min_eig:
+        Smallest eigenvalue of the Hessian at the last Newton iterate.
     """
 
     beta: NDArray[np.float64]
@@ -109,6 +215,13 @@ class FitResult:
     kkt_residual: float = field(default=float("nan"))
     clip_binding_rate: float = field(default=float("nan"))
     fit_time: float = field(default=float("nan"))
+    solver: str = "lbfgs"
+    max_abs_imbalance: float = field(default=float("nan"))
+    n_boundary: int = 0
+    l1_ball_active: bool = False
+    ball_multiplier: float = 0.0
+    polished: bool = False
+    hessian_min_eig: float = field(default=float("nan"))
 
 
 class _Penalty:
@@ -168,7 +281,44 @@ class _Penalty:
 
 
 class GRRGLM:
-    """Finite-dimensional generalized Riesz regression (GLM form)."""
+    """Finite-dimensional generalized Riesz regression (GLM form).
+
+    The representer model is linear in the dual coordinate,
+    ``v(x) = u_ref(x) + phi(x)^T beta`` and ``alpha(x) = (g')^{-1}(v(x))``, and
+    ``beta`` minimizes ``mean[g*(v) - m(W, v)] + penalty(beta)``.
+
+    Parameters
+    ----------
+    basis, generator, functional:
+        Regressors ``phi``, Bregman generator ``g`` and linear functional ``m``.
+    penalty, lam, p_norm:
+        ``None`` (no penalty), ``"l2"`` (``lam/2 ||beta||^2``), ``"l1"``
+        (``lam ||beta||_1``, exact), or ``"lp"`` (``lam/q ||beta||_q^q``).
+    offset:
+        Offset ``u_ref``: ``None`` (zero), a constant, or a callable ``X -> (n,)``.
+        It must be a fixed function -- chosen before estimation or built from
+        observations independent of the fitting sample -- because it is
+        evaluated unchanged at held-out and counterfactual rows. ``beta = 0``
+        corresponds to ``alpha_ref = (g')^{-1}(u_ref)``, toward which the penalty
+        shrinks; see :func:`offset_from_alpha`. BKL requires an offset (or a
+        starting point) with ``s * u_ref < 0``.
+    solver:
+        ``"auto"`` (default): damped Newton for no penalty, ``l2`` and
+        ``l_q`` with ``q >= 2``; FISTA for ``l1`` and ``l_q`` with ``1 < q < 2``.
+        ``"newton"``/``"fista"`` force a solver. ``"lbfgs"``: the L-BFGS-B path
+        of releases <= 0.2.6 (closed form for SQ with ``l2``), kept for old
+        notebooks; it does not keep iterates in the domain and reports the
+        legacy statuses.
+    l1_radius:
+        Optional coefficient restriction ``||beta||_1 <= l1_radius`` (requires
+        the ``l1`` penalty or no penalty; solved by FISTA). Convergence is then
+        judged by the constrained residual of
+        ``0 in Delta + lam subdiff||beta||_1 + N_B(beta)``.
+    boundary_tol:
+        Rows with a distance to the domain boundary at most ``boundary_tol``
+        (``|alpha| - C`` for UKL/BP/BKL, also ``s v >= -1e-12`` for BKL; never
+        for SQ) make the status ``"boundary"``.
+    """
 
     def __init__(
         self,
@@ -179,26 +329,75 @@ class GRRGLM:
         penalty: str | None = "l2",
         lam: float = 1e-3,
         p_norm: float | None = None,
+        offset: OffsetSpec = None,
+        solver: str = "auto",
+        l1_radius: float | None = None,
+        boundary_tol: float = 1e-8,
     ):
         self.basis = basis
         self.generator = generator
         self.functional = functional
         self.penalty = _Penalty(penalty, lam, p_norm)
+        self.offset = offset
+        solver_ = str(solver).lower()
+        if solver_ not in GRR_SOLVERS:
+            raise ValueError(f"solver must be one of {GRR_SOLVERS}. Got {solver!r}.")
+        self.solver = solver_
+        if l1_radius is not None:
+            l1_radius = float(l1_radius)
+            if not np.isfinite(l1_radius) or l1_radius <= 0.0:
+                raise ValueError(f"l1_radius must be positive and finite. Got {l1_radius!r}.")
+            if self.penalty.penalty is not None and self.penalty.p_norm != 1.0:
+                raise ValueError("l1_radius requires penalty='l1' or penalty=None.")
+            if solver_ in {"newton", "lbfgs"}:
+                raise ValueError("l1_radius is solved by FISTA; use solver='auto' or 'fista'.")
+        self.l1_radius = l1_radius
+        self.boundary_tol = float(boundary_tol)
 
         self._Phi: NDArray[np.float64] | None = None
         self._M: NDArray[np.float64] | None = None
         self.beta_: NDArray[np.float64] | None = None
         self.fit_result_: FitResult | None = None
 
+    def _resolve_solver(self) -> str:
+        """Pick the strict solver for the penalty (``"newton"`` or ``"fista"``)."""
+
+        pen = self.penalty
+        q = None if (pen.penalty is None or pen.lam == 0.0) else pen.p_norm
+        smooth = q is None or q >= 2.0
+        if self.solver == "newton":
+            if not smooth or self.l1_radius is not None:
+                raise ValueError(
+                    "solver='newton' needs a twice-differentiable penalty (none, l2, or "
+                    "lp with p >= 2) and no l1_radius."
+                )
+            return "newton"
+        if self.solver == "fista":
+            if q is not None and q >= 2.0:
+                raise ValueError("solver='fista' supports the l1 and l_q (1 < q < 2) penalties.")
+            return "fista"
+        if self.l1_radius is not None or not smooth:
+            return "fista"
+        return "newton"
+
     def fit(
         self,
         X: ArrayLike,
         *,
         beta0: ArrayLike | None = None,
-        max_iter: int = 500,
-        tol: float = 1e-8,
+        max_iter: int | None = None,
+        tol: float | None = None,
         verbose: bool = False,
     ) -> FitResult:
+        """Fit ``beta`` on the rows of ``X``.
+
+        ``max_iter`` and ``tol`` default to the solver's registered values:
+        Newton 500 iterations and ``max_j |dF/dbeta_j| <= 1e-10`` (scaled by
+        ``max(1, max_j |mean m(W, phi_j)|)`` without a penalty); FISTA 100000
+        iterations and a residual ``<= 1e-6 * lam`` (``1e-10`` when ``lam = 0``);
+        L-BFGS-B 500 iterations and ``ftol = 1e-8``.
+        """
+
         t0 = time.perf_counter()
         X_ = as_2d(X)
         _ensure_basis_fitted(self.basis, X_)
@@ -245,6 +444,14 @@ class GRRGLM:
             if beta0_.shape[0] != p:
                 raise ValueError(f"beta0 must have length {p}. Got {beta0_.shape}.")
 
+        u0 = evaluate_offset(self.offset, X_)
+        if self.solver != "lbfgs":
+            return self._fit_strict(
+                X_, Phi, M, u0, beta0_, max_iter=max_iter, tol=tol, t0=t0
+            )
+        max_iter = 500 if max_iter is None else int(max_iter)
+        tol = 1e-8 if tol is None else float(tol)
+
         # Closed form for the squared generator with an L2 (or no) penalty.
         # g(alpha) = (alpha - C)^2 gives g*(v) = C v + v^2/4, so the objective
         # is quadratic and the stationarity condition is
@@ -254,7 +461,7 @@ class GRRGLM:
         ):
             lam = self.penalty.lam if self.penalty.penalty is not None else 0.0
             A = 0.5 * (Phi.T @ Phi) / n + lam * np.eye(p)
-            b = M.mean(axis=0) - self.generator.C * Phi.mean(axis=0)
+            b = M.mean(axis=0) - self.generator.C * Phi.mean(axis=0) - 0.5 * (Phi.T @ u0) / n
             # Unlike a least-squares normal equation, b = mean(M) - C mean(Phi)
             # need not lie in the range of A, so an unpenalized rank-deficient
             # fit can have no stationary point at all. Report that as a failure
@@ -282,6 +489,7 @@ class GRRGLM:
                 X_,
                 Phi,
                 M,
+                u0,
                 np.asarray(beta_hat, dtype=float),
                 success=True,
                 message="closed_form",
@@ -294,7 +502,7 @@ class GRRGLM:
         # into an explicit FitResult failure below), never converted into a
         # huge objective value with a zero gradient.
         def fun(beta: NDArray[np.float64]) -> float:
-            v = Phi @ beta
+            v = u0 + Phi @ beta
             try:
                 g_star, _ = self.generator.conjugate(X_, v)
             except Exception as exc:
@@ -306,7 +514,7 @@ class GRRGLM:
             return loss + self.penalty.value(beta)
 
         def jac(beta: NDArray[np.float64]) -> NDArray[np.float64]:
-            v = Phi @ beta
+            v = u0 + Phi @ beta
             try:
                 _, alpha = self.generator.conjugate(X_, v)
             except Exception as exc:
@@ -350,6 +558,7 @@ class GRRGLM:
                 X_,
                 Phi,
                 M,
+                u0,
                 beta_hat,
                 success=bool(res.success),
                 message=str(res.message),
@@ -363,6 +572,7 @@ class GRRGLM:
         X_: NDArray[np.float64],
         Phi: NDArray[np.float64],
         M: NDArray[np.float64],
+        u0: NDArray[np.float64],
         beta_hat: NDArray[np.float64],
         *,
         success: bool,
@@ -377,11 +587,13 @@ class GRRGLM:
         gradient_norm = float("nan")
         kkt = float("nan")
         binding = float("nan")
-        v = Phi @ beta_hat
+        imbalance = float("nan")
+        v = u0 + Phi @ beta_hat
         try:
             g_star, alpha = self.generator.conjugate(X_, v)
             objective = float(np.mean(g_star - (M @ beta_hat))) + self.penalty.value(beta_hat)
             grad_loss = (alpha[:, None] * Phi - M).mean(axis=0)
+            imbalance = float(np.max(np.abs(grad_loss))) if grad_loss.size else 0.0
             grad_total = grad_loss + self.penalty.grad(beta_hat)
             gradient_norm = float(np.max(np.abs(grad_total))) if grad_total.size else 0.0
             kkt = self._kkt_residual(grad_loss, beta_hat)
@@ -405,6 +617,8 @@ class GRRGLM:
             kkt_residual=kkt,
             clip_binding_rate=binding,
             fit_time=time.perf_counter() - t0,
+            solver="closed_form" if status == "closed_form" else "lbfgs",
+            max_abs_imbalance=imbalance,
         )
         # Only a successful fit is allowed to predict (audit P0-07): an
         # optimizer that hit max_iter or failed its diagnostics at the last
@@ -435,32 +649,179 @@ class GRRGLM:
             return float(np.max(resid))
         return float(np.max(np.abs(grad_loss + pen.grad(beta))))
 
+    def _fit_strict(
+        self,
+        X_: NDArray[np.float64],
+        Phi: NDArray[np.float64],
+        M: NDArray[np.float64],
+        u0: NDArray[np.float64],
+        beta0_: NDArray[np.float64],
+        *,
+        max_iter: int | None,
+        tol: float | None,
+        t0: float,
+    ) -> FitResult:
+        """Strict (domain-feasible, unclipped) solve with an explicit status."""
+
+        kind = self._resolve_solver()
+        pen = self.penalty
+        lam = 0.0 if pen.penalty is None else float(pen.lam)
+        b = M.mean(axis=0)
+
+        if not np.all(np.isfinite(u0)):
+            res = SolverResult(beta=beta0_, status=NONFINITE, n_iter=0,
+                               message="the offset is not finite on the fitting rows")
+        else:
+            problem = DualProblem(generator=self.generator, X=X_, Phi=Phi, offset=u0, target=b)
+            cache = (
+                _branch_cache_of(self.generator)
+                if getattr(self.generator, "branch_fn", None) is not None
+                else contextlib.nullcontext()
+            )
+            with cache:
+                if kind == "newton":
+                    q = None if lam == 0.0 else pen.p_norm
+                    scale = max(1.0, float(np.max(np.abs(b)))) if (q is None and b.size) else 1.0
+                    res = newton_solve(
+                        problem,
+                        beta0=beta0_,
+                        lam=lam,
+                        q=q,
+                        max_iter=500 if max_iter is None else int(max_iter),
+                        tol=1e-10 if tol is None else float(tol),
+                        tol_scale=scale,
+                        boundary_tol=self.boundary_tol,
+                    )
+                else:
+                    q = 1.0 if (pen.penalty is None or lam == 0.0) else pen.p_norm
+                    default_tol = 1e-6 * lam if lam > 0.0 else 1e-10
+                    res = fista_solve(
+                        problem,
+                        beta0=beta0_,
+                        lam=lam,
+                        q=q,
+                        radius=self.l1_radius,
+                        max_iter=100_000 if max_iter is None else int(max_iter),
+                        tol=default_tol if tol is None else float(tol),
+                        boundary_tol=self.boundary_tol,
+                    )
+
+        grad_loss = res.gradient
+        imbalance = (
+            float(np.max(np.abs(grad_loss))) if grad_loss is not None and grad_loss.size else
+            float("nan")
+        )
+        if grad_loss is not None and kind == "newton" and lam > 0.0:
+            gnorm = float(np.max(np.abs(grad_loss + pen.grad(res.beta)))) if grad_loss.size else 0.0
+        else:
+            gnorm = imbalance
+        out = FitResult(
+            beta=res.beta,
+            success=res.status == OK,
+            message=res.message or res.status,
+            n_iter=res.n_iter,
+            status=res.status,
+            objective_value=res.objective,
+            gradient_norm=gnorm,
+            kkt_residual=res.kkt_residual,
+            clip_binding_rate=0.0 if res.status == OK else float("nan"),
+            fit_time=time.perf_counter() - t0,
+            solver=kind,
+            max_abs_imbalance=imbalance,
+            n_boundary=res.n_boundary,
+            l1_ball_active=res.l1_ball_active,
+            ball_multiplier=res.ball_multiplier,
+            polished=res.polished,
+            hessian_min_eig=res.hessian_min_eig,
+        )
+        self.beta_ = res.beta if res.status == OK else None
+        self.fit_result_ = out
+        self._Phi = None
+        self._M = None
+        return out
+
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
+        """Dual coordinate ``v(x) = u_ref(x) + phi(x)^T beta``."""
+
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
-        Phi = np.asarray(self.basis(as_2d(X)), dtype=float)
-        return Phi @ self.beta_
+        X_ = as_2d(X)
+        Phi = np.asarray(self.basis(X_), dtype=float)
+        return evaluate_offset(self.offset, X_) + Phi @ self.beta_
 
-    def predict_alpha(self, X: ArrayLike) -> NDArray[np.float64]:
-        v = self.predict_v(X)
-        return self.generator.inv_grad(as_2d(X), v)
+    def domain_mask(self, X: ArrayLike) -> NDArray[np.bool_]:
+        """Rows at which the fitted representer is defined.
 
-    def derivative_alpha(self, X: ArrayLike, coordinate: int) -> NDArray[np.float64]:
+        True where the predicted dual coordinate lies in the open range of
+        ``g'`` on the row's branch and the representer value is finite. Points
+        outside it (e.g. evaluation-fold or counterfactual rows beyond the range
+        of a BP/BKL link) have no representer value: the strict
+        ``predict_alpha`` raises there rather than clipping.
+        """
+
+        X_ = as_2d(X)
+        v = self.predict_v(X_)
+        ok = np.asarray(self.generator.link_domain(X_, v), dtype=bool)
+        if np.any(ok):
+            _, a, _ = self.generator.dual_eval(X_[ok], v[ok])
+            ok_idx = np.flatnonzero(ok)
+            ok[ok_idx[~np.isfinite(a)]] = False
+        return ok
+
+    def predict_alpha(self, X: ArrayLike, *, out_of_domain: str = "raise") -> NDArray[np.float64]:
+        """Fitted representer ``alpha(x) = (g')^{-1}(v(x))``.
+
+        Parameters
+        ----------
+        out_of_domain:
+            ``"raise"`` (default): raise :class:`DomainError` if any row is
+            outside :meth:`domain_mask`. ``"nan"``: return NaN at those rows.
+            Nothing is clipped in either case (generators built with
+            ``legacy_clip=True`` clip inside their own link).
+        """
+
+        if out_of_domain not in {"raise", "nan"}:
+            raise ValueError("out_of_domain must be 'raise' or 'nan'")
+        X_ = as_2d(X)
+        v = self.predict_v(X_)
+        if self.solver == "lbfgs":
+            return self.generator.inv_grad(X_, v)
+        ok = self.domain_mask(X_)
+        if not np.all(ok) and out_of_domain == "raise":
+            raise DomainError(
+                f"{int(np.sum(~ok))}/{ok.shape[0]} prediction row(s) are outside the domain "
+                f"of generator '{self.generator.name}' (no finite representer value)."
+            )
+        out = np.full(v.shape[0], np.nan)
+        if np.any(ok):
+            out[ok] = self.generator.inv_grad(X_[ok], v[ok])
+        return out
+
+    def derivative_alpha(
+        self, X: ArrayLike, coordinate: int, *, out_of_domain: str = "raise"
+    ) -> NDArray[np.float64]:
         """Derivative of alpha(x) wrt x_coordinate.
 
         Uses the identity grad_g(alpha(x)) = v(x) and the inverse function theorem:
 
-            g''(alpha) * d alpha/dx = d v/dx.
+            g''(alpha) * d alpha/dx = d v/dx,
+
+        with ``d v/dx`` including the derivative of the offset.
         """
 
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
         X_ = as_2d(X)
         dPhi = self.basis.derivative(X_, coordinate)
-        dv = dPhi @ self.beta_
-        alpha = self.predict_alpha(X_)
-        g2 = np.asarray(self.generator.grad2(X_, alpha), dtype=float)
-        bad = ~np.isfinite(g2) | (g2 <= 0.0)
+        dv = dPhi @ self.beta_ + offset_derivative(self.offset, X_, coordinate)
+        alpha = self.predict_alpha(X_, out_of_domain=out_of_domain)
+        out = np.full_like(dv, np.nan, dtype=float)
+        ok = np.isfinite(alpha)
+        if not np.any(ok):
+            return out
+        g2 = np.full_like(dv, np.nan, dtype=float)
+        g2[ok] = np.asarray(self.generator.grad2(X_[ok], alpha[ok]), dtype=float)
+        bad = ok & (~np.isfinite(g2) | (g2 <= 0.0))
         if np.any(bad):
             warnings.warn(
                 "derivative_alpha encountered non-positive or non-finite curvature "
@@ -468,9 +829,8 @@ class GRRGLM:
                 RuntimeWarning,
                 stacklevel=2,
             )
-        out = np.full_like(dv, np.nan, dtype=float)
-        ok = ~bad
-        out[ok] = dv[ok] / g2[ok]
+        good = ok & ~bad
+        out[good] = dv[good] / g2[good]
         return out
 
 

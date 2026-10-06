@@ -56,7 +56,7 @@ from .generators import (
 )
 
 # Low-level solver (advanced)
-from .glm import GRRGLM, OutcomeGLM
+from .glm import GRRGLM, OutcomeGLM, offset_from_alpha
 
 # Matching (NN / local polynomial NN-LSIF)
 from .matching import (
@@ -70,6 +70,7 @@ from .model_selection import GRRCVConfig, GRRCVResult, select_grr_hyperparams
 
 # Results
 from .results import FunctionalEstimate, SingleEstimate
+from .solvers import STATUSES, SUCCESS_STATUSES
 
 # Diagnostics helpers (coverage-failure tables)
 from .utils import bias_proxy, coverage_decomposition, oracle_decomposition
@@ -92,6 +93,9 @@ __all__ = [
     "grr_ame",
     "GRRGLM",
     "OutcomeGLM",
+    "offset_from_alpha",
+    "STATUSES",
+    "SUCCESS_STATUSES",
     # Density ratio
     "fit_density_ratio",
     "DensityRatioResult",

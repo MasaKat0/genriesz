@@ -172,7 +172,7 @@ def test_branch_cache_nesting_restores_the_outer_cache():
 
 
 def test_squared_generator_never_reaches_the_cache():
-    """SQ + L2 is solved in closed form, before the cache is entered.
+    """Legacy ``solver="lbfgs"``: SQ + L2 is solved in closed form, before the cache.
 
     It is therefore excluded from the parametrization below, where it would be a
     vacuous case rather than a passing one.
@@ -186,23 +186,51 @@ def test_squared_generator_never_reaches_the_cache():
 
     gen.branch_cache = boom  # type: ignore[method-assign]
     fr = GRRGLM(
-        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3,
+        solver="lbfgs",
     ).fit(X)
 
     assert fr.success
     assert fr.status == "closed_form"
 
 
+def test_strict_solver_skips_the_cache_without_a_branch_fn():
+    """SQ has no branch_fn, so the strict Newton path never needs the cache either."""
+
+    X = _make_ate(n=120, seed=6)
+    gen = SquaredGenerator(C=0.0)
+
+    def boom():
+        raise AssertionError("branch_cache must not be entered without a branch_fn")
+
+    gen.branch_cache = boom  # type: ignore[method-assign]
+    fr = GRRGLM(
+        basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+    ).fit(X)
+
+    assert fr.success
+    assert fr.status == "ok"
+    assert fr.solver == "newton"
+
+
 @pytest.mark.parametrize(
-    "make_gen",
+    "make_gen, solver, expected_status",
     [
-        lambda b: UKLGenerator(C=1.0, branch_fn=b),
-        lambda b: BPGenerator(C=1.0, omega=0.5, branch_fn=b),
-        lambda b: PUGenerator(C=1.0, branch_fn=b),
+        (lambda b: UKLGenerator(C=1.0, branch_fn=b, legacy_clip=True), "lbfgs", "converged"),
+        (
+            lambda b: BPGenerator(C=1.0, omega=0.5, branch_fn=b, legacy_clip=True),
+            "lbfgs",
+            "converged",
+        ),
+        (lambda b: PUGenerator(C=1.0, branch_fn=b, legacy_clip=True), "lbfgs", "converged"),
+        (lambda b: UKLGenerator(C=1.0, branch_fn=b), "auto", "ok"),
+        (lambda b: BPGenerator(C=0.0, omega=0.5, branch_fn=b), "auto", "ok"),
     ],
-    ids=["ukl", "bp", "pu"],
+    ids=["ukl-lbfgs", "bp-lbfgs", "pu-lbfgs", "ukl-newton", "bp-newton"],
 )
-def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monkeypatch):
+def test_fit_results_are_bit_identical_with_and_without_the_cache(
+    make_gen, solver, expected_status, monkeypatch
+):
     """The whole point of item W: the optimizer must land in the same place.
 
     Compare two real fits -- one with ``branch_cache`` active, one with it
@@ -217,11 +245,12 @@ def test_fit_results_are_bit_identical_with_and_without_the_cache(make_gen, monk
         if disable_cache:
             monkeypatch.setattr(gen, "branch_cache", contextlib.nullcontext)
         model = GRRGLM(
-            basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3
+            basis=_basis(X), generator=gen, functional=ATEFunctional(0), penalty="l2", lam=1e-3,
+            solver=solver,
         )
         fr = model.fit(X)
         assert fr.success
-        assert fr.status == "converged"  # the iterative path, not closed form
+        assert fr.status == expected_status  # the iterative path, not closed form
         return model.beta_, fr.kkt_residual, fr.clip_binding_rate, branch.calls
 
     beta_c, kkt_c, bind_c, calls_c = run(disable_cache=False)

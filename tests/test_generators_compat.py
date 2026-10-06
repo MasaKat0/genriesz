@@ -47,6 +47,7 @@ from genriesz import (
     BoundedBKLGenerator,
     BPGenerator,
     BregmanGenerator,
+    DomainError,
     GaussianRKHSBasis,
     GRRCVConfig,
     GRRCVResult,
@@ -97,11 +98,14 @@ def _imbalance(gen, X: np.ndarray, Phi: np.ndarray, M: np.ndarray, beta: np.ndar
 
 # The three generators the design names as ATE balancing candidates. BKL is
 # excluded on purpose: uncapped it raises at v = 0, and its density-ratio route
-# is the logistic classifier tested at the bottom of this file.
+# is the logistic classifier tested at the bottom of this file. BP uses C = 0:
+# with C = 1 the sample problem on these Gaussian designs has no interior
+# minimizer (the strict solver reports "boundary"), which the legacy L-BFGS
+# path used to hide by clipping the link.
 BALANCING_GENERATORS = [
     ("sq", lambda: SquaredGenerator(C=0.0)),
     ("ukl", lambda: UKLGenerator(C=1.0, branch_fn=_treated_branch)),
-    ("bp", lambda: BPGenerator(C=1.0, omega=0.5, branch_fn=_treated_branch)),
+    ("bp", lambda: BPGenerator(C=0.0, omega=0.5, branch_fn=_treated_branch)),
 ]
 _GEN_IDS = [g[0] for g in BALANCING_GENERATORS]
 
@@ -338,7 +342,7 @@ def test_all_candidates_failing_raises_without_the_sensitivity_warning():
     X, Y = _make_ate(n=120, seed=13)
 
     def _boom(_alpha):
-        raise RuntimeError("generator explodes")
+        raise DomainError("generator explodes")
 
     gen = BregmanGenerator(g=_boom)
     gen.modifies_estimand = True
