@@ -819,6 +819,17 @@ def summarise(raw):
     summ = pd.DataFrame(rows, columns=["arm", *SUMMARY_COLUMNS])
     summ["s2"] = (summ["coverage"] - 0.95).abs() <= S2_TOL
     summ.loc[summ["coverage"].isna(), "s2"] = False
+    # AutoDML-lasso: training folds of the successful replications whose outer iteration
+    # reached the cap (design §1.4 asks for the count)
+    summ["adml_folds"] = np.nan
+    summ["adml_outer_capped"] = np.nan
+    for i, arm in enumerate(summ["arm"]):
+        if not arm.endswith("|AutoDML"):
+            continue
+        g = raw[(raw["arm"] == arm) & (raw["status"] == "ok")]
+        folds = [f for s in g["adml_folds"] if s for f in json.loads(s)]
+        summ.loc[i, "adml_folds"] = len(folds)
+        summ.loc[i, "adml_outer_capped"] = sum(bool(f["outer_capped"]) for f in folds)
     return summ
 
 
@@ -873,6 +884,9 @@ BASE_LABEL = {"EB": "EB (= UKL, $C=0$, linear)", "LogitAIPW": "LogitAIPW",
 def _fmt(x, d=3):
     if x is None or (isinstance(x, float) and not np.isfinite(x)):
         return "--"
+    if abs(float(x)) >= 1e6:  # scientific notation: the page cannot hold 39 digits
+        m, e = f"{float(x):.2e}".split("e")
+        return f"${m}\\times10^{{{int(e)}}}$"
     s = f"{float(x):.{d}f}"
     return s[1:] if s.startswith("-") and float(s) == 0 else s
 
@@ -938,4 +952,10 @@ def tables(S, s1):
         "EXXIScountTwo": str(len(s2_arms)),
         "EXXIGRRArms": str(len(s1)),
     }
+    if "adml_folds" in S:
+        for est in ("ATE", "ATT"):
+            r = S[S["arm"] == f"{est}|AutoDML"]
+            if len(r) and np.isfinite(r["adml_folds"].iloc[0]):
+                macros[f"EXXIAdmlFolds{est}"] = str(int(r["adml_folds"].iloc[0]))
+                macros[f"EXXIAdmlCap{est}"] = str(int(r["adml_outer_capped"].iloc[0]))
     return tabs, macros, {"S1": s1_arms, "S2": s2_arms}

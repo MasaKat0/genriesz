@@ -110,7 +110,12 @@ REGISTERED_OUTPUTS = {
         "tables/tab_E22_status.tex",
     ),
     23: ("tables/tab_E23.tex",),
-    24: ("tables/tab_E24.tex", "figures/fig_E24_rmse.pdf", "macros_E-24.tex"),
+    24: (
+        "tables/tab_E24.tex",
+        "figures/fig_E24_rmse.pdf",
+        "macros_E-24.tex",
+        "tables/tab_E24_autodml.tex",
+    ),
 }
 PILOT_COLUMNS = {
     "timing.csv": ("cell", "workers", "seconds"),

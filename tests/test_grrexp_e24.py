@@ -233,9 +233,9 @@ def test_summary_tables_macros_and_figure(monkeypatch) -> None:
     assert {"rmse", "coverage", "coverage_close_to_nominal", "failure_rate"} <= set(S.columns)
     comps = e24.compare(raw, Seeds(24, entropy=PILOT_ENTROPY))
     tabs = e24.tables(S, comps)
-    assert set(tabs) == {"tab_E24", "tab_E24_comparisons"}
-    for tex in tabs.values():
-        assert "\\endfirsthead" in tex and "\\endhead" in tex
+    assert set(tabs) == {"tab_E24", "tab_E24_comparisons", "tab_E24_autodml"}
+    for name in ("tab_E24", "tab_E24_comparisons"):  # the long tables; the stopping one is short
+        assert "\\endfirsthead" in tabs[name] and "\\endhead" in tabs[name]
     assert tabs["tab_E24"].count(" \\\\") == 2 + len(e24.ARM_LABELS) * len(e24.N_VALUES)
     m = e24.macros(S, comps)
     assert all(outputs.MACRO_NAME.match(k) for k in m)
@@ -248,6 +248,7 @@ def test_registered_outputs_and_runs() -> None:
     assert outputs.REGISTERED_RUNS[24]["main"] == (1000, [1000, 2000, 4000, 8000])
     assert set(outputs.REGISTERED_OUTPUTS[24]) == {
         "tables/tab_E24.tex",
+        "tables/tab_E24_autodml.tex",
         "figures/fig_E24_rmse.pdf",
         "macros_E-24.tex",
     }
@@ -307,3 +308,17 @@ def test_per_cell_aggregation_compares_only_the_present_cell(monkeypatch) -> Non
     assert {c["n"] for c in comps} == {2000} and len(comps) == 20 + 6
     S = e24.summarise(one)
     assert set(S["n"]) == {2000} and "root_n_sd" in S
+
+
+
+def test_autodml_stopping_table_counts_folds_once():
+    S = pd.DataFrame([
+        {"arm": "AutoDML|ARW_cf", "n": 1000, "R": 1000, "cns_outer_cap_folds": 4997.0,
+         "cns_inner_sweeps_max": 77.0},
+        {"arm": "AutoDML|TMLE_cf", "n": 1000, "R": 1000, "cns_outer_cap_folds": 4997.0,
+         "cns_inner_sweeps_max": 77.0},
+        {"arm": "SQ|ARW_cf", "n": 1000, "R": 1000, "cns_outer_cap_folds": float("nan"),
+         "cns_inner_sweeps_max": float("nan")},
+    ])
+    rows = [ln for ln in e24.autodml_table(S).splitlines() if ln[:1].isdigit()]
+    assert rows == ["1000 & 4997 of 5000 & 77 \\\\"]

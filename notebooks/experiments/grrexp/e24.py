@@ -1090,7 +1090,22 @@ def tables(S, comps):
             + END
         )  # fmt: skip
     comp = "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
-    return {"tab_E24": tab, "tab_E24_comparisons": comp}
+    out = {"tab_E24": tab, "tab_E24_comparisons": comp}
+    if "cns_outer_cap_folds" in S:
+        out["tab_E24_autodml"] = autodml_table(S)
+    return out
+
+
+def autodml_table(S):
+    """``tab_E24_autodml``: AutoDML-lasso stopping (design §1.4), one count per fitted
+    training fold; the ARW and TMLE rows share the same fits, so the ARW rows are used."""
+    r = S[(S["arm"] == "AutoDML|ARW_cf") & S["cns_outer_cap_folds"].notna()]
+    lines = ["\\begin{tabular}{rrr}", "\\hline",
+             "$n$ & Folds at the outer cap & Largest number of sweeps" + END, "\\hline"]
+    for x in r.itertuples():
+        lines.append(f"{int(x.n)} & {int(x.cns_outer_cap_folds)} of {int(x.R) * K} & "
+                     f"{int(x.cns_inner_sweeps_max)}" + END)
+    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
 
 
 def macros(S, comps):

@@ -263,7 +263,8 @@ def test_all_failed_arm_summary_has_the_schema() -> None:
     arw = summ[summ["arm"] == "ATE|lin-SQ|ARW"].iloc[0]
     assert arw["coverage"] == 0.0 and np.isnan(arw["coverage_conditional"])
     assert np.isnan(summ.loc[summ["arm"] == "ATE|RA", "coverage"]).all()
-    assert list(summ.columns) == ["arm", *e21.SUMMARY_COLUMNS, "s2"]
+    extra = ["s2", "adml_folds", "adml_outer_capped"]
+    assert list(summ.columns) == ["arm", *e21.SUMMARY_COLUMNS, *extra]
 
 
 def test_shared_fit_warnings_are_counted_once(monkeypatch) -> None:
@@ -367,3 +368,10 @@ def test_summary_reductions_and_s1_near_the_float_limit() -> None:
     # resamples that repeat the outlier have a ratio above the largest float: the
     # interval is then undefined (S1 is not written), never an overflowed number
     assert (np.isnan(lo) and np.isnan(hi)) or (np.isfinite(lo) and lo <= hi)
+
+
+def test_fmt_scientific_for_large_values():
+    assert e21._fmt(1.64e26) == "$1.64\\times10^{26}$"
+    assert e21._fmt(-3.1e10) == "$-3.10\\times10^{10}$"
+    assert e21._fmt(999999.0) == "999999.000"
+    assert e21._fmt(-0.0001) == "0.000"
