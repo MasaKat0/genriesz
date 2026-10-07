@@ -1,0 +1,74 @@
+{
+  "R": null,
+  "n": null,
+  "cells": null,
+  "warnings": 0,
+  "failures": 0,
+  "outputs": [
+    "stage0_e18_design.json"
+  ],
+  "loaded_modules": {
+    "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
+    "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
+    "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
+    "notebooks/experiments/grrexp/e18.py": "99c6d3fbaca52560889b8890ed4d5667183a3557",
+    "notebooks/experiments/grrexp/env.py": "1853cf84fe3f22b630961c5f4dadc54a85b8d2b6",
+    "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
+    "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
+    "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
+    "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
+    "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
+    "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
+    "src/genriesz/basis.py": "2052936d30af52aab47b3e4701f1f11b7c546be4",
+    "src/genriesz/certificates.py": "bb36fbde5d0ba2281812514e6922652688c8e906",
+    "src/genriesz/density_ratio.py": "c7b2fc8205591769d9355227118bdba4b53fc172",
+    "src/genriesz/estimation.py": "a3894c63fdadb072d66ed097d84417e47e2e6838",
+    "src/genriesz/functionals.py": "5173e30ee15065537fe2e0ac1c684c03e2ff1126",
+    "src/genriesz/general_link.py": "06c80b8e415f3fe794467d73ee646141e7576c3c",
+    "src/genriesz/generators.py": "1cef919c42a5ccf1653b50a930b130a810e4d4ca",
+    "src/genriesz/glm.py": "d43427b48d8f3223daff887a02ce9b2ae28f246e",
+    "src/genriesz/matching.py": "fdc5065e12eeec56137e5927cb48f459ab6085eb",
+    "src/genriesz/model_selection.py": "8dc4de187a7acf06552eb828df1a4dccc1e94774",
+    "src/genriesz/results.py": "2a9aeede3b349f677ac3d03f5b95bb2b28bf1af9",
+    "src/genriesz/solvers.py": "4d5011d7ed132d371b670d03c121d6da0f29fbc9",
+    "src/genriesz/utils.py": "301b61ab5957c497a7a7ed1a4b01a631cdd88d72"
+  },
+  "threads": {
+    "variables": {
+      "OMP_NUM_THREADS": "1",
+      "OPENBLAS_NUM_THREADS": "1",
+      "VECLIB_MAXIMUM_THREADS": "1"
+    },
+    "blas_backend": "accelerate",
+    "observed_pools": [
+      {
+        "internal_api": "openmp",
+        "num_threads": 1
+      },
+      {
+        "internal_api": "openmp",
+        "num_threads": 1
+      }
+    ],
+    "torch": {
+      "num_threads": 1,
+      "deterministic": true
+    }
+  },
+  "environment": {
+    "platform": [
+      "Darwin",
+      "arm64"
+    ],
+    "python": "3.13.6",
+    "lock_sha256": "79c11e8e0fa905a38a6f88dd91f9d445906d803693df4b5b7632ebda6ea4a79f",
+    "lock_pins_verified": 109,
+    "executable": "/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
+  },
+  "data_sha256": {},
+  "pip_freeze": "absl-py==2.3.1\naccelerate==1.12.0\naccess==1.1.10.post3\naffine==3.0.1\n# Editable install with no version control (ai-economist-experiments==1.0.0)\n-e /Users/mkato/Downloads/ai_economist_agent_ejf_special_issue_v22_20260831\naiohappyeyeballs==2.6.1\naiohttp==3.12.15\naiosignal==1.4.0\nalabaster==1.0.0\nalembic==1.19.1\naltair==6.1.0\nannotated-doc==0.0.5\nannotated-types==0.8.0\nanyio==4.14.2\nappnope==1.0.0\nAPScheduler==3.11.0\narch==8.0.0\nargon2-cffi==25.1.0\nargon2-cffi-bindings==26.1.0\narrow==1.4.0\narviz==1.2.0\narviz-base==1.2.0\narviz-plots==1.2.0\narviz-stats==1.2.0\nasttokens==3.0.2\nastunparse==1.6.3\nasync-lru==2.3.0\nattrs==26.1.0\naudioop-lts==0.2.2\naudioread==3.1.0\nautoelicit==0.1.15\nautograd==1.8.0\nautopep8==2.3.2\nazure-core==1.35.0\nazure-identity==1.24.0\nazure-storage-blob==12.26.0\nbabe==0.0.7\nbabel==2.18.0\nbackoff==2.2.1\n# Editable install with no version control (bank-stress-ai-economist==0.1.0)\n-e /Users/mkato/Downloads/bank_stress_ai_economist 32\nbeartype==0.14.1\nbeautifulsoup4==4.14.3\nbetter-abc==0.0.3\nbleach==6.4.0\nblinker==1.9.0\nboto3==1.34.34\nbotocore==1.34.162\nbranca==0.8.2\nbuild==1.5.0\ncachetools==6.2.4\ncausal-learn==0.1.4.4\ncausalml==0.15.5\ncertifi==2026.7.22\ncffi==2.1.1\ncharset-normalizer==3.5.1\nclarabel==0.11.1\nclick==8.5.0\ncligj==0.7.2\ncloudpickle==3.1.1\ncomm==0.2.3\nconfig2py==0.1.45\ncons==0.4.7\ncontourpy==1.3.3\ncoverage==7.13.5\ncryptography==43.0.3\ncurl_cffi==0.16.2\ncvxpy==1.7.3\ncycler==0.12.1\ndask==2025.10.0\ndatasets==4.5.0\ndebugpy==1.8.21\ndecorator==5.2.1\ndefusedxml==0.7.1\ndensratio==0.3.0\ndill==0.4.0\ndistro==1.9.0\ndnspython==2.7.0\ndocstring_parser==0.17.0\ndocutils==0.22.4\ndol==0.3.38\ndotenv==0.9.9\necos==2.0.14\nedinet-ai-search @ file:///Users/mkato/Downloads/edinet_ai_search_v1.1.0\neinops==0.8.1\nemail_validator==2.2.0\nesda==2.8.2\net_xmlfile==2.0.0\netuples==0.3.10\nexchange_calendars==4.13.2\nexecuting==2.2.1\nfancy-einsum==0.0.3\nfastapi==0.141.1\nfastapi-sso==0.16.0\nfastjsonschema==2.22.2\nfeather-format==0.4.1\nfilelock==3.18.0\nflatbuffers==25.12.19\nfolium==0.20.0\nfonttools==4.63.0\nforestci==0.6\nfqdn==1.5.1\nfrozendict==2.4.7\nfrozenlist==1.7.0\nfsspec==2025.7.0\ngast==0.7.0\n-e git+https://github.com/MasaKat0/grr@f48a45ae8fbbd81e03a3642941320ac96e9bdc3e#egg=generalized_riesz_regression\n-e git+https://github.com/MasaKat0/genriesz@4a2ce9d99386303863a0fc60232b0537b6795096#egg=genriesz\ngeographiclib==2.1\ngeopandas==1.1.3\ngeopy==2.5.0\ngiddy==2.3.9\ngit-filter-repo==2.47.0\ngitdb==4.0.12\nGitPython==3.1.46\ngoogle-pasta==0.2.0\ngrandalf==0.8\ngraphviz==0.21\ngraze==0.1.39\ngreenlet==3.5.5\ngrpcio==1.75.0\ngrr==0.1.5\n# Editable install with no version control (gtdd-claude-code-experiments==1.2.0)\n-e /Users/mkato/Downloads/gtdd_claude_code_v18_opus_high 2\n# Editable install with no version control (gtdd-experiments==0.4.0)\n-e /Users/mkato/Downloads/gtdd_revised_v13\n# Editable install with no version control (gtdd-luna-experiments==1.0.0)\n-e /Users/mkato/Downloads/gtdd_revised_v14\ngunicorn==23.0.0\ngwlearn==0.2.0\nh11==0.16.0\nh5netcdf==1.7.3\nh5py==3.15.1\nhf-xet==1.2.0\nhttpcore==1.0.9\nhttpcore2==2.12.0\nhttptools==0.8.0\nhttpx==0.28.1\nhttpx-sse==0.4.1\nhttpx2==2.12.0\nhuggingface-hub==0.36.0\ni2==0.1.63\nid==1.5.0\nidna==3.19\nimagesize==1.4.1\nimportlib_metadata==8.7.0\nimportlib_resources==6.5.2\ninequality==1.2.0\niniconfig==2.3.0\nipykernel==6.31.0\nipython==9.16.1\nipython-genutils==0.2.0\nipython_pygments_lexers==1.1.1\nipywidgets==8.1.9\nisodate==0.7.2\nisoduration==20.11.0\nitext2kg==1.0.0\nitsdangerous==2.2.0\njapanize-matplotlib==1.1.3\njaraco.classes==3.4.0\njaraco.context==6.1.0\njaraco.functools==4.4.0\njaxtyping==0.3.5\njedi==0.20.0\nJinja2==3.1.6\njiter==0.16.0\njmespath==1.0.1\njoblib==1.5.2\n# Editable install with no version control (jp-housing-consumption==0.1.0)\n-e /Users/mkato/Downloads/jp-housing-consumption-v0.2\njson5==0.15.0\njsonpatch==1.33\njsonpointer==3.1.1\njsonschema==4.26.0\njsonschema-specifications==2025.9.1\njupyter==1.1.1\njupyter-console==6.6.3\njupyter-events==0.12.1\njupyter-lsp==2.3.1\njupyter_builder==1.2.2\njupyter_client==8.9.1\njupyter_core==5.9.1\njupyter_server==2.21.0\njupyter_server_terminals==0.5.4\njupyterlab==4.6.3\njupyterlab_pygments==0.3.0\njupyterlab_server==2.28.0\njupyterlab_widgets==3.0.17\nkeras==3.13.1\nkeyring==25.7.0\nkiwisolver==1.5.0\nkorean_lunar_calendar==0.4.0\nlangchain==0.3.30\nlangchain-classic==1.0.8\nlangchain-community==0.4.2\nlangchain-core==0.3.86\nlangchain-openai==0.2.14\nlangchain-protocol==0.0.18\nlangchain-text-splitters==0.3.11\nlanggraph==1.2.6\nlanggraph-checkpoint==4.1.1\nlanggraph-prebuilt==1.1.0\nlanggraph-sdk==0.4.2\nlangsmith==0.8.8\nlark==1.3.1\nlazy-loader==0.5\nlibclang==18.1.1\nlibpysal==4.14.1\nlibrosa==0.11.0\nlibrt==0.9.0\nlightgbm==4.6.0\nlingam==1.12.1\nlitellm==1.75.5.post1\nlitellm-enterprise==0.1.19\nlitellm-proxy-extras==0.2.16\nllvmlite==0.47.0\nlocket==1.0.0\nlogical-unification==0.4.7\nluddite==1.0.4\nlxml==6.0.2\nMako==1.4.1\nmapclassify==2.11.0\nMarkdown==3.9\nmarkdown-it-py==4.0.0\n# Editable install with no version control (market-strategy-coevolution==0.2.1)\n-e /Users/mkato/Downloads/market_strategy_coevolution_replication_v4_20260830\nMarkupSafe==3.0.3\nmatplotlib==3.10.8\nmatplotlib-fontja==1.1.0\nmatplotlib-inline==0.2.2\nmcp==1.12.4\nmdit-py-plugins==0.5.0\nmdurl==0.1.2\nmgwr==2.2.1\nminiKanren==1.0.5\nmistune==3.3.4\nmizani==0.14.2\nml_collections==1.1.0\nml_dtypes==0.5.4\nmomentchi2==0.1.8\nmomepy==1.0.0\nmore-itertools==10.8.0\nmpmath==1.3.0\nmsal==1.33.0\nmsal-extensions==1.3.1\nmsgpack==1.2.1\nmultidict==6.6.4\nmultipledispatch==1.0.0\nmultiprocess==0.70.18\nmultitasking==0.0.12\nmypy==1.20.2\nmypy_extensions==1.1.0\nmyst-parser==5.0.0\nnamex==0.1.0\nnarwhals==2.15.0\nnbclassic==1.3.1\nnbclient==0.11.0\nnbconvert==7.17.1\nnbformat==5.10.4\nnbqa==1.9.1\nnbsphinx==0.9.8\nneo4j==5.28.4\nnest-asyncio==1.6.0\nnest-asyncio2==1.7.2\nnetworkx==3.5\nnh3==0.3.2\nnltk==3.9.2\nnotebook==7.6.2\nnotebook_shim==0.2.4\nnumba==0.65.1\nnumdifftools==0.9.42\nnumpy==2.3.5\noauthlib==3.3.1\nollama==0.6.1\nopenai==3.3.1\nopenpyxl==3.1.5\nopt_einsum==3.4.0\noptree==0.18.0\norjson==3.11.9\normsgpack==1.12.2\nosmnx==2.0.7\nosqp==1.0.5\noutcome==1.3.0.post0\noverrides==7.7.0\npackaging==26.3\npandas==2.3.3\npandas-datareader==0.10.0\npandocfilters==1.5.1\nparso==0.8.7\npartd==1.4.2\npathos==0.2.9\npathspec==1.1.1\npatsy==1.0.1\npdfminer.six==20260107\npeewee==3.18.3\npexpect==4.9.0\npillow==12.3.0\nplatformdirs==4.11.4\nplaywright==1.57.0\nplotly==6.5.2\nplotly-express==0.4.1\nplotnine==0.15.0\npluggy==1.6.0\npointpats==2.6.0\npolars==1.32.2\npooch==1.9.0\npox==0.3.6\nppft==1.7.7\npraat-parselmouth==0.4.7\nprogressbar2==4.5.0\nprometheus_client==0.26.0\nprompt_toolkit==3.0.53\npropcache==0.3.2\nprotobuf==6.32.1\npsutil==7.2.2\npsy==0.0.1\nptyprocess==0.7.0\nPuLP==3.3.2\npure_eval==0.2.3\npy2store==0.1.22\npyarrow==22.0.0\npycodestyle==2.14.0\npycparser==3.0\npydantic==2.12.5\npydantic-settings==2.15.0\npydantic_core==2.41.5\npydeck==0.9.2\npydot==4.0.1\npydotplus==2.0.2\npyee==13.0.1\npygam==0.12.0\nPygments==2.21.0\nPyJWT==2.10.1\npyluach==2.3.0\npymc==6.1.0\npymupdf==1.28.2\nPyNaCl==1.5.0\npyogrio==0.12.1\npyparsing==3.3.2\npypdf==4.3.1\nPyPDF2==3.0.1\nPypeR==1.1.2\npyproj==3.7.2\npyproject_hooks==1.2.0\npysal==26.1\nPySocks==1.7.1\npytensor==3.1.3\npytest==9.0.2\npytest-cov==7.1.0\npython-dateutil==2.9.0.post0\npython-dotenv==1.1.1\npython-json-logger==4.2.0\npython-multipart==0.0.32\npython-pptx==1.0.2\npython-utils==3.9.1\npytz==2025.2\nPyYAML==6.0.3\npyzmq==27.2.0\nquantecon==0.12.0\nrasterio==1.5.2\nrasterstats==0.21.0\nreadme_renderer==44.0\nredis==6.4.0\nreferencing==0.37.0\nregex==2025.7.34\nreportlab==4.5.1\nrequests==2.34.2\nrequests-toolbelt==1.0.0\nrfc3339-validator==0.1.4\nrfc3986==2.0.0\nrfc3986-validator==0.1.1\nrfc3987-syntax==1.1.0\nrich==14.3.4\nroman-numerals==4.1.0\nrpds-py==2026.6.3\nrpy2==3.6.3\nrpy2-rinterface==3.6.3\nrpy2-robjects==3.6.2\nrq==2.4.1\nrtree==1.4.1\nruff==0.15.12\ns3transfer==0.10.4\nsae-lens==6.30.1\nsafetensors==0.7.0\nscikit-learn==1.7.2\nscipy==1.16.3\nscpi_pkg==3.0.1\nscs==3.2.9\nseaborn==0.13.2\nsegregation==2.6.0\nselenium==4.44.0\nsemopy==2.3.11\nSend2Trash==2.1.0\nsentencepiece==0.2.1\nsentry-sdk==2.49.0\nsetuptools==82.0.1\nshap==0.50.0\nshapely==2.1.2\nshellingham==1.5.4\nsimple-parsing==0.1.7\nsimplejson==4.2.0\nsix==1.17.0\nslicer==0.0.8\nsmmap==5.0.2\nsniffio==1.3.1\nsnowballstemmer==3.0.1\nsortedcontainers==2.4.0\nsoundfile==0.14.0\nsoupsieve==2.9.2\nsoxr==1.1.0\nspaghetti==1.7.6\nspglm==1.1.0\nSphinx==9.1.0\nsphinx-autodoc-typehints==3.6.3\nsphinx_rtd_theme==3.1.0\nsphinxcontrib-applehelp==2.0.0\nsphinxcontrib-devhelp==2.0.0\nsphinxcontrib-htmlhelp==2.1.0\nsphinxcontrib-jquery==4.1\nsphinxcontrib-jsmath==1.0.1\nsphinxcontrib-qthelp==2.0.0\nsphinxcontrib-serializinghtml==2.0.0\nspint==1.1.0\nsplot==1.1.7\nspopt==0.8.0\nspreg==1.9.0\nSQLAlchemy==2.0.51\nsse-starlette==3.0.2\nstack-data==0.6.3\nstandard-aifc==3.13.0\nstandard-chunk==3.13.0\nstandard-sunau==3.13.0\nstarlette==0.46.2\nstatsmodels==0.14.6\nstreamlit==1.58.0\nsympy==1.14.0\nSyntheticControlMethods==1.1.17\ntenacity==9.1.2\ntensorboard==2.20.0\ntensorboard-data-server==0.7.2\ntensorflow==2.20.0\ntermcolor==3.3.0\nterminado==0.18.1\nthreadpoolctl==3.6.0\ntiktoken==0.11.0\ntinycss2==1.5.1\ntobler==0.14.0\ntokenize_rt==6.2.0\ntokenizers==0.22.2\ntoml==0.10.2\ntomli==2.4.1\ntoolz==1.1.0\ntorch==2.8.0\ntorchdiffeq==0.2.5\ntorchvision==0.23.0\ntornado==6.5.8\ntqdm==4.67.1\ntraitlets==5.16.1\ntransformer-lens==2.16.1\ntransformers==4.57.6\ntransformers-stream-generator==0.0.5\ntrio==0.33.0\ntrio-websocket==0.12.2\ntruststore==0.10.4\ntwine==6.2.0\ntypeguard==4.4.4\ntyper==0.27.1\ntyper-slim==0.21.0\ntypes-python-dateutil==2.9.0.20250809\ntyping-inspection==0.4.4\ntyping_extensions==4.16.0\ntzdata==2026.3\ntzlocal==5.3.1\nucimlrepo==0.0.7\nuri-template==1.3.0\nurllib3==2.7.0\nuuid_utils==0.16.0\nuv==0.11.25\nuvicorn==0.48.0\nuvloop==0.21.0\nwadler_lindig==0.1.7\nwandb==0.24.0\nwatchfiles==1.2.0\nwcwidth==0.8.2\nwebcolors==25.10.0\nwebencodings==0.6.1\nwebsocket-client==1.9.0\nwebsockets==15.0.1\nWerkzeug==3.1.3\nwheel==0.47.0\nwidgetsnbextension==4.0.16\nwrapt==2.0.1\nwsproto==1.3.2\nxarray==2025.12.0\nxarray-einstats==0.9.1\nxgboost==3.1.2\nxlrd==2.0.2\nxlsxwriter==3.2.9\nxxhash==3.6.0\nxyzservices==2026.3.0\nyarl==1.20.1\nyfinance==1.7.0\nzipp==3.23.0\nzstandard==0.25.0\n",
+  "pip_freeze_sha256": "f771f299d454cc037e9666d2fa3539d9996ef635d0cf4c502832925d487c5f9f",
+  "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
+  "cpu": "Apple M4 Pro",
+  "extra": {}
+}
