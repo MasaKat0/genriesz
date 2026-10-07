@@ -83,7 +83,15 @@ CHOICES = {
     "lambda_grid": "D3 ridge grid {1e-4, 1e-3, 1e-2, 1e-1, 1} (powers of ten)",
     "rkhs": "100 centers drawn from the training rows, sigma = median heuristic",
     "logit_features": "LogitAIPW propensity on the non-constant D2 features",
-    "gbm_nested_cv": "DML-GBM: inner 3-fold CV on each outer training fold",
+    "gbm_nested_cv": "DML-GBM: inner 3-fold CV on each outer training fold (splits from "
+    "stream 2 after the D3 seeds; GBM random_state from stream 3)",
+    "dml_gbm_outcome": "DML-GBM keeps gradient-boosted nuisances for both the propensity and "
+    "the control outcome (its definition in E-12); the common OLS(D2) outcome regression is "
+    "used by every GRR arm and by LogitAIPW",
+    "smd_cf_aggregation": "cross-fit SMD per covariate: median over successful splits",
+    "majority": "an arm is reported unless more than half of the splits fail (k >= 50 of 100)",
+    "table_bodies": "tab_E22_full and tab_E22_smd are longtable bodies (\\endfirsthead/\\endhead "
+    "after the head; the manuscript sets them with longtable and adds the caption), as E-12",
     "smd_b_dictionary": "cross-fit dictionary SMD for D3 is not defined (fold-specific)",
 }
 
@@ -313,11 +321,15 @@ def _grr_arm(arm, X, Y, D, Zs, folds, inner_seed, center_seed):
     }
     if not res.success or not converged:
         status = res.status if not res.success else "convergence_warning"
-        return {e: _failed(status, **common) for e in ESTIMATORS}
+        out = {e: _failed(status, **common) for e in ESTIMATORS}
+        out["TMLE"]["n_warnings"] = 0  # one grr_att call: warnings counted once, on ARW
+        return out
     d = res.diagnostics
     a = np.asarray(d["alpha_values"], float)
     if not np.all(np.isfinite(a)):
-        return {e: _failed("nonfinite", **common) for e in ESTIMATORS}
+        out = {e: _failed("nonfinite", **common) for e in ESTIMATORS}
+        out["TMLE"]["n_warnings"] = 0
+        return out
     fit = {
         **weight_summaries(D, Zs, X, a, basis if dictionary != "D3" else None),
         "max_abs_alpha": float(np.max(np.abs(a))),
@@ -385,14 +397,13 @@ def _inner_ids(n, generator):
     return fold_ids(n, GBM_INNER_FOLDS, generator)
 
 
-def dml_gbm(D, Y, Zs, folds, seeds_gen):
+def dml_gbm(D, Y, Zs, folds, inner_gen, baseline_gen):
     """Cross-fitted AIPW for the ATT with gradient-boosted propensity (features Zs) and
     control outcome regression (features Zs, fitted on the controls), hyper-parameters
     chosen on each outer training fold by inner CV over the E-12 grid (log-loss, MSE)."""
     from sklearn.metrics import log_loss
 
-    seed = _seed_int(seeds_gen)
-    inner_gen = np.random.default_rng(seed)
+    seed = _seed_int(baseline_gen)
 
     def fit():
         e, mu0, chosen = np.empty(len(Y)), np.empty(len(Y)), []
@@ -460,7 +471,7 @@ def replicate(task):
         for e in ESTIMATORS:
             out[f"{arm}|{e}"] = res[e]
     out["LogitAIPW"] = logit_aipw(D, Y, d2_features(Zs, raw), folds)
-    out["DML-GBM"] = dml_gbm(D, Y, Zs, folds, s.baseline(ci, split))
+    out["DML-GBM"] = dml_gbm(D, Y, Zs, folds, inner, s.baseline(ci, split))
     return out
 
 
@@ -483,7 +494,7 @@ def full_sample(entropy):
     m = g.ATTFunctional(treatment_index=0, pi=pi1, pi_is_estimated=True)
     gen_seed = Seeds(EXP, entropy=entropy).inner_cv(1, 0)
     inner_seed, center_seed = _seed_int(gen_seed), _seed_int(gen_seed)
-    fits, alphas = {}, {}
+    fits, alphas, n_warn_total = {}, {}, 0
     for arm in GRR_ARMS:
         gen_name, dictionary = arm.split("-")
         gen = generator(gen_name)
@@ -494,7 +505,7 @@ def full_sample(entropy):
                                 selection_score="squared_loss_validation",
                                 admissibility_thresholds=admissibility_thresholds(),
                                 random_state=inner_seed)  # fmt: skip
-            sel, warns_cv, _ = baselines.run_recording_warnings(
+            sel, warns_cv, conv_cv = baselines.run_recording_warnings(
                 lambda: g.select_grr_hyperparams(
                     X_train=X, y_train=Y, m=m, basis=ATTArmBasis("D3", random_state=center_seed),
                     generator=gen, config=cfg, riesz_penalty="l2", riesz_lam=LAMBDA_GRID[0],
@@ -502,8 +513,9 @@ def full_sample(entropy):
                     raise_on_failure=False,
                 )
             )  # fmt: skip
-            if sel.status != "ok":
-                fits[arm] = {"status": str(sel.status)}
+            n_warn_total += int(sum(warns_cv.values()))
+            if sel.status != "ok" or not conv_cv:
+                fits[arm] = {"status": str(sel.status) if sel.status != "ok" else "convergence_warning"}
                 continue
             lam, penalty = float(sel.lam), "l2"
         model = g.GRRGLM(basis=basis, generator=gen, functional=m, penalty=penalty, lam=lam,
@@ -511,6 +523,7 @@ def full_sample(entropy):
         fr, warns, converged = baselines.run_recording_warnings(
             lambda: model.fit(X, tol=SAMPLE_TOL) if penalty is None else model.fit(X)
         )
+        n_warn_total += int(sum(warns.values()))
         if fr.status != "ok" or not converged:
             fits[arm] = {"status": "convergence_warning" if fr.status == "ok" else str(fr.status),
                          "n_warnings": int(sum(warns.values()))}  # fmt: skip
@@ -536,14 +549,17 @@ def full_sample(entropy):
     e_logit, warns_l, conv_l = baselines.run_recording_warnings(
         lambda: _logistic_full(d2_features(Zs, raw), D)
     )
-    diag = {"bkl_threshold": threshold, "logit_e_min": float(np.min(e_logit[c])),
-            "logit_converged": bool(conv_l)}  # fmt: skip
+    n_warn_total += int(sum(warns_l.values()))
+    diag = {"bkl_threshold": threshold, "logit_converged": bool(conv_l),
+            # a nonconverged logistic fit gives no diagnostic
+            "logit_e_min_controls": float(np.min(e_logit[c])) if conv_l else None,
+            "logit_e_min_all": float(np.min(e_logit)) if conv_l else None}  # fmt: skip
     if EB_ARM in alphas:
         w = -alphas[EB_ARM][c]  # control weight e / (pi1 (1 - e))
         e_ukl = pi1 * w / (1 + pi1 * w)
         diag["ukl_d1_e_min"] = float(np.min(e_ukl))
     return {"fits": fits, "unweighted_smd": [float(v) for v in unweighted], "eb_check": eb,
-            "admissibility": diag, "pi1": pi1}  # fmt: skip
+            "admissibility": diag, "pi1": pi1, "n_warnings": n_warn_total}  # fmt: skip
 
 
 def _logistic_full(F2, D):
@@ -606,7 +622,7 @@ def summarise(raw, full):
         k = len(ok)
         row = {"arm": arm, "R": len(g), "R_s": k,
                "status_counts": json.dumps(dict(sorted(collections.Counter(g["status"]).items())))}
-        if k > len(g) / 2:
+        if k > 0 and k >= len(g) / 2:  # reported unless more than half of the splits fail
             t, s2 = median_aggregate(ok["estimate"], N * ok["se"] ** 2, N)
             row.update(estimate=t, se=float(np.sqrt(s2 / N)), reported=True)
         else:
@@ -614,6 +630,9 @@ def summarise(raw, full):
         for f in ("smd_raw_max", "smd_dict_max", "ess_c", "wrong_sign_share", "max_abs_alpha", "lam"):
             v = ok[f].dropna()
             row[f"cf_{f}"] = float(np.median(v)) if len(v) else np.nan
+        vecs = [json.loads(v) for v in ok["smd_raw"] if isinstance(v, str) and v.startswith("[")]
+        row["cf_smd_raw"] = (json.dumps([float(x) for x in np.median(np.array(vecs), axis=0)])
+                             if vecs else "")  # fmt: skip
         base = arm.split("|")[0]
         fs = full["fits"].get(base, {})
         row["full_status"] = fs.get("status", "")
@@ -626,6 +645,7 @@ def summarise(raw, full):
     summ["eb_check"] = json.dumps(full["eb_check"])
     summ["admissibility"] = json.dumps(full["admissibility"])
     summ["pi1"] = full["pi1"]
+    summ["full_n_warnings"] = full["n_warnings"]
     return summ
 
 
@@ -699,7 +719,10 @@ def tables(S):
                       _fmt(r["cf_smd_dict_max"]), _fmt(r["cf_smd_raw_max"]), _fmt(r["cf_ess_c"], 1),
                       _fmt(r["cf_wrong_sign_share"]), _fmt(r["cf_max_abs_alpha"], 2)]  # fmt: skip
         lines.append(" & ".join(cells) + END)
-    lines += ["\\hline", "\\end{tabular}"]
+    lines += ["\\hline",
+              "\\multicolumn{12}{l}{--: not applicable, not reported, or not defined (the cross-fit "
+              "dictionary SMD of D3, whose dictionaries are fold specific).}" + END,
+              "\\hline", "\\end{tabular}"]  # fmt: skip
     out["tab_E22_full"] = "\n".join(lines) + "\n"
 
     head = ["Weights", *[c.replace("_", "\\_") for c in RAW]]
@@ -709,9 +732,11 @@ def tables(S):
     lines.append(" & ".join(["Unweighted", *[_fmt(v) for v in unw]]) + END)
     for arm in GRR_ARMS:
         r = by[f"{arm}|ARW"]
-        vals = json.loads(r["full_smd_raw"]) if isinstance(r["full_smd_raw"], str) and r["full_smd_raw"] else None
-        cells = [_fmt(v) for v in vals] if vals else ["--"] * len(RAW)
-        lines.append(" & ".join([_label(f"{arm}|ARW"), *cells]) + END)
+        for col, tag in (("full_smd_raw", "full"), ("cf_smd_raw", "cf")):
+            v = r[col]
+            vals = json.loads(v) if isinstance(v, str) and v.startswith("[") else None
+            cells = [_fmt(x) for x in vals] if vals else ["--"] * len(RAW)
+            lines.append(" & ".join([f"{_label(f'{arm}|ARW')} ({tag})", *cells]) + END)
     lines += ["\\hline", "\\end{tabular}"]
     out["tab_E22_smd"] = "\n".join(lines) + "\n"
 
@@ -720,7 +745,8 @@ def tables(S):
     lines = ["\\begin{tabular}{lr}", "\\hline", "Diagnostic & Value" + END, "\\hline",
              f"EB vs.\\ independent dual Newton (max.\\ relative difference) & {_sci(eb.get('max_rel_diff'))}" + END,
              f"BKL ($C=0.05$) threshold for $\\widehat e$ & {_fmt(ad['bkl_threshold'], 5)}" + END,
-             f"Min.\\ logistic $\\widehat e$ among controls & {_fmt(ad['logit_e_min'], 5)}" + END,
+             f"Min.\\ logistic $\\widehat e$ (all units) & {_fmt(ad.get('logit_e_min_all'), 5)}" + END,
+             f"Min.\\ logistic $\\widehat e$ among controls & {_fmt(ad.get('logit_e_min_controls'), 5)}" + END,
              f"Min.\\ $\\widehat e$ implied by UKL, D1 & {_fmt(ad.get('ukl_d1_e_min'), 5)}" + END,
              "\\hline", "\\end{tabular}"]  # fmt: skip
     out["tab_E22_diag"] = "\n".join(lines) + "\n"
@@ -737,6 +763,14 @@ def tables(S):
             lines.append(f"{_label(arm)} & {int(r['R_s'])}/{int(r['R'])} & {txt}" + END)
     if not any_fail:
         lines.append("\\multicolumn{3}{l}{No split failed for any method.}" + END)
+    full_fail = [(a, by[f"{a}|ARW"]["full_status"]) for a in GRR_ARMS
+                 if by[f"{a}|ARW"]["full_status"] != "ok"]  # fmt: skip
+    lines += ["\\hline", "\\multicolumn{3}{l}{Full-sample fits (weights for the SMD and ESS):}" + END]
+    if full_fail:
+        for a, st in full_fail:
+            lines.append(f"{_label(f'{a}|ARW')} & -- & {str(st).replace('_', chr(92) + '_')}" + END)
+    else:
+        lines.append("\\multicolumn{3}{l}{Every full-sample fit succeeded.}" + END)
     lines += ["\\hline", "\\end{tabular}"]
     out["tab_E22_status"] = "\n".join(lines) + "\n"
     return out
