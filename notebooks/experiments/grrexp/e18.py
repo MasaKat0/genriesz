@@ -6,7 +6,7 @@ Design document: doc/2026-10-07_experiment_registration.md (parent repository), 
 it leaves open are recorded in ``docs/spec/02_data-and-experiments.md`` §2.1 ("E-18 の").
 This module holds the two designs, the 65 candidates, the Stage 0 computation, the
 replication function (importable for process parallelism) and the aggregation shared by
-the pilot and Stage 1. The notebook ``12_E18_heldout_riesz_selection.ipynb`` runs the
+the pilot and Stage 1. The notebook ``20_E18_heldout_riesz_selection.ipynb`` runs the
 stages; its last cell makes the table, the figure and the macros from ``summary.csv``.
 
 Candidates (``M = 65``, both designs): 4 generators (SQ, UKL(C=1), BKL(C=1),

@@ -1064,7 +1064,10 @@ END = " \\\\"  # LaTeX row end
 
 
 def _fmt(x, d=3):
-    return "--" if x is None or x != x else f"{float(x):.{d}f}"
+    if x is None or x != x:
+        return "--"
+    s = f"{float(x):.{d}f}"
+    return s[1:] if s.startswith("-") and float(s) == 0 else s  # no "-0.000"
 
 
 def _tex(x):
