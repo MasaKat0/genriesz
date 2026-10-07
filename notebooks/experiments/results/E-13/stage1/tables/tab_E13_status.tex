@@ -1,0 +1,18 @@
+\begin{tabular}{llrrl}
+\hline
+Pair & Estimator & $n$ & Successes & Statuses \\
+\hline
+C-BKL ($C=1$) & RW\_full & 1000 & 694 & domain\_prediction: 306, ok: 694 \\
+C-BKL ($C=1$) & RW\_full & 4000 & 823 & domain\_prediction: 177, ok: 823 \\
+C-BKL ($C=1$) & ARW\_cf & 1000 & 368 & domain\_prediction: 632, ok: 368 \\
+C-BKL ($C=1$) & ARW\_cf & 4000 & 589 & domain\_prediction: 411, ok: 589 \\
+I-SQexp & RW\_full & 1000 & 571 & linesearch: 407, nonfinite: 22, ok: 571 \\
+I-SQexp & RW\_full & 4000 & 909 & linesearch: 78, nonfinite: 13, ok: 909 \\
+I-SQexp & ARW\_cf & 1000 & 144 & linesearch: 818, nonfinite: 38, ok: 144 \\
+I-SQexp & ARW\_cf & 4000 & 659 & linesearch: 317, nonfinite: 24, ok: 659 \\
+I-UKLlin & RW\_full & 1000 & 39 & ok: 39, uncertified\_numerical\_boundary: 961 \\
+I-UKLlin & RW\_full & 4000 & 14 & ok: 14, uncertified\_numerical\_boundary: 986 \\
+I-UKLlin & ARW\_cf & 1000 & 0 & domain\_prediction: 15, uncertified\_numerical\_boundary: 985 \\
+I-UKLlin & ARW\_cf & 4000 & 0 & domain\_prediction: 5, uncertified\_numerical\_boundary: 995 \\
+\hline
+\end{tabular}
