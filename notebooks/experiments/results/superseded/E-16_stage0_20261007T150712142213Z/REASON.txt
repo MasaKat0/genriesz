@@ -1,0 +1,2 @@
+finished
+tables and macros were made from memory, not from summary.csv (registration §4; gpt-6.1-sol E-17 review item 6); re-run with the corrected notebook 2f6d4c8
