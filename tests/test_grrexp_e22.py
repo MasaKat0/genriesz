@@ -379,50 +379,76 @@ def test_replicate_routes_the_registered_streams(monkeypatch) -> None:
 
 
 def test_d3_tunes_and_fits_on_outer_training_rows_only(monkeypatch) -> None:
+    """Per outer fold k, in order: the selector sees exactly the training rows of k; every
+    basis fit inside the selection uses inner-training rows only (their complements in the
+    training rows are the inner validation folds, which partition them); the last fit of
+    fold k is the refit on exactly its training rows. No fit sees an evaluation row of k."""
     import genriesz.estimation as est
 
     D, Y, Zs, _, X = synthetic(n=250, seed=14)
     folds = fold_ids(len(Y), e22.K, np.random.default_rng(7))
     key = {tuple(np.round(r, 12)): i for i, r in enumerate(X)}
-    tuned, fitted = [], []
+    events = []
     real_select = est.select_grr_hyperparams
     real_fit = e22.ATTArmBasis.fit
 
+    def rows(A):
+        return frozenset(key[tuple(np.round(r, 12))] for r in np.atleast_2d(A))
+
     def select(**kw):
-        tuned.append({key[tuple(np.round(r, 12))] for r in kw["X_train"]})
+        events.append(("select", rows(kw["X_train"])))
         return real_select(**kw)
 
     def fit(self, X_, y=None):
         if self.dictionary == "D3":
-            fitted.append({key[tuple(np.round(r, 12))] for r in np.atleast_2d(X_)})
+            events.append(("fit", rows(X_)))
         return real_fit(self, X_, y)
 
     monkeypatch.setattr(est, "select_grr_hyperparams", select)
     monkeypatch.setattr(e22.ATTArmBasis, "fit", fit)
     out = e22._grr_arm("SQ-D3", X, Y, D, Zs, folds, 4, 5)
     assert out["ARW"]["status"] == "ok"
-    trains = [set(np.flatnonzero(folds != k)) for k in range(e22.K)]
-    assert tuned == trains  # lambda is chosen on each outer training fold only
-    assert fitted and all(any(f <= tr for tr in trains) for f in fitted)
+    starts = [i for i, e in enumerate(events) if e[0] == "select"]
+    assert len(starts) == e22.K and starts[0] == 0
+    for k, s in enumerate(starts):
+        train = frozenset(np.flatnonzero(folds != k))
+        seg = events[s:(starts[k + 1] if k + 1 < len(starts) else len(events))]
+        assert seg[0] == ("select", train)
+        fits = [f for kind, f in seg[1:] if kind == "fit"]
+        assert fits[-1] == train  # the outer refit
+        inner = fits[:-1]
+        assert inner and all(f < train for f in inner)  # strict subsets of the training rows
+        holdouts = {train - f for f in inner}
+        assert len(holdouts) == e22.INNER_FOLDS
+        assert frozenset().union(*holdouts) == train
+        assert sum(len(h) for h in holdouts) == len(train)  # the inner folds partition train
 
 
 def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypatch) -> None:
-    import warnings as _w
-
-    from sklearn.exceptions import ConvergenceWarning
-
+    """Every recorded call reports one warning; the fourth CV (BKL x D3) does not converge,
+    so that arm is not fitted; the logistic fit does not converge. The total is exact:
+    4 CV calls + 11 fits + 1 logistic = 16."""
     D, Y, Zs, raw, X = synthetic(n=300, seed=15)
     monkeypatch.setattr(e22, "data", lambda: {"D": D, "Y": Y, "Zs": Zs, "raw": raw, "X": X})
+    calls = {"cv": 0}
 
-    def logistic(F2, D_):
-        _w.warn("did not converge", ConvergenceWarning, stacklevel=1)
-        return np.full(len(D_), 0.3)
+    def recording(fit):
+        result = fit()
+        kind = type(result).__name__
+        if kind == "GRRCVResult":
+            calls["cv"] += 1
+            return result, {"W: cv": 1}, calls["cv"] != 4
+        if kind == "ndarray":  # the full-sample logistic fit
+            return result, {"W: logistic": 1}, False
+        return result, {"W: fit": 1}, True
 
-    monkeypatch.setattr(e22, "_logistic_full", logistic)
+    monkeypatch.setattr(baselines, "run_recording_warnings", recording)
     full = e22.full_sample(20261007)
+    assert calls["cv"] == 4
+    assert full["n_warnings"] == 4 + 11 + 1
+    assert full["fits"]["BKL-D3"]["status"] == "convergence_warning"
     ad = full["admissibility"]
     assert ad["logit_converged"] is False
     assert ad["logit_e_min_all"] is None and ad["logit_e_min_controls"] is None
-    assert full["n_warnings"] >= 1
     assert full["eb_check"]["agrees"]
     assert set(full["fits"]) == set(e22.GRR_ARMS)
