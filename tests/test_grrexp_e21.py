@@ -333,3 +333,37 @@ def test_summary_and_s1_are_scale_stable() -> None:
     assert np.isfinite(row["se_ratio"])
     s1 = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
     assert np.isfinite(s1["ATE|lin-SQ"][0])
+
+
+# ---------------------------------------------------------------- review fixes (round 3)
+
+
+def test_summary_reductions_and_s1_near_the_float_limit() -> None:
+    raw = _fake_raw(100)
+    arm = raw["arm"] == "ATE|lin-SQ|ARW"
+    raw.loc[arm, "se"] = 3.6e306
+    raw.loc[arm, "max_abs_alpha"] = 1e308
+    summ = e21.summarise(raw)
+    row = summ[summ["arm"] == "ATE|lin-SQ|ARW"].iloc[0]
+    assert row["se_mean"] == pytest.approx(3.6e306) and row["max_weight_median"] == pytest.approx(
+        1e308
+    )
+    rw = raw["arm"] == "ATE|lin-SQ|RW"
+    rng = np.random.default_rng(13)
+    # one RW error of 5e303 among zeros, ARW errors of order 1e-5: the scale quotient
+    # 5e303 / 1e-5 overflows, the SD ratio (about 9e307) does not
+    e_rw = np.zeros(rw.sum())
+    e_rw[0] = 5e303
+    raw.loc[rw, "estimate"] = 4.0 + e_rw
+    raw.loc[arm, "estimate"] = 4.0 + rng.uniform(-1e-5, 1e-5, size=arm.sum())
+    raw.loc[arm | rw, "status"] = "ok"
+    ratio, lo, hi = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))["ATE|lin-SQ"]
+    expected = (
+        np.std(e_rw / 5e303, ddof=1)
+        / np.std(raw.loc[arm, "estimate"].to_numpy() - 4.0, ddof=1)
+        * 5e303
+    )
+    assert np.isfinite(ratio) and ratio == pytest.approx(expected, rel=1e-9)
+    # resamples that repeat the outlier have a ratio above the largest float: the
+    # interval is then undefined (S1 is not written), never an overflowed number
+    assert (np.isnan(lo) and np.isnan(hi)) or (np.isfinite(lo) and lo <= hi)

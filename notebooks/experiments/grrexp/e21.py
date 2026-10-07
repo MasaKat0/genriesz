@@ -453,6 +453,16 @@ def _scaled(x):
     return x / s, s
 
 
+def _stable_mean(x):
+    x_s, s = _scaled(np.asarray(x, dtype=float))
+    return s * float(np.mean(x_s))
+
+
+def _stable_median(x):
+    x_s, s = _scaled(np.asarray(x, dtype=float))
+    return s * float(np.median(x_s))
+
+
 def _stable_ess(alpha):
     """``(sum |alpha|)^2 / sum alpha^2`` after scaling by ``max |alpha|``."""
     a = np.abs(alpha) / float(np.max(np.abs(alpha)))
@@ -790,12 +800,12 @@ def _arm_summary(arm, g):
         out["coverage"] = float(cov.sum() / len(ok))
         if ok.any():
             out["coverage_conditional"] = float(cov.sum() / ok.sum())
-            out["se_mean"] = float(np.mean(se[ok]))
+            out["se_mean"] = _stable_mean(se[ok])
             if np.isfinite(out["sd"]) and out["sd"] > 0:
                 out["se_ratio"] = out["se_mean"] / out["sd"]
     if ok.any() and g["max_abs_alpha"][ok].notna().all():
-        out["max_weight_median"] = float(np.median(g["max_abs_alpha"][ok]))
-        out["ess_median"] = float(np.median(g["ess"][ok]))
+        out["max_weight_median"] = _stable_median(g["max_abs_alpha"][ok].to_numpy())
+        out["ess_median"] = _stable_median(g["ess"][ok].to_numpy())
     return out
 
 
@@ -832,12 +842,15 @@ def s1_intervals(raw, seeds):
                     continue
                 e_rw, s_rw = _scaled((rw["estimate"] - rw["theta0"]).to_numpy()[both])
                 e_arw, s_arw = _scaled((arw["estimate"] - arw["theta0"]).to_numpy()[both])
-                scale = s_rw / s_arw
-                ratio = scale * float(np.std(e_rw, ddof=1) / np.std(e_arw, ddof=1))
+                # the ratio in logs: neither the scale quotient nor the SDs overflow alone
+                log_scale = math.log(s_rw) - math.log(s_arw)
+                with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+                    ratio = float(np.exp(log_scale + np.log(np.std(e_rw, ddof=1))
+                                         - np.log(np.std(e_arw, ddof=1))))  # fmt: skip
                 idx = gen.integers(0, len(e_rw), size=(S1_BOOT, len(e_rw)))
                 with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-                    r = scale * (np.std(e_rw[idx], axis=1, ddof=1) /
-                                 np.std(e_arw[idx], axis=1, ddof=1))  # fmt: skip
+                    r = np.exp(log_scale + np.log(np.std(e_rw[idx], axis=1, ddof=1))
+                               - np.log(np.std(e_arw[idx], axis=1, ddof=1)))  # fmt: skip
                 undefined = int(np.sum(~np.isfinite(r)))
                 if undefined:  # a resample with a constant ARW error; reported, never dropped
                     out[base] = (ratio, float("nan"), float("nan"))
