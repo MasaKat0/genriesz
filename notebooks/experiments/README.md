@@ -1,5 +1,21 @@
 # GRR publication experiment notebooks
 
+## Registered experiments (E-12 to E-24)
+
+The experiments of the revised manuscript are registered, before any confirmatory run, in
+`doc/2026-10-07_experiment_registration.md` of the parent repository. They are run from the
+notebooks `10_E12_*` to `22_E24_*` (one experiment per notebook), with the shared code in
+`grrexp/` (seeds, parallel execution, metrics, tests, bootstrap, outputs and manifest) and
+the estimators in genriesz `src/`. The environment is pinned in `requirements-lock.txt`.
+Outputs go to `results/E-xx/` and reach the manuscript only through the parent repository's
+`tools/sync_experiment_outputs.py`, which checks the SHA-256 recorded in each manifest.
+
+## Superseded notebooks (E-01 to E-11)
+
+The notebooks `01` to `09` below are superseded (E-01 to E-11 in the parent repository's
+`docs/spec/02_data-and-experiments.md`). They are kept as a record and are not referenced by
+the manuscript. The rest of this README describes them.
+
 These notebooks contain the publication-scale experiments for the Generalized Riesz Regression manuscript.
 
 The exploratory fast-mode code, synthetic real-data fallbacks, and external plotting/table helper module have been removed. Each notebook contains its own table and plotting code so titles, axis labels, method labels, colors, line styles, and font sizes can be edited directly in the notebook. ATE and ATT results are displayed in separate tables and separate figures, not pooled into a single table or axis.

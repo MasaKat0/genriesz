@@ -1,0 +1,19 @@
+# Registered environment of the experiments E-12..E-24
+# (registration §1.7, doc/2026-10-07_experiment_registration.md in the parent repository).
+# Python 3.13.6, Darwin arm64. grrexp.env.check_environment() stops a run on a mismatch;
+# the full `pip freeze` of each run is recorded in its manifest.json.
+# genriesz itself is imported from this repository's src/ (grrexp.env.use_submodule_genriesz).
+numpy==2.3.5
+scipy==1.16.3
+pandas==2.3.3
+scikit-learn==1.7.2
+matplotlib==3.10.8
+pyarrow==22.0.0
+torch==2.8.0
+cvxpy==1.7.3
+clarabel==0.11.1
+sympy==1.14.0
+nbformat==5.10.4
+notebook==7.6.2
+nbconvert==7.17.1
+ipykernel==6.31.0
