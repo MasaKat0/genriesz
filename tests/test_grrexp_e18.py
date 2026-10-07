@@ -346,3 +346,13 @@ def test_failed_replications_stay_in_the_coverage_denominator():
     assert r["SEL_failure_rate"] == pytest.approx(1 / 3)
     assert json.loads(r["SEL_status_counts"]) == {"domain_prediction": 1, "ok": 2}
     assert r["CTRL_failure_rate"] == 0.0 and "CTRL_failure_rate_cp_upper" in S.columns
+
+
+def test_parent_state_override_for_a_worktree(monkeypatch):
+    parent = Path(__file__).resolve().parents[2]  # the parent repository of the main checkout
+    if not (parent / ".git").exists() or not (parent / "genriesz").exists():
+        pytest.skip("not inside the parent repository")
+    monkeypatch.setenv(env.PARENT_ENV, str(parent))
+    st = env.parent_state()
+    assert len(st["sha"]) == 40 and len(st["gitlink"]) == 40
+    assert st["genriesz_worktree"] == str(env.GENRIESZ_ROOT)
