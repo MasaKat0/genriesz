@@ -868,7 +868,7 @@ def tables(S):
         "\\hline",
         "\\multicolumn{10}{l}{Counterexamples (oracle perturbations, DGP19Q)}" + END,
         "Example & Statistic & $n$ & \\multicolumn{2}{r}{Estimate} & \\multicolumn{2}{r}{Prediction}"
-        " & \\multicolumn{3}{r}{Exact at $n$}" + END,
+        " & \\multicolumn{3}{r}{Population value at $n$}" + END,
         "\\hline",
     ]
     for n in N_PART["counterexamples"]:
