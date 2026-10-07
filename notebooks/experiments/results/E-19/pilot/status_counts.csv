@@ -1,0 +1,17 @@
+cell,arm,status,count
+"['inference', 1000]",inference-ARW_cf,ok,10
+"['inference', 1000]",inference-TMLE_cf,ok,10
+"['inference', 2000]",inference-ARW_cf,ok,10
+"['inference', 2000]",inference-TMLE_cf,ok,10
+"['inference', 4000]",inference-ARW_cf,ok,10
+"['inference', 4000]",inference-TMLE_cf,ok,10
+"['counterexamples', 1000]",counterexamples-Cex_i,ok,10
+"['counterexamples', 1000]",counterexamples-Cex_ii,ok,10
+"['counterexamples', 4000]",counterexamples-Cex_i,ok,10
+"['counterexamples', 4000]",counterexamples-Cex_ii,ok,10
+"['illustration', 1000]",illustration-ARW_cf,ok,10
+"['illustration', 1000]",illustration-TMLE_cf,ok,10
+"['illustration', 2000]",illustration-ARW_cf,ok,10
+"['illustration', 2000]",illustration-TMLE_cf,ok,10
+"['illustration', 4000]",illustration-ARW_cf,ok,10
+"['illustration', 4000]",illustration-TMLE_cf,ok,10
