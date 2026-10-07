@@ -1,0 +1,2 @@
+interrupted
+Interrupted: the runner could not read the parent repository from this worktree when writing the manifest; re-run with GRREXP_PARENT_REPO.
