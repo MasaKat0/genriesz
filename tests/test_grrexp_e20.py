@@ -272,3 +272,61 @@ def test_fmt_has_no_negative_zero() -> None:
     assert e20._fmt(-0.00001) == "0.000"
     assert e20._fmt(-0.0011) == "-0.001"
     assert e20._fmt(float("nan")) == "--"
+
+
+# ---------------------------------------------------------------- review fixes (first review)
+
+
+def test_recorder_labels_are_valid_and_distinct() -> None:
+    from grrexp import outputs
+
+    labels = [e20.record_label(a) for a in e20.ARM_LABELS]
+    assert all(outputs.STEM.match(lab) for lab in labels)
+    assert len(set(labels)) == len(labels)
+
+
+def test_illustration_arms_have_no_predictions(stage0) -> None:
+    tasks = e20.tasks_for(PILOT_ENTROPY, 2, cells=[3])
+    raw = e20.raw_frame(tasks, [e20.replicate(t) for t in tasks])
+    summ = e20.summarise(raw, stage0)
+    other = summ["estimator"] != e20.THEORY_ARM
+    assert summ.loc[other, "sd_pred"].isna().all() and summ.loc[other, "c_pred"].isna().all()
+    assert summ.loc[~other, "sd_pred"].notna().all() and summ.loc[~other, "c_pred"].notna().all()
+    tabs, _ = e20.tables(summ.assign(family_verdict=json.dumps(None)))
+    for line in tabs["tab_E20"].splitlines():
+        if "SQ + OLS" in line or "RFF" in line:
+            assert "(--)" in line
+
+
+def test_a_successful_fit_above_the_tolerance_stops_even_if_a_later_step_fails(
+    monkeypatch,
+) -> None:
+    real = e20.fit_ratio
+
+    class Fit:
+        def __init__(self, fit):
+            self.gradient = np.full_like(fit.gradient, 3e-8)
+
+    class Wrapped:
+        def __init__(self, res):
+            self._res, self.fit = res, Fit(res.fit)
+
+        def classify(self, Z):  # the prediction would fail afterwards
+            r, outside, nonfinite = self._res.classify(Z)
+            return r, np.ones_like(outside), nonfinite
+
+    monkeypatch.setattr(e20, "fit_ratio", lambda arm, Zs, Zt: ("ok", Wrapped(real(arm, Zs, Zt)[1])))
+    with pytest.raises(AssertionError):
+        e20.replicate((1, 0, PILOT_ENTROPY))
+
+
+def test_uncertified_stage0_gives_a_descriptive_summary(stage0) -> None:
+    pop = {**stage0, "certified": False, "predictions": None}
+    tasks = e20.tasks_for(PILOT_ENTROPY, 2, cells=[1])
+    raw = e20.raw_frame(tasks, [e20.replicate(t) for t in tasks])
+    summ = e20.summarise(raw, pop)
+    assert summ["c_pred"].isna().all() and summ["sd_pred"].isna().all()
+    verdict, tests = e20.family_h20(summ)
+    assert verdict is None and tests == {}
+    tabs, _ = e20.tables(summ.assign(family_verdict=json.dumps(None)))
+    assert "(--)" in tabs["tab_E20"]

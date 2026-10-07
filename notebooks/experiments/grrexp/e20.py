@@ -51,6 +51,13 @@ ARMS = ("UKL+OLS", "UKL+RFF", "SQ+OLS")
 THEORY_ARM = "UKL+OLS"
 VARIANCES = ("V_2s", "V_src", "V_pool")
 ARM_LABELS = [f"{a}|{v}" for a in ARMS for v in VARIANCES]
+
+
+def record_label(label):
+    """The run recorder's form of an arm label (letters, digits, ``_`` and ``-`` only)."""
+    return label.replace("+", "_").replace("|", "-")
+
+
 #: registered value of E_0 r0^2 (six significant digits)
 E_R0_SQ = 1.54378
 DGP_TOL = 5e-6  # half a unit in the last registered digit
@@ -372,7 +379,12 @@ def _cross_fit(Zs, Y, Zt, fs, ft, ratio_arm, outcome, freqs):
         if status != "ok":
             return status, detail, w
         scale = max(1.0, float(np.max(np.abs(ratio_features(Zt[tr_t]).mean(axis=0)))))
-        grads.append(float(np.max(np.abs(res.fit.gradient))) / scale)
+        grad = float(np.max(np.abs(res.fit.gradient))) / scale
+        if not grad <= SAMPLE_TOL:  # §1.3 C for every successful fit: an implementation error
+            raise AssertionError(
+                f"successful ratio fit ({ratio_arm}, fold {k}) with scaled gradient {grad}"
+            )
+        grads.append(grad)
         rr, outside, nonfinite = res.classify(Zs[te_s])
         if np.any(outside):
             detail.append([k, "prediction", "domain_prediction"])
@@ -478,9 +490,12 @@ def total_warnings(raw):
 
 
 def ratio_balance(raw):
-    """§1.3 C for every successful ratio fit (deterministic; a violation stops the run):
-    the largest absolute gradient of the empirical objective, divided by
-    ``max(1, ||mean phi(target)||_inf)``, is at most 1e-8 in every fold."""
+    """Summary of §1.3 C over the successful arms: the largest scaled gradient of the
+    empirical objective (``max_j |grad_j| / max(1, ||mean phi(target)||_inf)``).
+
+    Every successful ratio fit, including those of an arm that fails at a later step,
+    is checked when it is fitted (``_cross_fit`` stops the run on a violation); this
+    function repeats the check on the recorded maxima."""
     ok = (raw["status"] == "ok") & raw["arm"].str.endswith("|V_2s")
     g = raw.loc[ok, "ratio_gradient_max"]
     out = {
@@ -533,12 +548,12 @@ def summarise(raw, population_record):
             if ms in POSITIVE_VARIANCE:
                 row["se_ratio"] = metrics.se_ratio(est, se, ok)
             row["certified"] = bool(pop["certified"])
-            if pop["certified"]:
+            row["pi"] = m / (n + m)
+            row["sd_pred"] = row["c_pred"] = float("nan")
+            if pop["certified"] and arm == THEORY_ARM:  # the illustration arms are descriptive
                 p = pop["predictions"][f"{n},{m}"]
                 row["sd_pred"] = p["sd"]
-                row["pi"] = p["pi"]
-                if arm == THEORY_ARM:
-                    row["c_pred"] = p["c"][var]
+                row["c_pred"] = p["c"][var]
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -551,6 +566,8 @@ def family_h20(summ):
 
     tests = {}
     th = summ[(summ["estimator"] == THEORY_ARM) & summ["c_pred"].notna()]
+    if th.empty:  # Stage 0 did not certify the population ratio: descriptive only
+        return None, {}
     for part, var in (("(a)", "V_2s"), ("(b)", "V_src"), ("(c)", "V_pool")):
         for _, r in th[th["variance"] == var].iterrows():
             if part == "(a)" and min(int(r["n"]), int(r["m"])) < H20A_MIN:
