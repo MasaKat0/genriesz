@@ -289,3 +289,47 @@ def test_shared_fit_warnings_are_counted_once(monkeypatch) -> None:
     assert out[f"{base}|ARW"]["n_warnings"] == e21.K
     assert out[f"{base}|RW"]["n_warnings"] == 0 and out[f"{base}|TMLE"]["n_warnings"] == 0
     assert json.loads(out[f"{base}|RW"]["warnings"]) == {"shared_with": "ARW"}
+
+
+# ---------------------------------------------------------------- review fixes (round 2)
+
+
+def test_tmle_epsilon_is_scale_stable(monkeypatch) -> None:
+    X, Y = _toy(200, seed=12)
+    D = X[:, 0]
+    folds = fold_ids(len(X), e21.K, np.random.default_rng(4))
+    inner = {k: None for k in range(e21.K)}
+
+    class Huge:
+        functional = e21.functional("ATE", 0.5)
+        basis = None
+
+    def fake_select(estimand, dictionary, gen_name, X_fit, inner_k, pi, seed, warn, tag):
+        return "ok", Huge(), 0.01, []
+
+    def fake_checked(mdl, estimand, X_eval):
+        return "ok", (lambda rows: np.where(rows[:, 0] == 1, 1e160, -0.5e160))
+
+    monkeypatch.setattr(e21, "select_and_fit", fake_select)
+    monkeypatch.setattr(e21, "_predict_checked", fake_checked)
+    gamma = {k: (lambda rows: np.zeros(len(rows))) for k in range(e21.K)}
+    out = e21._grr_arms("ATE", X, Y, D, folds, inner, gamma, 0.5, 0, True)
+    rec = out["ATE|lin-SQ|TMLE"]
+    a = np.where(D == 1, 1e160, -0.5e160)
+    eps = (np.sum((a / 1e160) * Y) / np.sum((a / 1e160) ** 2)) / 1e160
+    assert rec["epsilon"] == pytest.approx(eps) and rec["epsilon"] != 0.0
+
+
+def test_summary_and_s1_are_scale_stable() -> None:
+    raw = _fake_raw(4)
+    arm = raw["arm"] == "ATE|lin-SQ|ARW"
+    raw.loc[arm, "estimate"] = 4.0 + np.array([1e200, -1e200, 1e200, -1e200])
+    raw.loc[arm, "se"] = 1e199
+    raw.loc[arm, "status"] = "ok"
+    summ = e21.summarise(raw)
+    row = summ[summ["arm"] == "ATE|lin-SQ|ARW"].iloc[0]
+    assert row["sd"] == pytest.approx(np.std([1, -1, 1, -1], ddof=1) * 1e200)
+    assert row["rmse"] == pytest.approx(1e200)
+    assert np.isfinite(row["se_ratio"])
+    s1 = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
+    assert np.isfinite(s1["ATE|lin-SQ"][0])

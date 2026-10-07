@@ -446,6 +446,13 @@ def _stable_sd(x):
     return 0.0 if s == 0.0 else s * float(np.std(x / s))
 
 
+def _scaled(x):
+    """``(x / s, s)`` with ``s = max |x|`` (``s = 1`` for an all-zero vector)."""
+    s = float(np.max(np.abs(x))) if len(x) else 1.0
+    s = s if s > 0 else 1.0
+    return x / s, s
+
+
 def _stable_ess(alpha):
     """``(sum |alpha|)^2 / sum alpha^2`` after scaling by ``max |alpha|``."""
     a = np.abs(alpha) / float(np.max(np.abs(alpha)))
@@ -589,8 +596,11 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
         out[f"{base}|RW"] = _estimate_record(estimand, theta_rw, m_g + alpha * resid_g, alpha, D,
                                              pi_hat, shared)  # fmt: skip
         # TMLE (§1.4): linear fluctuation, epsilon pooled over the folds
+        # epsilon = sum alpha (Y - gamma) / sum alpha^2, computed after scaling alpha
         with np.errstate(over="ignore", invalid="ignore"):
-            eps = float(np.sum(alpha * resid_g) / np.sum(alpha**2))
+            s = float(np.max(np.abs(alpha)))
+            a_s = alpha / s
+            eps = float(np.sum(a_s * resid_g) / np.sum(a_s**2)) / s
             parts = m_g + eps * m_a + alpha * (resid_g - eps * alpha)
         if not np.isfinite(eps):
             out[f"{base}|TMLE"] = _failed("nonfinite", **shared)
@@ -769,9 +779,9 @@ def _arm_summary(arm, g):
     out.update(fr)
     out["status_counts"] = json.dumps(fr["status_counts"])
     if ok.sum() >= 2:
-        e = err[ok]
-        out.update({"bias": float(e.mean()), "sd": float(np.std(e, ddof=1)),
-                    "rmse": float(np.sqrt(np.mean(e**2)))})  # fmt: skip
+        e, s = _scaled(err[ok])  # scale-stable: no overflow of squares or sums
+        out.update({"bias": s * float(e.mean()), "sd": s * float(np.std(e, ddof=1)),
+                    "rmse": s * float(np.sqrt(np.mean(e**2)))})  # fmt: skip
     if not arm.endswith("|RA"):
         if ok.any() and not np.all(np.isfinite(se[ok])):
             raise AssertionError(f"{arm}: a successful record without a finite SE")
@@ -820,12 +830,14 @@ def s1_intervals(raw, seeds):
                 if both.sum() < 3:
                     out[base] = (float("nan"), float("nan"), float("nan"))
                     continue
-                e_rw = (rw["estimate"] - rw["theta0"]).to_numpy()[both]
-                e_arw = (arw["estimate"] - arw["theta0"]).to_numpy()[both]
-                ratio = float(np.std(e_rw, ddof=1) / np.std(e_arw, ddof=1))
+                e_rw, s_rw = _scaled((rw["estimate"] - rw["theta0"]).to_numpy()[both])
+                e_arw, s_arw = _scaled((arw["estimate"] - arw["theta0"]).to_numpy()[both])
+                scale = s_rw / s_arw
+                ratio = scale * float(np.std(e_rw, ddof=1) / np.std(e_arw, ddof=1))
                 idx = gen.integers(0, len(e_rw), size=(S1_BOOT, len(e_rw)))
-                with np.errstate(invalid="ignore", divide="ignore"):
-                    r = np.std(e_rw[idx], axis=1, ddof=1) / np.std(e_arw[idx], axis=1, ddof=1)
+                with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+                    r = scale * (np.std(e_rw[idx], axis=1, ddof=1) /
+                                 np.std(e_arw[idx], axis=1, ddof=1))  # fmt: skip
                 undefined = int(np.sum(~np.isfinite(r)))
                 if undefined:  # a resample with a constant ARW error; reported, never dropped
                     out[base] = (ratio, float("nan"), float("nan"))
