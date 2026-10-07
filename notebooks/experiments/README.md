@@ -7,7 +7,7 @@ The experiments of the revised manuscript are registered, before any confirmator
 notebooks `10_E12_*` to `22_E24_*` (one experiment per notebook), with the shared code in
 `grrexp/` (seeds, parallel execution, metrics, tests, bootstrap, outputs and manifest) and
 the estimators in genriesz `src/`. The environment is pinned in `requirements-lock.txt`.
-Outputs go to `results/E-xx/` and reach the manuscript only through the parent repository's
+Outputs go to `results/E-xx/{stage0,pilot,stage1}/` (one directory per stage, written once) and reach the manuscript only through the parent repository's
 `tools/sync_experiment_outputs.py`, which checks the SHA-256 recorded in each manifest.
 
 ## Superseded notebooks (E-01 to E-11)

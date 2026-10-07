@@ -69,19 +69,30 @@ class FamilyBootstrap:
         return out
 
 
-def percentile_interval(boot, level: float = 0.95) -> tuple[float, float]:
+def _valid(boot, B: int | None) -> np.ndarray:
+    boot = np.asarray(boot, dtype=float)
+    if boot.ndim != 1 or boot.size < 2 or not np.all(np.isfinite(boot)):
+        raise ValueError("bootstrap values must be a finite 1-d array")
+    if B is not None and boot.size != B:
+        raise ValueError(f"expected the registered B = {B}, got {boot.size}")
+    return boot
+
+
+def percentile_interval(boot, family_id: int, level: float = 0.95) -> tuple[float, float]:
     a = (1.0 - level) / 2.0
-    lo, hi = np.quantile(np.asarray(boot, dtype=float), [a, 1.0 - a])
+    lo, hi = np.quantile(_valid(boot, REGISTERED_B[family_id]), [a, 1.0 - a])
     return float(lo), float(hi)
 
 
-def bootstrap_se(boot) -> float:
-    return float(np.std(np.asarray(boot, dtype=float), ddof=1))
+def bootstrap_se(boot, family_id: int) -> float:
+    return float(np.std(_valid(boot, REGISTERED_B[family_id]), ddof=1))
 
 
 def centred_pvalue(boot, t_hat: float) -> float:
     """E-24: ``(1 + #{|T*_b - T_hat| >= |T_hat|}) / (B + 1)``."""
-    boot = np.asarray(boot, dtype=float)
+    boot = _valid(boot, REGISTERED_B[7])
+    if not np.isfinite(t_hat):
+        raise ValueError("T_hat is not finite")
     return float((1 + np.sum(np.abs(boot - t_hat) >= abs(t_hat))) / (boot.size + 1))
 
 
@@ -91,7 +102,11 @@ def log_rmse_ratio_counts(err_a, err_b) -> Callable[[np.ndarray], np.ndarray]:
     ``err_a`` and ``err_b`` are the paired errors ``theta_hat - theta0`` on the
     replications where both methods succeeded.
     """
-    sq = np.column_stack([np.asarray(err_a, float) ** 2, np.asarray(err_b, float) ** 2])
+    err_a = np.asarray(err_a, dtype=float)
+    err_b = np.asarray(err_b, dtype=float)
+    if err_a.ndim != 1 or err_a.shape != err_b.shape or not np.all(np.isfinite(err_a + err_b)):
+        raise ValueError("paired errors must be finite 1-d arrays of equal length")
+    sq = np.column_stack([err_a**2, err_b**2])
 
     def stat(counts: np.ndarray) -> np.ndarray:
         s = counts @ sq

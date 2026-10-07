@@ -17,14 +17,30 @@ from scipy import stats
 Z_95 = 1.96
 
 
+def _ok_array(ok) -> np.ndarray:
+    raw = np.asarray(ok)
+    if raw.ndim != 1 or raw.size == 0 or raw.dtype != bool:
+        raise ValueError("ok must be a non-empty 1-d boolean array of length R")
+    return raw
+
+
 def _as_arrays(estimate, ok):
+    ok = _ok_array(ok)
     estimate = np.asarray(estimate, dtype=float)
-    ok = np.asarray(ok, dtype=bool)
-    if estimate.shape != ok.shape or estimate.ndim != 1:
+    if estimate.shape != ok.shape:
         raise ValueError("estimate and ok must be 1-d arrays of the same length R")
     if not np.all(np.isfinite(estimate[ok])):
         raise ValueError("a replication marked ok has a non-finite estimate")
     return estimate, ok
+
+
+def _as_se(se, ok) -> np.ndarray:
+    se = np.asarray(se, dtype=float)
+    if se.shape != ok.shape:
+        raise ValueError("se and ok must be 1-d arrays of the same length R")
+    if not np.all(np.isfinite(se[ok]) & (se[ok] >= 0.0)):
+        raise ValueError("a replication marked ok has a non-finite or negative SE")
+    return se
 
 
 def _successful(estimate, ok) -> np.ndarray:
@@ -46,12 +62,15 @@ def clopper_pearson_upper(k: int, n: int, level: float = 0.95) -> float:
 
 def failure_rate(ok, status=None) -> dict:
     """``1 - R_s/R``, the counts by status, and the CP upper bound when no failure."""
-    ok = np.asarray(ok, dtype=bool)
+    ok = _ok_array(ok)
     r = ok.size
     k = int(r - ok.sum())
     out = {"R": r, "R_s": int(ok.sum()), "failure_rate": k / r}
     if status is not None:
-        values, counts = np.unique(np.asarray(status, dtype=str), return_counts=True)
+        status = np.asarray(status, dtype=str)
+        if status.shape != ok.shape:
+            raise ValueError("status and ok must have the same length R")
+        values, counts = np.unique(status, return_counts=True)
         out["status_counts"] = {str(v): int(c) for v, c in zip(values, counts, strict=True)}
     if k == 0:
         out["failure_rate_cp_upper"] = clopper_pearson_upper(0, r)
@@ -61,15 +80,31 @@ def failure_rate(ok, status=None) -> dict:
 def moment_terms(x) -> tuple[float, float]:
     """Sample variance (ddof=1) and the plug-in fourth central moment."""
     x = np.asarray(x, dtype=float)
+    if x.ndim != 1 or x.size < 2 or not np.all(np.isfinite(x)):
+        raise ValueError("need a finite 1-d sample of size >= 2")
     centred = x - x.mean()
     return float(x.var(ddof=1)), float(np.mean(centred**4))
 
 
+def fourth_moment_radicand(x) -> tuple[float, float]:
+    """``(m4 - s^4, s^2)``; stops when the variance is 0 or the radicand is negative.
+
+    The registered delta-method formulas (§1.5, §1.8) have no rule for a negative
+    plug-in radicand, so it is reported instead of truncated.
+    """
+    var, m4 = moment_terms(x)
+    if not var > 0.0:
+        raise ValueError("sample variance is zero")
+    radicand = m4 - var**2
+    if radicand < 0.0:
+        raise ValueError(f"negative fourth-moment radicand m4 - s^4 = {radicand}")
+    return radicand, var
+
+
 def sd_mcse(x) -> float:
     """Delta-method MCSE of the sample SD: ``{(m4 - s^4)/(4 s^2 R_s)}^{1/2}``."""
-    x = np.asarray(x, dtype=float)
-    var, m4 = moment_terms(x)
-    return float(np.sqrt(max(m4 - var**2, 0.0) / (4.0 * var * x.size)))
+    radicand, var = fourth_moment_radicand(x)
+    return float(np.sqrt(radicand / (4.0 * var * np.asarray(x).size)))
 
 
 def bias(estimate, ok, theta0: float) -> dict:
@@ -93,10 +128,9 @@ def rmse(estimate, ok, theta0: float) -> float:
 def se_ratio(estimate, se, ok) -> float:
     """Mean SE over MC SD, both over successful replications."""
     est, ok = _as_arrays(estimate, ok)
-    se = np.asarray(se, dtype=float)
-    if not np.all(np.isfinite(se[ok])):
-        raise ValueError("a replication marked ok has a non-finite SE")
-    return float(se[ok].mean() / est[ok].std(ddof=1))
+    se = _as_se(se, ok)
+    x = _successful(est, ok)
+    return float(se[ok].mean() / x.std(ddof=1))
 
 
 def wald_interval(estimate, se) -> tuple[np.ndarray, np.ndarray]:
@@ -108,6 +142,7 @@ def wald_interval(estimate, se) -> tuple[np.ndarray, np.ndarray]:
 def coverage(estimate, se, ok, theta0: float) -> dict:
     """Unconditional coverage (failures count as non-covering) and the conditional one."""
     est, ok = _as_arrays(estimate, ok)
+    se = _as_se(se, ok)
     lo, hi = wald_interval(est, se)
     covered = ok & (lo <= theta0) & (theta0 <= hi)
     k = int(covered.sum())
@@ -120,21 +155,29 @@ def coverage(estimate, se, ok, theta0: float) -> dict:
 
 
 def ci_length(se, ok) -> dict:
-    se = np.asarray(se, dtype=float)
-    ok = np.asarray(ok, dtype=bool)
+    ok = _ok_array(ok)
+    se = _as_se(se, ok)
+    if not ok.any():
+        raise ValueError("no successful replication")
     length = 2.0 * Z_95 * se[ok]
     return {"ci_length_mean": float(length.mean()), "ci_length_median": float(np.median(length))}
 
 
 def max_weight_summary(max_abs_alpha, ok) -> dict:
     """Median and 95% point over replications of ``max_i |alpha_hat(X_i)|``."""
-    m = np.asarray(max_abs_alpha, dtype=float)[np.asarray(ok, dtype=bool)]
+    ok = _ok_array(ok)
+    m = np.asarray(max_abs_alpha, dtype=float)
+    if m.shape != ok.shape or not np.all(np.isfinite(m[ok]) & (m[ok] >= 0)) or not ok.any():
+        raise ValueError("max weights must be finite, >= 0, length R, with a success")
+    m = m[ok]
     return {"max_weight_median": float(np.median(m)), "max_weight_q95": float(np.quantile(m, 0.95))}
 
 
 def ess(alpha) -> float:
     """``(sum |alpha_i|)^2 / sum alpha_i^2`` for one fitted representer."""
     a = np.asarray(alpha, dtype=float)
+    if a.ndim != 1 or not np.all(np.isfinite(a)) or not np.any(a):
+        raise ValueError("alpha must be a finite, non-zero 1-d array")
     return float(np.abs(a).sum() ** 2 / np.sum(a**2))
 
 
@@ -145,7 +188,13 @@ def imbalance(alpha, m_phi, phi) -> float:
     ``m(W_i, phi_j)``.
     """
     alpha = np.asarray(alpha, dtype=float)
-    delta = np.mean(alpha[:, None] * np.asarray(phi) - np.asarray(m_phi), axis=0)
+    phi = np.asarray(phi, dtype=float)
+    m_phi = np.asarray(m_phi, dtype=float)
+    if alpha.ndim != 1 or phi.shape != m_phi.shape or phi.shape[:1] != alpha.shape:
+        raise ValueError("alpha (n,), phi (n, p) and m_phi (n, p) do not match")
+    delta = np.mean(alpha[:, None] * phi - m_phi, axis=0)
+    if not np.all(np.isfinite(delta)):
+        raise ValueError("non-finite imbalance")
     return float(np.max(np.abs(delta)))
 
 
