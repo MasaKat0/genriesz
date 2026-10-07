@@ -1,0 +1,2 @@
+interrupted
+Stopped by the operator at 2026-10-08 00:4x JST before completion: the gpt-6.1-sol review of genriesz d1cc854 (reseach_doc/2026-10-07_pr6_reviews/e12_out.md, finding 1) showed, and a direct check confirmed, that support_dual_margin is +inf for SQ, UKL1 and EB, so write_stage0 (json.dump allow_nan=False) would raise before the reference gate. The run could not have completed; re-run after the fix.
