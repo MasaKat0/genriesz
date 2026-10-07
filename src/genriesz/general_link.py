@@ -87,6 +87,24 @@ class _FunctionBasis:
         )
 
 
+def _weights(sample_weight, n: int) -> NDArray[np.float64] | None:
+    """Probabilities from ``sample_weight`` (``None``: the sample mean is used as is)."""
+
+    if sample_weight is None:
+        return None
+    w = np.asarray(sample_weight, dtype=float).reshape(-1)
+    if w.shape != (n,) or not np.all(np.isfinite(w)) or np.any(w < 0) or not w.sum() > 0:
+        raise ValueError("sample_weight must be finite, non-negative, of length n, with a "
+                         "positive sum")
+    return w / w.sum()
+
+
+def _avg(values: NDArray[np.float64], w: NDArray[np.float64] | None):
+    """Sample mean over rows, or the ``w``-weighted mean."""
+
+    return values.mean(axis=0) if w is None else w @ values
+
+
 @dataclass
 class GeneralLinkFitResult:
     """Result of :meth:`GRRGeneralLink.fit`.
@@ -253,14 +271,18 @@ class GRRGeneralLink:
     # ------------------------------------------------------------------
     # Objective, gradient, Hessian
     # ------------------------------------------------------------------
-    def _evaluate(self, X: NDArray[np.float64], beta: NDArray[np.float64]) -> _Eval:
+    def _evaluate(
+        self, X: NDArray[np.float64], beta: NDArray[np.float64], w: NDArray[np.float64] | None
+    ) -> _Eval:
         # Trial points may overflow the user's link (e.g. exp); the result is
         # then non-finite and the point is rejected or reported ("nonfinite"),
         # so the floating-point warnings carry no extra information.
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            return self._evaluate_raw(X, beta)
+            return self._evaluate_raw(X, beta, w)
 
-    def _evaluate_raw(self, X: NDArray[np.float64], beta: NDArray[np.float64]) -> _Eval:
+    def _evaluate_raw(
+        self, X: NDArray[np.float64], beta: NDArray[np.float64], w: NDArray[np.float64] | None
+    ) -> _Eval:
         beta = np.asarray(beta, dtype=float).reshape(-1)
         _, a = self._alpha_at(X, beta)
         if not np.all(self.generator.alpha_domain(X, a)):
@@ -272,34 +294,39 @@ class GRRGeneralLink:
         if record[0] > 0:
             return _Eval(feasible=False, beta=beta)
         g = np.asarray(self.generator.g(X, a), dtype=float)
-        F = float(np.mean(-g + a * u) - np.mean(m_u)) + 0.5 * self.lam * float(beta @ beta)
+        F = float(_avg(-g + a * u, w) - _avg(m_u, w)) + 0.5 * self.lam * float(beta @ beta)
         p = beta.size
         Phi = np.asarray(self.basis(X), dtype=float)
         c, _ = self._coef(X, beta)
         M_psi = np.asarray(self.functional.m_basis_matrix(X, self._tangent_basis(beta, p)), float)
-        grad = (a[:, None] * c[:, None] * Phi - M_psi).mean(axis=0) + self.lam * beta
+        grad = _avg(a[:, None] * c[:, None] * Phi - M_psi, w) + self.lam * beta
         finite = bool(np.isfinite(F) and np.all(np.isfinite(grad)))
         return _Eval(feasible=True, finite=finite, F=F, grad=grad, alpha=a, u=u, beta=beta)
 
-    def objective(self, X: ArrayLike, beta: ArrayLike) -> float:
+    def objective(self, X: ArrayLike, beta: ArrayLike, *, sample_weight=None) -> float:
         """Penalized objective ``F(beta)`` (NaN outside the domain)."""
 
-        ev = self._evaluate(as_2d(X), np.asarray(beta, dtype=float))
+        X_ = as_2d(X)
+        ev = self._evaluate(X_, np.asarray(beta, dtype=float), _weights(sample_weight, len(X_)))
         return ev.F if ev.feasible else float("nan")
 
-    def gradient(self, X: ArrayLike, beta: ArrayLike) -> NDArray[np.float64]:
+    def gradient(self, X: ArrayLike, beta: ArrayLike, *, sample_weight=None) -> NDArray[np.float64]:
         """``dF/dbeta = Delta(alpha_beta, psi_beta) + lam beta`` (``prop:arbitrary_pair_foc``)."""
 
-        ev = self._evaluate(as_2d(X), np.asarray(beta, dtype=float))
+        X_ = as_2d(X)
+        ev = self._evaluate(X_, np.asarray(beta, dtype=float), _weights(sample_weight, len(X_)))
         if not ev.feasible:
             raise ValueError("beta is outside the domain of the generator")
         assert ev.grad is not None
         return ev.grad
 
-    def hessian(self, X: ArrayLike, beta: ArrayLike) -> NDArray[np.float64]:
+    def hessian(self, X: ArrayLike, beta: ArrayLike, *, sample_weight=None) -> NDArray[np.float64]:
         """Analytic Hessian of ``F`` (see the module docstring)."""
 
         X_ = as_2d(X)
+        return self._hessian(X_, beta, _weights(sample_weight, len(X_)))
+
+    def _hessian(self, X_, beta, w) -> NDArray[np.float64]:
         b = np.asarray(beta, dtype=float).reshape(-1)
         p = b.size
         Phi = np.asarray(self.basis(X_), dtype=float)
@@ -307,22 +334,26 @@ class GRRGeneralLink:
         g2 = np.asarray(self.generator.grad2(X_, a), dtype=float)
         d1 = np.asarray(self.dlink(X_, eta), dtype=float).reshape(-1)
         _, e = self._coef(X_, b)
-        n = len(X_)
-        H = (Phi.T * (g2 * d1 * d1 + a * e)) @ Phi / n
+        coef = g2 * d1 * d1 + a * e
+        H = (Phi.T * coef) @ Phi / len(X_) if w is None else (Phi.T * (w * coef)) @ Phi
         M_prod = np.asarray(
             self.functional.m_basis_matrix(X_, self._product_basis(b, p)), dtype=float
         )
-        H = H - M_prod.mean(axis=0).reshape(p, p)
+        H = H - _avg(M_prod, w).reshape(p, p)
         H = 0.5 * (H + H.T)
         return H + self.lam * np.eye(p)
 
-    def tangent_imbalance(self, X: ArrayLike, beta: ArrayLike) -> NDArray[np.float64]:
+    def tangent_imbalance(
+        self, X: ArrayLike, beta: ArrayLike, *, sample_weight=None
+    ) -> NDArray[np.float64]:
         """``Delta(alpha_beta, psi_j)`` for every ``j`` (unpenalized gradient)."""
 
         b = np.asarray(beta, dtype=float).reshape(-1)
-        return self.gradient(X, b) - self.lam * b
+        return self.gradient(X, b, sample_weight=sample_weight) - self.lam * b
 
-    def regressor_imbalance(self, X: ArrayLike, beta: ArrayLike) -> NDArray[np.float64]:
+    def regressor_imbalance(
+        self, X: ArrayLike, beta: ArrayLike, *, sample_weight=None
+    ) -> NDArray[np.float64]:
         """``Delta(alpha_beta, phi_j)`` for every ``j`` (the intended regressors)."""
 
         X_ = as_2d(X)
@@ -330,7 +361,7 @@ class GRRGeneralLink:
         _, a = self._alpha_at(X_, b)
         Phi = np.asarray(self.basis(X_), dtype=float)
         M = np.asarray(self.functional.m_basis_matrix(X_, self.basis), dtype=float)
-        return (a[:, None] * Phi - M).mean(axis=0)
+        return _avg(a[:, None] * Phi - M, _weights(sample_weight, len(X_)))
 
     # ------------------------------------------------------------------
     # Fit
@@ -345,8 +376,15 @@ class GRRGeneralLink:
         tol: float = 1e-10,
         armijo: float = 1e-4,
         margin_shrink: float = 0.01,
+        sample_weight: ArrayLike | None = None,
     ) -> GeneralLinkFitResult:
         """Damped (modified) Newton from ``beta0`` (default zeros).
+
+        ``sample_weight`` (non-negative, normalized to sum to one) replaces the
+        sample mean by a weighted mean in the objective, gradient and Hessian:
+        a quadrature or finite-support population is a set of rows with
+        probabilities (registration §1.9, E-13 Stage 0). ``None`` is the sample
+        mean.
 
         Stops with ``"ok"`` when ``max_j |dF/dbeta_j| <= tol`` at an interior
         point with a positive-definite Hessian (``"singular"`` if the Hessian is
@@ -357,6 +395,7 @@ class GRRGeneralLink:
         """
 
         X_ = as_2d(X)
+        w = _weights(sample_weight, len(X_))
         _ensure_basis_fitted(self.basis, X_)
         p = int(np.asarray(self.basis(X_[:1]), dtype=float).shape[1])
         beta = np.zeros(p) if beta0 is None else np.asarray(beta0, dtype=float).reshape(-1)
@@ -369,12 +408,12 @@ class GRRGeneralLink:
                 return np.full(len(X_), np.inf)
             return np.asarray(fn(X_, ev.alpha), dtype=float)
 
-        ev = self._evaluate(X_, beta)
+        ev = self._evaluate(X_, beta, w)
         if not ev.feasible:
-            return self._finish(X_, ev, beta, INFEASIBLE_START,
+            return self._finish(X_, w, ev, beta, INFEASIBLE_START,
                                 "the starting point is outside the domain", 0, 0, float("nan"))
         if not ev.finite:
-            return self._finish(X_, ev, beta, NONFINITE, "non-finite objective at the start",
+            return self._finish(X_, w, ev, beta, NONFINITE, "non-finite objective at the start",
                                 0, 0, float("nan"))
 
         it = 0
@@ -385,12 +424,12 @@ class GRRGeneralLink:
             nb = int(np.sum(self.generator.boundary_mask(X_, ev.u, ev.alpha,
                                                         tol=self.boundary_tol)))
             if nb > 0:
-                return self._finish(X_, ev, ev.beta, BOUNDARY,
+                return self._finish(X_, w, ev, ev.beta, BOUNDARY,
                                     f"{nb} row(s) at the domain boundary", it, shifts, hmin)
             with np.errstate(over="ignore", invalid="ignore"):
-                H = self.hessian(X_, ev.beta)
+                H = self._hessian(X_, ev.beta, w)
             if not np.all(np.isfinite(H)):
-                return self._finish(X_, ev, ev.beta, NONFINITE, "non-finite Hessian", it,
+                return self._finish(X_, w, ev, ev.beta, NONFINITE, "non-finite Hessian", it,
                                     shifts, hmin)
             evals, evecs = np.linalg.eigh(H)
             hmin = float(evals.min())
@@ -398,12 +437,12 @@ class GRRGeneralLink:
             gnorm = float(np.max(np.abs(ev.grad)))
             if gnorm <= tol:
                 if hmin > 1e-12 * max(1.0, emax):
-                    return self._finish(X_, ev, ev.beta, OK, "", it, shifts, hmin)
-                return self._finish(X_, ev, ev.beta, SINGULAR,
+                    return self._finish(X_, w, ev, ev.beta, OK, "", it, shifts, hmin)
+                return self._finish(X_, w, ev, ev.beta, SINGULAR,
                                     f"stationary point with Hessian min eig {hmin:.3e}",
                                     it, shifts, hmin)
             if it >= max_iter:
-                return self._finish(X_, ev, ev.beta, MAXIT, f"reached max_iter={max_iter}",
+                return self._finish(X_, w, ev, ev.beta, MAXIT, f"reached max_iter={max_iter}",
                                     it, shifts, hmin)
             floor = 1e-8 * max(1.0, emax)
             if hmin <= floor:
@@ -416,7 +455,7 @@ class GRRGeneralLink:
             m0 = margin(ev)
             fin = np.isfinite(m0)
             for _ in range(max_halvings + 1):
-                trial = self._evaluate(X_, ev.beta - step * d)
+                trial = self._evaluate(X_, ev.beta - step * d, w)
                 if trial.feasible and trial.finite:
                     m1 = margin(trial)
                     ok_margin = bool(np.all(m1[fin] >= margin_shrink * m0[fin]))
@@ -430,12 +469,12 @@ class GRRGeneralLink:
                 step *= 0.5
             it += 1
             if accepted is None:
-                return self._finish(X_, ev, ev.beta, LINESEARCH,
+                return self._finish(X_, w, ev, ev.beta, LINESEARCH,
                                     f"no acceptable step after {max_halvings} halvings",
                                     it, shifts, hmin)
             ev = accepted
 
-    def _finish(self, X_, ev: _Eval, beta, status: str, message: str, it: int, shifts: int,
+    def _finish(self, X_, w, ev: _Eval, beta, status: str, message: str, it: int, shifts: int,
                 hmin: float) -> GeneralLinkFitResult:
         beta = np.asarray(beta, dtype=float)
         if ev.feasible and ev.grad is not None:
@@ -447,7 +486,8 @@ class GRRGeneralLink:
                 n_iter=it,
                 objective_value=ev.F,
                 tangent_imbalance=float(np.max(np.abs(tang))),
-                regressor_imbalance=float(np.max(np.abs(self.regressor_imbalance(X_, beta)))),
+                regressor_imbalance=float(np.max(np.abs(
+                    self.regressor_imbalance(X_, beta, sample_weight=w)))),
                 kkt_residual=float(np.max(np.abs(ev.grad))),
                 hessian_min_eig=hmin,
                 n_hessian_shifts=shifts,
