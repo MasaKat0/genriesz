@@ -241,7 +241,7 @@ def test_arw_records_every_fold_and_training_balance() -> None:
     X, Y = _sample(500)
     folds = np.arange(500) % e15.K
     out = e15._arw_cf(X, Y, folds)
-    for label, r in out.items():
+    for r in out.values():
         detail = json.loads(r["fold_status"])
         assert len([d for d in detail if d[1] != "prediction"]) == e15.K
         if r["status"] == "ok":
