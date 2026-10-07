@@ -443,6 +443,8 @@ def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypat
         return result, {"W: fit": 1}, True
 
     monkeypatch.setattr(baselines, "run_recording_warnings", recording)
+    # no scikit-learn fit in this process (its OpenMP pool would outlive the test)
+    monkeypatch.setattr(e22, "_logistic_full", lambda F2, D_: np.full(len(D_), 0.3))
     full = e22.full_sample(20261007)
     assert calls["cv"] == 4
     assert full["n_warnings"] == 4 + 11 + 1
