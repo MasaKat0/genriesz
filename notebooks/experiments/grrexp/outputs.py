@@ -4,7 +4,7 @@ Each stage of an experiment has its own directory under
 ``notebooks/experiments/results/E-xx/``::
 
     stage0/   Stage 0 frozen predictions (stage0_*.json); for the deterministic
-              experiments E-16, E-17 and E-23 also their tables, figures, macros
+              experiments E-16, E-17 and E-23 also summary.csv, tables, figures, macros
     pilot/    Stage 0.5: timing.csv and status_counts.csv (no estimates) and the
               1-versus-12-worker identity record
     stage1/   Stage 1: raw.parquet (one row per replication x arm, failures
@@ -172,7 +172,7 @@ def required_outputs(exp: int, stage: str) -> tuple[str, ...]:
     if stage == "stage0.5":
         return tuple(PILOT_COLUMNS)
     if stage == deliverable_stage(exp):
-        extra = () if exp in DETERMINISTIC else ("raw.parquet", "summary.csv")
+        extra = ("summary.csv",) if exp in DETERMINISTIC else ("raw.parquet", "summary.csv")
         return REGISTERED_OUTPUTS[exp] + extra
     return ("stage0_*.json",)
 
@@ -482,8 +482,8 @@ class RunRecorder:
         return self._register(rel, path)
 
     def write_summary(self, frame) -> Path:
-        if self.stage != "stage1":
-            raise ValueError("summary.csv is written only in Stage 1")
+        """``summary.csv``, the only input of the final cell that makes tables and figures (§4)."""
+        self._deliverable()
         rel, path = self._path("summary", None, ".csv")
         frame.to_csv(path, index=False)
         return self._register(rel, path)
@@ -553,3 +553,12 @@ class RunRecorder:
             json.dump(record, f, indent=2, allow_nan=False)
         self.closed = True
         return self.dir / "kernel.json"
+
+
+def read_summary(recorder: RunRecorder):
+    """Read back ``summary.csv`` as written in this run (the final cell's only input, §4)."""
+    import pandas as pd
+
+    if "summary.csv" not in recorder.files:
+        raise ValueError("write summary.csv before making tables and figures")
+    return pd.read_csv(recorder.files["summary.csv"])

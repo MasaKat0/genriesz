@@ -9,11 +9,20 @@ dual objective is
 
 whose gradient is the population imbalance ``sum_i w_i alpha_i phi_i - b`` and
 whose Hessian is ``sum_i w_i (d alpha / d v)_i phi_i phi_i'``. :func:`solve`
-minimizes it by damped Newton steps that keep every support row and every
-counterfactual row in the link domain, and returns the quantities of the §1.9
-certificate: the largest absolute gradient, the smallest Hessian eigenvalue and
-the smallest distance of the representer to the domain boundary. It never
-clips; a step that cannot stay in the domain stops with a status.
+minimizes it by damped Newton steps (registration §1.3 A-2: halve the step
+until every support and counterfactual row is admissible and the Armijo
+condition with constant 1e-4 holds, at most 60 halvings, at most 500
+iterations). The acceptance test is genriesz's own
+``genriesz.solvers._accept_newton`` (the reviewed implementation of A-2): Armijo,
+or, when the change of the objective is below rounding, a decrease of the
+gradient norm. A row is admissible when its dual coordinate is in the link
+domain and its representer is finite and in the domain of ``g``. It never
+clips; a step that cannot satisfy both conditions stops with ``linesearch``.
+
+The returned quantities are those of the §1.9 certificate on a finite support:
+the largest absolute gradient, the smallest Hessian eigenvalue, and the
+smallest distance of the dual coordinate to the finite end of its range
+(``generator.dual_margin``) over support and counterfactual rows.
 """
 
 from __future__ import annotations
@@ -21,6 +30,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+
+from genriesz.solvers import _accept_newton
+
+ARMIJO = 1e-4
 
 
 @dataclass(frozen=True)
@@ -31,32 +44,29 @@ class PopulationSolution:
     max_gradient: float
     min_hessian_eig: float
     alpha: np.ndarray  # on the support rows
-    min_margin: float  # smallest boundary margin over support and counterfactual rows
+    min_dual_margin: float  # over support and counterfactual rows
 
     def certified(self, grad_tol: float = 1e-12, margin_tol: float = 1e-4) -> bool:
-        """§1.9 (ii)–(iii) on a finite support: gradient, positive Hessian, interior margin."""
+        """§1.9 (ii)–(iii) on a finite support: gradient, positive Hessian, dual margin."""
         return (
             self.status == "ok"
             and self.max_gradient <= grad_tol
             and self.min_hessian_eig > 0.0
-            and self.min_margin >= margin_tol
+            and self.min_dual_margin >= margin_tol
         )
 
 
-def _evaluate(generator, X, Phi, offset, beta, w):
-    v = offset + Phi @ beta
+def _admissible(generator, X, v):
+    """``(g*, alpha, dalpha)`` when every row is admissible, else ``None``."""
     if not np.all(generator.link_domain(X, v)):
         return None
     g_star, alpha, dalpha = generator.dual_eval(X, v)
-    if not (
+    finite = (
         np.all(np.isfinite(g_star)) and np.all(np.isfinite(alpha)) and np.all(np.isfinite(dalpha))
-    ):
+    )
+    if not finite or not np.all(generator.alpha_domain(X, alpha)):
         return None
-    return float(w @ g_star), alpha, dalpha
-
-
-def _margin(generator, X, alpha) -> float:
-    return float(np.min(generator.boundary_margin(X, alpha)))
+    return g_star, alpha, dalpha
 
 
 def solve(
@@ -90,53 +100,59 @@ def solve(
         raise ValueError("w, M and offset must match the support rows")
     if np.any(w < 0) or not np.isclose(w.sum(), 1.0, rtol=0, atol=1e-14):
         raise ValueError("w must be non-negative probabilities summing to one")
+    has_checks = check_X is not None
     b = w @ M
+
+    def evaluate(beta_):
+        point = _admissible(generator, X, offset + Phi @ beta_)
+        if point is None:
+            return None
+        if has_checks and _admissible(generator, check_X, check_offset + check_Phi @ beta_) is None:
+            return None
+        return point
+
     beta = np.zeros(p) if beta0 is None else np.asarray(beta0, float).copy()
-
-    def feasible_checks(beta_):
-        if check_X is None:
-            return True
-        v = check_offset + check_Phi @ beta_
-        return bool(np.all(generator.link_domain(check_X, v)))
-
-    point = _evaluate(generator, X, Phi, offset, beta, w)
-    if point is None or not feasible_checks(beta):
+    point = evaluate(beta)
+    if point is None:
         raise ValueError("the starting point is outside the link domain")
     status, n_iter = "maxit", 0
     for _ in range(max_iter):
-        n_iter += 1
-        F, alpha, dalpha = point
-        F -= beta @ b
+        g_star, alpha, dalpha = point
+        F = float(w @ g_star) - beta @ b
         grad = Phi.T @ (w * alpha) - b
         if np.max(np.abs(grad)) <= tol:
             status = "ok"
             break
+        n_iter += 1
         H = Phi.T @ (Phi * (w * dalpha)[:, None])
         if np.min(np.linalg.eigvalsh((H + H.T) / 2)) <= 1e-14 * max(1.0, np.max(np.abs(H))):
             status = "singular"  # the Newton system has no unique solution
             break
         step = -np.linalg.solve(H, grad)
-        t = 1.0
-        for _ in range(max_halvings):
+        t, accepted = 1.0, False
+        for _ in range(max_halvings + 1):  # the full step, then up to 60 halvings
             cand = beta + t * step
-            new = _evaluate(generator, X, Phi, offset, cand, w)
-            if new is not None and feasible_checks(cand):
-                F_new = new[0] - cand @ b
-                if F_new <= F + 1e-4 * t * (grad @ step) or np.max(np.abs(t * step)) < 1e-15:
-                    beta, point = cand, new
+            new = evaluate(cand)
+            if new is not None:
+                F_new = float(w @ new[0]) - cand @ b
+                g_new = float(np.max(np.abs(Phi.T @ (w * new[1]) - b)))
+                if _accept_newton(
+                    F, F_new, -(grad @ step), t, ARMIJO, float(np.max(np.abs(grad))), g_new
+                ):
+                    beta, point, accepted = cand, new, True
                     break
             t /= 2.0
-        else:
+        if not accepted:
             status = "linesearch"
             break
-    _, alpha, dalpha = point
+    g_star, alpha, dalpha = point
     grad = Phi.T @ (w * alpha) - b
     H = Phi.T @ (Phi * (w * dalpha)[:, None])
-    margin = _margin(generator, X, alpha)
-    if check_X is not None:
-        v_c = check_offset + check_Phi @ beta
-        _, a_c, _ = generator.dual_eval(check_X, v_c)
-        margin = min(margin, _margin(generator, check_X, a_c))
+    margin = float(np.min(generator.dual_margin(X, offset + Phi @ beta)))
+    if has_checks:
+        margin = min(
+            margin, float(np.min(generator.dual_margin(check_X, check_offset + check_Phi @ beta)))
+        )
     return PopulationSolution(
         beta=beta,
         status=status,
@@ -144,7 +160,7 @@ def solve(
         max_gradient=float(np.max(np.abs(grad))),
         min_hessian_eig=float(np.min(np.linalg.eigvalsh((H + H.T) / 2))),
         alpha=alpha,
-        min_margin=margin,
+        min_dual_margin=margin,
     )
 
 

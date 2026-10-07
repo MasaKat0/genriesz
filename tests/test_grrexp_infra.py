@@ -423,6 +423,8 @@ def test_output_names_cannot_escape(reserved, name) -> None:
 
 def test_recorder_writes_kernel_record_once(reserved) -> None:
     rec = outputs.RunRecorder(16, "stage0")
+    rec.write_summary(pd.DataFrame({"example": ["i"], "agrees": [True]}))
+    assert outputs.read_summary(rec)["example"].tolist() == ["i"]
     rec.write_table("tab_E16", "x")
     with pytest.raises(FileExistsError):
         rec.write_table("tab_E16", "x")
@@ -431,7 +433,7 @@ def test_recorder_writes_kernel_record_once(reserved) -> None:
     rec.write_macros({"EXVIbias": "-1/15"})
     rec.finalize(R=None, n=None, warnings=0, failures=0)
     record = json.loads((reserved / "kernel.json").read_text())
-    assert record["outputs"] == ["macros_E-16.tex", "tables/tab_E16.tex"]
+    assert record["outputs"] == ["macros_E-16.tex", "summary.csv", "tables/tab_E16.tex"]
     assert record["threads"]["torch"] == {"num_threads": 1, "deterministic": True}
     assert record["environment"]["executable"] == sys.executable
     with pytest.raises(RuntimeError):
@@ -469,6 +471,8 @@ E16_NOTEBOOK = {
                 "from grrexp import env, outputs\n",
                 "env.use_submodule_genriesz()\n",
                 "rec = outputs.RunRecorder(16, 'stage0')\n",
+                "import pandas as pd\n",
+                "rec.write_summary(pd.DataFrame({'x': [1]}))\n",
                 "rec.write_macros({'EXVIbias': '-1/15'})\n",
                 "rec.write_table('tab_E16', 'x')\n",
                 "rec.finalize(R=None, n=None, warnings=0, failures=0)\n",

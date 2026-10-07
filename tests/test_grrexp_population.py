@@ -50,7 +50,7 @@ def test_ukl_recovers_a_representer_in_the_model() -> None:
     off = gr.offset_from_alpha(ukl, lambda A: np.where(A[:, 0] == 1, 2.0, -2.0))(X)
     sol = population.solve(generator=ukl, X=X, w=w, Phi=Phi, M=M, offset=off)
     assert sol.certified()
-    np.testing.assert_allclose(sol.alpha, alpha0, rtol=1e-11)
+    np.testing.assert_allclose(sol.alpha, alpha0, rtol=1e-11, atol=0)
 
 
 def test_start_outside_domain_and_bad_weights_stop() -> None:
@@ -63,3 +63,92 @@ def test_start_outside_domain_and_bad_weights_stop() -> None:
         population.solve(
             generator=gr.SquaredGenerator(), X=X, w=2 * w, Phi=Phi, M=M, offset=np.zeros(len(X))
         )
+
+
+def sign(A):
+    return np.where(np.atleast_2d(A)[:, 0] == 1, 1, -1)
+
+
+GENERATORS = {
+    "UKL": lambda: gr.UKLGenerator(C=1.0, branch_fn=sign),
+    "BKL": lambda: gr.BKLGenerator(C=1.0, branch_fn=sign),
+    "BP": lambda: gr.BPGenerator(omega=0.5, C=0.0, branch_fn=sign),
+}
+
+
+@pytest.mark.parametrize("name", list(GENERATORS))
+def test_objective_derivatives_match_finite_differences(name) -> None:
+    gen = GENERATORS[name]()
+    X, w, Phi, M, _ = ate_population(0.2, 0.6)
+    off = np.asarray(gen.grad(X, np.where(X[:, 0] == 1, 2.0, -2.0)))
+    b = w @ M
+
+    def F(beta):
+        g_star, alpha, dalpha = gen.dual_eval(X, off + Phi @ beta)
+        return (
+            float(w @ g_star) - beta @ b,
+            Phi.T @ (w * alpha) - b,
+            Phi.T @ (Phi * (w * dalpha)[:, None]),
+        )
+
+    beta = np.array([0.01, -0.02, 0.015, 0.005])
+    _, grad, H = F(beta)
+    h = 1e-6
+    for j in range(4):
+        e = np.zeros(4)
+        e[j] = h
+        np.testing.assert_allclose(
+            (F(beta + e)[0] - F(beta - e)[0]) / (2 * h), grad[j], rtol=0, atol=1e-8
+        )
+        np.testing.assert_allclose(
+            (F(beta + e)[1] - F(beta - e)[1]) / (2 * h), H[:, j], rtol=0, atol=1e-7
+        )
+    sol = population.solve(generator=gen, X=X, w=w, Phi=Phi, M=M, offset=off)
+    assert sol.status == "ok" and sol.max_gradient <= 1e-12
+
+
+def test_certificate_uses_the_dual_margin() -> None:
+    gen = gr.BKLGenerator(C=1.0, branch_fn=sign)
+    X, w, Phi, M, _ = ate_population(0.0, 0.5)
+    off = np.asarray(gen.grad(X, np.where(X[:, 0] == 1, 2.0, -2.0)))
+    sol = population.solve(generator=gen, X=X, w=w, Phi=Phi, M=M, offset=off)
+    v = off + Phi @ sol.beta
+    assert sol.min_dual_margin == pytest.approx(float(np.min(gen.dual_margin(X, v))), rel=0, abs=0)
+    assert sol.certified(margin_tol=sol.min_dual_margin)
+    assert not sol.certified(margin_tol=sol.min_dual_margin * 1.0001)
+
+
+def test_counterfactual_rows_must_stay_admissible() -> None:
+    gen = gr.BKLGenerator(C=1.0, branch_fn=sign)
+    X, w, Phi, M, _ = ate_population(0.0, 0.5)
+    off = np.asarray(gen.grad(X, np.where(X[:, 0] == 1, 2.0, -2.0)))
+    bad_X = np.array([[1.0, 0.0]])
+    with pytest.raises(ValueError, match="outside the link domain"):
+        population.solve(
+            generator=gen,
+            X=X,
+            w=w,
+            Phi=Phi,
+            M=M,
+            offset=off,
+            check_X=bad_X,
+            check_Phi=np.zeros((1, 4)),
+            check_offset=np.array([5.0]),
+        )
+
+
+def test_singular_system_stops_without_an_exception() -> None:
+    X, w, Phi, M, _ = ate_population(0.0, 0.5)
+    Phi2 = np.column_stack([Phi, Phi[:, :1]])
+    M2 = np.column_stack([M, M[:, :1]])
+    sol = population.solve(
+        generator=gr.UKLGenerator(C=1.0, branch_fn=sign),
+        X=X,
+        w=w,
+        Phi=Phi2,
+        M=M2,
+        offset=np.asarray(
+            gr.UKLGenerator(C=1.0, branch_fn=sign).grad(X, np.where(X[:, 0] == 1, 2.0, -2.0))
+        ),
+    )
+    assert sol.status == "singular" and not sol.certified()
