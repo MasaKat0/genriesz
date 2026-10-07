@@ -39,7 +39,7 @@ def test_sq_population_solution_is_the_weighted_projection() -> None:
     )
     assert sol.status == "ok" and sol.certified(margin_tol=-np.inf)
     np.testing.assert_allclose(
-        sol.alpha, population.weighted_projection(alpha0, Phi, w), atol=1e-12
+        sol.alpha, population.weighted_projection(alpha0, Phi, w), rtol=0, atol=1e-12
     )
 
 

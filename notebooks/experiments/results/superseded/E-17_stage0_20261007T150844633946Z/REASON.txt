@@ -1,0 +1,2 @@
+interrupted
+stopped: stage0_e17_judgement.json held every warning message (1.4 GB) and exceeded the 50 MB guard; warnings are now recorded as counts by message

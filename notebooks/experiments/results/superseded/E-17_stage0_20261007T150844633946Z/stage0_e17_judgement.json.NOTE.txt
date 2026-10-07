@@ -1,0 +1,1 @@
+sha256 of the uncompressed file: 13c87ccc3de15e341b3dec18d2f2f4fc75f4e2db14592f2d3c417a8f00467392 (1404119459 bytes); compressed losslessly with gzip -9 because the repository refuses files above 50 MB

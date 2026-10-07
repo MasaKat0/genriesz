@@ -1,0 +1,146 @@
+
+[NbConvertApp] Converting notebook /Users/mkato/Dropbox/研究/generalizedrieszregression/genriesz/notebooks/experiments/15_E17_misspecification_bounds.ipynb to notebook
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/__main__.py", line 5, in <module>
+    main()
+    ~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/jupyter_core/application.py", line 284, in launch_instance
+    super().launch_instance(argv=argv, **kwargs)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/traitlets/config/application.py", line 1080, in launch_instance
+    app.start()
+    ~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 420, in start
+    self.convert_notebooks()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 597, in convert_notebooks
+    self.convert_single_notebook(notebook_filename)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 563, in convert_single_notebook
+    output, resources = self.export_single_notebook(
+                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        notebook_filename, resources, input_buffer=input_buffer
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 487, in export_single_notebook
+    output, resources = self.exporter.from_filename(
+                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        notebook_filename, resources=resources
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 201, in from_filename
+    return self.from_file(f, resources=resources, **kw)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 220, in from_file
+    return self.from_notebook_node(
+           ~~~~~~~~~~~~~~~~~~~~~~~^
+        nbformat.read(file_stream, as_version=4), resources=resources, **kw
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/notebook.py", line 36, in from_notebook_node
+    nb_copy, resources = super().from_notebook_node(nb, resources, **kw)
+                         ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 154, in from_notebook_node
+    nb_copy, resources = self._preprocess(nb_copy, resources)
+                         ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 353, in _preprocess
+    nbc, resc = preprocessor(nbc, resc)
+                ~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/base.py", line 48, in __call__
+    return self.preprocess(nb, resources)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 103, in preprocess
+    self.preprocess_cell(cell, resources, index)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 124, in preprocess_cell
+    cell = self.execute_cell(cell, index, store_history=True)
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/jupyter_core/utils/__init__.py", line 165, in wrapped
+    return loop.run_until_complete(inner)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbclient/client.py", line 1062, in async_execute_cell
+    await self._check_raise_for_error(cell, cell_index, exec_reply)
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbclient/client.py", line 918, in _check_raise_for_error
+    raise CellExecutionError.from_cell_and_msg(cell, exec_reply_content)
+nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:
+------------------
+df = cells_df.copy()
+df["category"] = np.where(df["generator"] == "SQ", "sq", np.where(df["correctly_specified"], "correctly_specified", "main"))
+
+# The checks of each category (registration E-17 and Amendment 3). Relative tolerances have no absolute part.
+for v in ("line", "range"):
+    df[f"lower_ok_{v}"] = df["delta"] / df[f"C_{v}"] <= df["norm_e"] * (1 + REL)
+    df[f"upper_ok_{v}"] = df["norm_e"] <= df["delta"] / df[f"mu_{v}"] * (1 + REL)
+df["orth_ok"] = df["orthogonality"] <= ABS_ID
+df["identity_ok"] = df["identity_gap"] <= ABS_ID
+df["bias_bound_ok"] = df["bias"].abs() <= df["delta"] / df["mu_line"] * df["res_gamma_norm"] * (1 + REL)
+df["spec_norm_ok"] = df["norm_e"] <= ABS_SPEC
+df["spec_bias_ok"] = df["bias"].abs() <= ABS_ID
+df["sq_curvature_ok"] = (df[["mu_line", "C_line", "mu_range", "C_range"]] - 2.0).abs().max(axis=1) <= ABS_ID
+df["sq_equality_ok"] = (df["norm_e"] - df["delta"] / 2.0).abs() <= REL * df["delta"] / 2.0
+CHECKS = {
+    "main": ["lower_ok_line", "upper_ok_line", "lower_ok_range", "upper_ok_range", "orth_ok", "identity_ok",
+             "bias_bound_ok"],
+    "correctly_specified": ["spec_norm_ok", "spec_bias_ok", "orth_ok", "identity_ok"],
+    "sq": ["sq_curvature_ok", "sq_equality_ok", "orth_ok", "identity_ok", "bias_bound_ok"],
+}
+df["judged"] = df["certified"]
+df["passes"] = [bool(row[CHECKS[row["category"]]].all()) for _, row in df.iterrows()]
+df["violation"] = df["judged"] & ~df["passes"]
+unexpected_zero = df[(df["delta"] <= 1e-12) & (df["category"] != "correctly_specified")]
+summary_counts = {
+    cat: {"cells": int((df["category"] == cat).sum()), "judged": int((df["judged"] & (df["category"] == cat)).sum()),
+          "violations": int((df["violation"] & (df["category"] == cat)).sum())}
+    for cat in CHECKS
+}
+negative = {"non_sq": summary_counts["main"]["violations"] + summary_counts["correctly_specified"]["violations"] > 0,
+            "sq": summary_counts["sq"]["violations"] > 0}
+print(summary_counts, negative, "not certified:", int((~df["certified"]).sum()))
+
+rec.write_summary(df)
+rec.write_stage0("e17_judgement", {
+    "counts": summary_counts,
+    "negative_result": negative,
+    "not_certified": df.loc[~df["certified"], ["a0", "a1", "a2", "a3", "span", "generator", "status"]].to_dict(orient="records"),
+    "unexpected_delta_zero": unexpected_zero[["a0", "a1", "a2", "a3", "span", "generator", "delta"]].to_dict(orient="records"),
+    "warnings": warning_messages,
+})
+------------------
+
+----- stdout -----
+{'main': {'cells': 224, 'judged': 221, 'violations': 0}, 'correctly_specified': {'cells': 16, 'judged': 16, 'violations': 0}, 'sq': {'cells': 48, 'judged': 48, 'violations': 0}} {'non_sq': False, 'sq': False} not certified: 3
+------------------
+
+[31m---------------------------------------------------------------------------[39m
+[31mValueError[39m                                Traceback (most recent call last)
+[36mCell[39m[36m [39m[32mIn[4][39m[32m, line 35[39m
+[32m     31[39m             [33m"sq"[39m: summary_counts[[33m"sq"[39m][[33m"violations"[39m] > [32m0[39m}
+[32m     32[39m print(summary_counts, negative, [33m"not certified:"[39m, int((~df[[33m"certified"[39m]).sum()))
+[32m     33[39m 
+[32m     34[39m rec.write_summary(df)
+[32m---> [39m[32m35[39m rec.write_stage0("e17_judgement", {
+[32m     36[39m     [33m"counts"[39m: summary_counts,
+[32m     37[39m     [33m"negative_result"[39m: negative,
+[32m     38[39m     [33m"not_certified"[39m: df.loc[~df[[33m"certified"[39m], [[33m"a0"[39m, [33m"a1"[39m, [33m"a2"[39m, [33m"a3"[39m, [33m"span"[39m, [33m"generator"[39m, [33m"status"[39m]].to_dict(orient=[33m"records"[39m),
+
+[36mFile [39m[32m~/Dropbox/研究/generalizedrieszregression/genriesz/notebooks/experiments/grrexp/outputs.py:429[39m, in [36mRunRecorder.write_stage0[39m[34m(self, name, payload)[39m
+[32m    427[39m [38;5;28;01mwith[39;00m [38;5;28mopen[39m(path, [33m"[39m[33mx[39m[33m"[39m, encoding=[33m"[39m[33mutf-8[39m[33m"[39m) [38;5;28;01mas[39;00m f:
+[32m    428[39m     json.dump(payload, f, indent=[32m2[39m, sort_keys=[38;5;28;01mTrue[39;00m, allow_nan=[38;5;28;01mFalse[39;00m)
+[32m--> [39m[32m429[39m [38;5;28;01mreturn[39;00m [30;43mself[39;49m[30;43m.[39;49m[30;43m_register[39;49m[30;43m([39;49m[30;43mrel[39;49m[30;43m,[39;49m[30;43m [39;49m[30;43mpath[39;49m[30;43m)[39;49m
+
+[36mFile [39m[32m~/Dropbox/研究/generalizedrieszregression/genriesz/notebooks/experiments/grrexp/outputs.py:415[39m, in [36mRunRecorder._register[39m[34m(self, rel, path)[39m
+[32m    413[39m size = path.stat().st_size
+[32m    414[39m [38;5;28;01mif[39;00m size > MAX_FILE_BYTES:
+[32m--> [39m[32m415[39m     [38;5;28;01mraise[39;00m [38;5;167;01mValueError[39;00m([33mf[39m[33m"[39m[38;5;132;01m{[39;00mrel[38;5;132;01m}[39;00m[33m is [39m[38;5;132;01m{[39;00msize[38;5;132;01m}[39;00m[33m bytes, above the 50 MB guard[39m[33m"[39m)
+[32m    416[39m [38;5;28mself[39m.files[rel] = path
+[32m    417[39m [38;5;28;01mreturn[39;00m path
+
+[31mValueError[39m: stage0_e17_judgement.json is 1404119459 bytes, above the 50 MB guard
+
