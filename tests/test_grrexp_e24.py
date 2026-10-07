@@ -251,3 +251,59 @@ def test_registered_outputs_and_runs() -> None:
         "figures/fig_E24_rmse.pdf",
         "macros_E-24.tex",
     }
+
+
+def _replicate_with_warning_outcome(task):
+    """Worker helper: the GBM outcome fit issues a ConvergenceWarning."""
+    import warnings
+
+    from sklearn.exceptions import ConvergenceWarning
+
+    class Warned(e24.GBMOutcome):
+        def __init__(self, *a, **k):
+            warnings.warn("injected", ConvergenceWarning, stacklevel=1)
+            super().__init__(*a, **k)
+
+    e24.GBMOutcome = Warned
+    return e24.replicate(task)
+
+
+def test_an_outcome_convergence_warning_fails_the_arms_that_use_it() -> None:
+    from grrexp import parallel
+
+    task = (0, 0, PILOT_ENTROPY, _stub_tuning())
+    (res,) = parallel.run_tasks(_replicate_with_warning_outcome, [task], 2)
+    for e in e24.ESTIMATORS:
+        assert res[f"DML-GBM|{e}"]["status"] == "convergence_warning"
+        assert "outcome convergence_warning" in res[f"DML-GBM|{e}"]["fold_status"]
+    assert res["SQ|ARW_cf"]["status"] == "ok"
+
+
+def test_cv_select_excludes_values_with_any_failed_fold_and_records_it() -> None:
+    scores = {
+        1e-4: (1.0, [[2, "warning", {"RuntimeWarning: x": 1}]]),
+        1e-3: (2.0, []),
+        1e-2: (2.0, []),
+        1e-1: (None, [[0, "domain_prediction", {}]]),
+        1.0: (3.0, []),
+    }
+    choice, rec = e24._cv_select(list(scores), lambda v: scores[v], "larger")
+    assert choice == 1e-2  # 1e-4 is not eligible; 1e-3 and 1e-2 tie, the larger wins
+    assert rec[repr(1e-4)]["failures"][0][1] == "warning"
+    assert e24._cv_failures(rec) == 2
+    choice, _ = e24._cv_select([1e-3, 1e-2], lambda v: scores[v], "smaller")
+    assert choice == 1e-3
+    none, _ = e24._cv_select([1e-1], lambda v: scores[v], "larger")
+    assert none is None
+
+
+def test_per_cell_aggregation_compares_only_the_present_cell(monkeypatch) -> None:
+    import grrexp.bootstrap as bs
+
+    monkeypatch.setitem(bs.REGISTERED_B, 7, 200)
+    raw = _fake_raw(reps=12)
+    one = raw[raw["n"] == 2000]
+    comps = e24.compare(one, Seeds(24, entropy=PILOT_ENTROPY))
+    assert {c["n"] for c in comps} == {2000} and len(comps) == 20 + 6
+    S = e24.summarise(one)
+    assert set(S["n"]) == {2000} and "root_n_sd" in S

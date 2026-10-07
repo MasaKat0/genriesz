@@ -520,21 +520,33 @@ def riesz_criterion(a, a1, a0):
 
 
 def _cv_select(grid, score_fn, tie):
-    """``score_fn(value) -> total held-out loss or None`` (None: a fit failed, the value is
-    not eligible). ``tie``: ``"larger"`` or ``"smaller"`` grid value wins exact ties."""
-    scores = {v: score_fn(v) for v in grid}
-    ok = {v: s for v, s in scores.items() if s is not None and np.isfinite(s)}
+    """``score_fn(value) -> (total held-out loss, failures)``. A value with any failed CV
+    fit or evaluation (a status other than ok, any recorded warning, a domain or
+    non-finite prediction) is not eligible; ``failures`` lists ``[fold, status,
+    warnings]`` of each. ``tie``: ``"larger"`` or ``"smaller"`` grid value wins exact
+    ties. Returns ``(choice or None, record)``."""
+    record = {}
+    for v in grid:
+        score, failures = score_fn(v)
+        record[repr(v)] = {"score": score, "failures": failures}
+    ok = {v: record[repr(v)]["score"] for v in grid if not record[repr(v)]["failures"]}
+    ok = {v: s for v, s in ok.items() if s is not None and np.isfinite(s)}
     if not ok:
-        return None, scores
+        return None, record
     best = min(ok.values())
     winners = [v for v, s in ok.items() if s == best]
-    return (max(winners) if tie == "larger" else min(winners)), scores
+    return (max(winners) if tie == "larger" else min(winners)), record
+
+
+def _cv_failures(record):
+    return sum(len(r["failures"]) for r in record.values())
 
 
 def tune(cell, entropy):
     """Pilot data (stream 5, size ``n``), its 5-fold CV split and the Nystrom centres all
     come from the stream-5 generator, in that order; the RieszNet and GBM seeds are
-    the next draws of the same generator. Returns the frozen per-``n`` choices."""
+    the next draws of the same generator. Returns the frozen per-``n`` choices with the
+    held-out score and the failed fits of every candidate."""
     from sklearn.metrics import log_loss
 
     (n,) = CELLS[cell]
@@ -549,82 +561,96 @@ def tune(cell, entropy):
     folds = [(cv != k, cv == k) for k in range(CV_FOLDS)]
     warn = collections.Counter()
 
-    def rec(fit):
-        res, counts, converged = baselines.run_recording_warnings(fit)
+    def rec(fn):
+        res, counts, _ = baselines.run_recording_warnings(fn)
         warn.update(counts)
-        return res, converged
+        return res, counts
 
     out = {"n": n, "nystrom_dim": nys.dim, "bandwidth": nys.bandwidth, "lambda": {}, "scores": {}}
 
-    def riesz_score(make):
-        total = 0.0
-        for tr, te in folds:
-            (rep, conv) = rec(lambda tr=tr: make(X[tr]))
-            if rep.status != "ok" or not conv:
-                return None
+    def cv_score(fold_loss):
+        """``fold_loss(tr, te) -> (status, loss)``, run under warning recording."""
+        total, failures = 0.0, []
+        for k, (tr, te) in enumerate(folds):
+            (status, loss), counts = rec(lambda tr=tr, te=te: fold_loss(tr, te))
+            if status == "ok" and counts:
+                status = "warning"
+            if status != "ok":
+                failures.append([k, status, counts])
+                continue
+            total += loss
+        return (None if failures else total), failures
+
+    def riesz_loss(make):
+        def fold_loss(tr, te):
+            rep = make(X[tr])
+            if rep.status != "ok":
+                return rep.status, None
             a, a1, a0, st = rep.at(X[te])
-            if st != "ok":
-                return None
-            total += riesz_criterion(a, a1, a0)
-        return total
+            return (st, None) if st != "ok" else ("ok", riesz_criterion(a, a1, a0))
+
+        return cv_score(fold_loss)
 
     for arm in GRR_ARMS:
         lam, sc = _cv_select(
             LAMBDA_GRID,
-            lambda lam, arm=arm: riesz_score(lambda Xt: fit_glm(arm, base, lam, Xt)),
+            lambda lam, arm=arm: riesz_loss(lambda Xt: fit_glm(arm, base, lam, Xt)),
             "larger",
         )
+        out["scores"][arm] = sc
         if lam is None:
             raise RuntimeError(f"E-24 tuning: no eligible lambda for {arm} at n = {n}: {sc}")
-        out["lambda"][arm], out["scores"][arm] = lam, sc
+        out["lambda"][arm] = lam
 
     wd, sc = _cv_select(
-        WD_GRID, lambda wd: riesz_score(lambda Xt: fit_riesznet(wd, nn_seed, Xt)), "larger"
+        WD_GRID, lambda wd: riesz_loss(lambda Xt: fit_riesznet(wd, nn_seed, Xt)), "larger"
     )
+    out["scores"]["RieszNet"] = sc
     if wd is None:
         raise RuntimeError(f"E-24 tuning: no eligible weight decay at n = {n}: {sc}")
-    out["weight_decay"], out["scores"]["RieszNet"] = wd, sc
+    out["weight_decay"] = wd
 
-    def logit_score(C):
+    def logit_loss(C):
         from sklearn.linear_model import LogisticRegression
 
-        total = 0.0
-        for tr, te in folds:
+        def fold_loss(tr, te):
+            clf = LogisticRegression(
+                C=float(C), penalty="l2", solver="lbfgs", max_iter=10000, tol=1e-10
+            )
+            clf.fit(nys(Z[tr]), D[tr])
+            p = clf.predict_proba(nys(Z[te]))[:, 1]
+            return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
 
-            def fit(tr=tr, te=te):
-                clf = LogisticRegression(
-                    C=float(C), penalty="l2", solver="lbfgs", max_iter=10000, tol=1e-10
-                )
-                clf.fit(nys(Z[tr]), D[tr])
-                return clf.predict_proba(nys(Z[te]))[:, 1]
+        return cv_score(fold_loss)
 
-            p, conv = rec(fit)
-            if not conv:
-                return None
-            total += log_loss(D[te], p, labels=[0, 1]) * te.sum()
-        return total
-
-    c, sc = _cv_select(C_GRID, logit_score, "smaller")
+    c, sc = _cv_select(C_GRID, logit_loss, "smaller")
+    out["scores"]["LogitAIPW"] = sc
     if c is None:
         raise RuntimeError(f"E-24 tuning: no eligible C at n = {n}: {sc}")
-    out["logit_C"], out["scores"]["LogitAIPW"] = c, sc
+    out["logit_C"] = c
 
-    def outcome_score(lam):
-        total = 0.0
-        for tr, te in folds:
-            pred = Ridge(base, lam, X[tr], Y[tr])
-            total += float(np.sum((pred(X[te]) - Y[te]) ** 2))
-        return total
+    def outcome_loss(lam):
+        def fold_loss(tr, te):
+            pred = Ridge(base, lam, X[tr], Y[tr])(X[te])
+            if not np.all(np.isfinite(pred)):
+                return "nonfinite", None
+            return "ok", float(np.sum((pred - Y[te]) ** 2))
 
-    lam, sc = _cv_select(LAMBDA_GRID, outcome_score, "larger")
-    out["outcome_lambda"], out["scores"]["outcome"] = lam, sc
+        return cv_score(fold_loss)
 
-    (prop, outc), conv = rec(lambda: baselines.tune_gbm(D, Z, Y, cv, gbm_seed))
-    if not conv:
-        raise RuntimeError("E-24 tuning: ConvergenceWarning in the GBM tuning")
+    lam, sc = _cv_select(LAMBDA_GRID, outcome_loss, "larger")
+    out["scores"]["outcome"] = sc
+    if lam is None:
+        raise RuntimeError(f"E-24 tuning: no eligible outcome lambda at n = {n}: {sc}")
+    out["outcome_lambda"] = lam
+
+    (prop, outc), counts = rec(lambda: baselines.tune_gbm(D, Z, Y, cv, gbm_seed))
+    if counts:
+        raise RuntimeError(f"E-24 tuning: warnings in the GBM tuning: {counts}")
     out["gbm"] = {"propensity": list(prop), "outcome": list(outc), "seed": gbm_seed}
     out["nn_seed"] = nn_seed
     out["warnings"] = dict(warn)
+    out["cv_failures"] = int(sum(_cv_failures(s) for s in out["scores"].values()))
     out["nystrom"] = {
         "mean": nys.mean.tolist(), "sd": nys.sd.tolist(), "centres": nys.centres.tolist(),
         "bandwidth": nys.bandwidth,
@@ -706,15 +732,39 @@ def replicate(task):
     info = {arm: collections.defaultdict(int) for arm in ARMS}
     out_warn = collections.Counter()
     X1, X0 = _arms_rows(Z)
+    out_status = {"common": "ok", "gbm": "ok"}
     for k in range(K):
         tr, te = folds != k, folds == k
+        if not (np.any(D[tr] == 1) and np.any(D[tr] == 0)):
+            for arm in ARMS:
+                if status[arm] == "ok":
+                    fold_status[arm].append([k, "degenerate_functional"])
+                    status[arm] = "degenerate_functional"
+            break
         for key, make in (
             ("common", lambda tr=tr: Ridge(base, t["outcome_lambda"], X[tr], Y[tr])),
             ("gbm", lambda tr=tr: GBMOutcome(gbm_o, gbm_seed, X[tr], Y[tr])),
         ):
-            mdl, counts, _ = baselines.run_recording_warnings(make)
+            if out_status[key] != "ok":
+                continue
+
+            def predict(make=make, te=te):
+                mdl = make()
+                return [mdl(X[te]), mdl(X1[te]), mdl(X0[te])]
+
+            preds, counts, converged = baselines.run_recording_warnings(predict)
             out_warn.update(counts)
-            G[key][:, te] = [mdl(X[te]), mdl(X1[te]), mdl(X0[te])]
+            if not converged:
+                out_status[key] = "convergence_warning"
+            elif not all(np.all(np.isfinite(p)) for p in preds):
+                out_status[key] = "outcome_nonfinite"
+            else:
+                G[key][:, te] = preds
+                continue
+            for arm in ARMS:
+                if status[arm] == "ok" and (key == "gbm") == (arm == "DML-GBM"):
+                    fold_status[arm].append([k, f"outcome {out_status[key]}"])
+                    status[arm] = out_status[key]
         for arm in ARMS:
             if status[arm] != "ok":
                 continue
@@ -819,6 +869,8 @@ def summarise(raw):
     """§1.5 metrics per cell x arm|estimator, in the registered order."""
     import pandas as pd
 
+    from .e12 import POSITIVE_VARIANCE, moment_status
+
     rows = []
     for ci, (n,) in enumerate(CELLS):
         for label in ARM_LABELS:
@@ -847,7 +899,12 @@ def summarise(raw):
                 row.update(metrics.bias(est, ok, THETA0))
                 row["rmse"] = metrics.rmse(est, ok, THETA0)
                 row["sd"] = float(est[ok].std(ddof=1))
-                row["se_ratio"] = metrics.se_ratio(est, se, ok)
+                row["root_n_sd"] = float(np.sqrt(n) * row["sd"])
+                ms = row["moment_status"] = moment_status(est[ok])
+                if ms in POSITIVE_VARIANCE:
+                    row["se_ratio"] = metrics.se_ratio(est, se, ok)
+                if ms == "ok":
+                    row.update(metrics.root_n_sd(est, ok, n))
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -872,8 +929,11 @@ def compare(raw, seeds):
 
     boot = FamilyBootstrap(seeds, 7)
     arw = raw[raw["arm"].str.endswith("|ARW_cf")]
+    present = set(int(v) for v in raw["n"].unique())
     out = []
     for fam, n, a, b in comparisons():
+        if n not in present:  # the per-cell aggregation of Stage 0.5
+            continue
         ga = arw[(arw["n"] == n) & (arw["arm"] == f"{a}|ARW_cf")].sort_values("rep")
         gb = arw[(arw["n"] == n) & (arw["arm"] == f"{b}|ARW_cf")].sort_values("rep")
         both = (ga["status"].to_numpy() == "ok") & (gb["status"].to_numpy() == "ok")
@@ -900,6 +960,8 @@ def compare(raw, seeds):
 
     for fam in ("H24-Base", "H24-GRR"):
         idx = [i for i, r in enumerate(out) if r["family"] == fam]
+        if not idx:
+            continue
         rej = holm([out[i]["p"] for i in idx], FAMILY_LEVEL)
         for i, r in zip(idx, rej, strict=True):
             out[i]["rejected"] = bool(r)
