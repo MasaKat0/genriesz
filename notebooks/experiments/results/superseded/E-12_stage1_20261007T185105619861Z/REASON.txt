@@ -1,0 +1,2 @@
+finished
+Re-run at genriesz 5bb630a so that the tables carry longtable heads and coverage among successes (U26 judgments, docs/reviews/2026-10-08_e12-manuscript.md in the parent repository); the estimation code is unchanged.
