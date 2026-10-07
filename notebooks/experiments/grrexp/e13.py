@@ -392,6 +392,18 @@ def multistart_points():
     return 2.0 * pts - 1.0
 
 
+def multistart_agrees(ms):
+    """(iv'): all 20 starts are recorded, at least one converged (status ``ok``; no
+    vacuous agreement), and every converged start is within 1e-8 (max abs) of the
+    solution from the registered start."""
+    conv = [m for m in ms if m["status"] == "ok"]
+    return (
+        len(ms) == MULTISTART
+        and len(conv) > 0
+        and all(m["max_abs_diff"] <= MULTISTART_TOL for m in conv)
+    )
+
+
 def stage0():
     """Every pair at 48 and 64 points, its certificate, and the predictions per n.
 
@@ -432,11 +444,7 @@ def stage0():
             checks["ii_isolated"] = bool(
                 solved and r64["min_hessian_eig"] >= CERT_EIG_RATIO * r64["max_hessian_eig"]
             )
-            ms = r64.get("multistart", [])
-            conv = [m for m in ms if m["status"] == "ok"]
-            checks["iv_multistart"] = bool(
-                solved and all(m["max_abs_diff"] <= MULTISTART_TOL for m in conv)
-            )
+            checks["iv_multistart"] = bool(solved and multistart_agrees(r64.get("multistart", [])))
         cert = bool(solved and all(checks.values()))
         row = {
             "pair": pair,
@@ -612,7 +620,7 @@ def _arw_cf(X, Y, pair, folds):
     own status; the balance of the folds fit before it is still recorded."""
     n = len(Y)
     psi, alpha = np.empty(n), np.empty(n)
-    detail = []
+    detail, eval_imb = [], []
     fits = _Fits()
 
     def run():
@@ -626,13 +634,20 @@ def _arw_cf(X, Y, pair, folds):
                 return status
             fits.records.append(rec)
             Xt = X[te]
-            a, outside, nonfinite = mdl.classify(Xt)
+            # the observed rows of the fold and the counterfactual rows m evaluates (§1.3 C)
+            pts = np.vstack([Xt, gr().ATEFunctional(0).evaluation_points(Xt, mdl.basis)])
+            _, outside, nonfinite = mdl.classify(pts)
             if np.any(outside):
                 detail.append([str(int(k)), "prediction", "domain_prediction"])
                 return "domain_prediction"
             if np.any(nonfinite):
                 detail.append([str(int(k)), "prediction", "nonfinite"])
                 return "nonfinite"
+            a = np.asarray(mdl.classify(Xt)[0], dtype=float)
+            # evaluation-sample imbalance (§1.5): the fold whose representer was not fit on it
+            Phi_t = np.asarray(mdl.basis(Xt), dtype=float)
+            M_t = np.asarray(gr().ATEFunctional(0).m_basis_matrix(Xt, mdl.basis), dtype=float)
+            eval_imb.append(float(np.max(np.abs(np.mean(a[:, None] * Phi_t - M_t, axis=0)))))
             pred = fits.run("outcome", k, lambda tr=tr: _ols(X, Y, X[tr], Y[tr]))
             psi[te] = _m_ols(pred, Xt) + a * (Y[te] - pred(Xt))
             alpha[te] = a
@@ -650,6 +665,7 @@ def _arw_cf(X, Y, pair, folds):
         "status": "ok",
         "max_abs_alpha": float(np.max(np.abs(alpha))),
         "ess": metrics.ess(alpha),
+        "eval_imbalance": float(max(eval_imb)),
         **common,
     }
 
@@ -678,7 +694,7 @@ def tasks_for(entropy, reps, cells=None):
 
 NUMERIC_FIELDS = (
     "estimate", "se", "max_abs_alpha", "ess", "train_fits", "I_psi_max", "I_phi_max",
-    "scale_max", "n_warnings", *(f"delta_hat_{j}" for j in range(P)),
+    "scale_max", "eval_imbalance", "n_warnings", *(f"delta_hat_{j}" for j in range(P)),
 )  # fmt: skip
 TEXT_FIELDS = ("status", "warnings", "fold_status")
 
@@ -758,6 +774,8 @@ def summarise(raw, population_rows):
     for ci, (n,) in enumerate(CELLS):
         for label in ARM_LABELS:
             g = raw[(raw["cell"] == ci) & (raw["arm"] == label)].sort_values("rep")
+            if g.empty:  # e.g. the per-cell aggregation of Stage 0.5
+                continue
             ok = (g["status"] == "ok").to_numpy()
             est, se = g["estimate"].to_numpy(), g["se"].to_numpy()
             pair, _, estimator = label.partition("|")
@@ -778,6 +796,9 @@ def summarise(raw, population_rows):
                 row["I_psi_max"] = float(g.loc[ok, "I_psi_max"].max())
                 row["I_phi_median"] = float(g.loc[ok, "I_phi_max"].median())
                 row["I_phi_max"] = float(g.loc[ok, "I_phi_max"].max())
+                if estimator == "ARW_cf":
+                    row["eval_imbalance_median"] = float(g.loc[ok, "eval_imbalance"].median())
+                    row["eval_imbalance_max"] = float(g.loc[ok, "eval_imbalance"].max())
                 if estimator == "RW_full":
                     for j in range(P):
                         row[f"delta_hat_mean_{j}"] = float(g.loc[ok, f"delta_hat_{j}"].mean())

@@ -270,3 +270,60 @@ def test_aggregation_table_and_figure_from_summary() -> None:
     fig = e13.figure(summ)
     plt.close(fig)
     assert not summ.loc[summ["pair"] == "I-UKLlin", "c_pred"].notna().any()
+
+
+# ---------------------------------------------------------------- review fixes (first review)
+
+
+def test_multistart_requires_all_starts_and_a_converged_one() -> None:
+    ok = {"status": "ok", "max_abs_diff": 1e-12}
+    bad = {"status": "infeasible_start", "max_abs_diff": None}
+    assert e13.multistart_agrees([ok] * 20)
+    assert e13.multistart_agrees([ok] + [bad] * 19)
+    assert not e13.multistart_agrees([bad] * 20)  # no vacuous agreement
+    assert not e13.multistart_agrees([ok] * 19)
+    assert not e13.multistart_agrees([{"status": "ok", "max_abs_diff": 2e-8}] + [ok] * 19)
+
+
+def test_summarise_aggregates_one_cell_at_a_time() -> None:
+    for ci in range(len(e13.CELLS)):
+        tasks = e13.tasks_for(PILOT_ENTROPY, 2, cells=[ci])
+        raw = e13.raw_frame(tasks, [e13.replicate(t) for t in tasks])
+        summ = e13.summarise(raw, _population_stub())
+        assert set(summ["cell"]) == {ci} and len(summ) == len(e13.ARM_LABELS)
+        verdict, tests, _ = e13.family_h13(summ, raw, Seeds(13, entropy=PILOT_ENTROPY))
+        assert tests and verdict is not None
+
+
+def test_arw_cf_fails_on_a_counterfactual_row_outside_the_domain(monkeypatch) -> None:
+    """Valid at every observed row, outside the domain at a counterfactual row."""
+    rng = np.random.default_rng(1)
+    D, Z, Y = e13.draw(rng, 200)
+    X = np.column_stack([D, Z])
+    observed = {tuple(r) for r in X}
+    real = e13.fit_representer
+
+    def stub(pair, X_fit):
+        status, mdl, rec = real(pair, X_fit)
+        inner = mdl.classify
+
+        def classify(rows):
+            a, outside, nonfinite = inner(rows)
+            cf = np.array([tuple(r) not in observed for r in np.atleast_2d(rows)])
+            return np.where(cf, np.nan, a), outside | cf, nonfinite
+
+        mdl.classify = classify
+        return status, mdl, rec
+
+    monkeypatch.setattr(e13, "fit_representer", stub)
+    folds = np.arange(len(Y)) % e13.K
+    rec = e13._arw_cf(X, Y, "C-SQ", folds)
+    assert rec["status"] == "domain_prediction"
+    assert rec["train_fits"] == 1  # the first fold's fit is kept in the record
+
+
+def test_arw_cf_records_the_evaluation_imbalance() -> None:
+    out = e13.replicate((0, 0, PILOT_ENTROPY))
+    r = out["C-SQ|ARW_cf"]
+    assert r["status"] == "ok" and np.isfinite(r["eval_imbalance"]) and r["eval_imbalance"] > 0
+    assert "eval_imbalance" not in out["C-SQ|RW_full"]
