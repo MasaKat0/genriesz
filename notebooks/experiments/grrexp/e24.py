@@ -575,6 +575,8 @@ def tune(cell, entropy):
             (status, loss), counts = rec(lambda tr=tr, te=te: fold_loss(tr, te))
             if status == "ok" and counts:
                 status = "warning"
+            if status == "ok" and not np.isfinite(loss):
+                status = "nonfinite"
             if status != "ok":
                 failures.append([k, status, counts])
                 continue
@@ -619,6 +621,8 @@ def tune(cell, entropy):
             )
             clf.fit(nys(Z[tr]), D[tr])
             p = clf.predict_proba(nys(Z[te]))[:, 1]
+            if not np.all(np.isfinite(p)):
+                return "nonfinite", None
             return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
 
         return cv_score(fold_loss)
@@ -653,6 +657,8 @@ def tune(cell, entropy):
         def fold_loss(tr, te):
             clf = baselines._gbm_classifier(params, gbm_seed).fit(Z[tr], D[tr])
             p = clf.predict_proba(Z[te])[:, 1]
+            if not np.all(np.isfinite(p)):
+                return "nonfinite", None
             return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
 
         return cv_score(fold_loss)
@@ -660,6 +666,8 @@ def tune(cell, entropy):
     def gbm_out_loss(params):
         def fold_loss(tr, te):
             pred = baselines._gbm_regressor(params, gbm_seed).fit(DZ[tr], Y[tr]).predict(DZ[te])
+            if not np.all(np.isfinite(pred)):
+                return "nonfinite", None
             return "ok", float(np.sum((pred - Y[te]) ** 2))
 
         return cv_score(fold_loss)
