@@ -152,3 +152,33 @@ def test_singular_system_stops_without_an_exception() -> None:
         ),
     )
     assert sol.status == "singular" and not sol.certified()
+
+
+def test_counterfactual_overflow_of_a_finite_ukl_coordinate_is_rejected() -> None:
+    ukl = gr.UKLGenerator(C=1.0, branch_fn=sign)
+    X, w, Phi, M, _ = ate_population(0.0, 0.5)
+    off = np.asarray(ukl.grad(X, np.where(X[:, 0] == 1, 2.0, -2.0)))
+    with pytest.raises(ValueError, match="outside the link domain"):
+        population.solve(
+            generator=ukl,
+            X=X,
+            w=w,
+            Phi=Phi,
+            M=M,
+            offset=off,
+            check_X=np.array([[1.0, 0.0]]),
+            check_Phi=np.zeros((1, 4)),
+            check_offset=np.array([800.0]),
+        )  # exp(800) overflows to inf
+
+
+def test_backtracking_and_failed_acceptance() -> None:
+    # starting next to the BKL boundary (|alpha_ref| = 1.01), the full Newton step leaves the domain:
+    # with halvings the solve converges, without them it stops with "linesearch"
+    bkl = gr.BKLGenerator(C=1.0, branch_fn=sign)
+    X, w, Phi, M, _ = ate_population(0.8, 1.5)
+    off = np.asarray(bkl.grad(X, np.where(X[:, 0] == 1, 1.01, -1.01)))
+    sol = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=off)
+    assert sol.status == "ok" and sol.certified()
+    stuck = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=off, max_halvings=0)
+    assert stuck.status == "linesearch" and stuck.n_iter == 1 and not stuck.certified()

@@ -31,8 +31,6 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from genriesz.solvers import _accept_newton
-
 ARMIJO = 1e-4
 
 
@@ -100,6 +98,9 @@ def solve(
         raise ValueError("w, M and offset must match the support rows")
     if np.any(w < 0) or not np.isclose(w.sum(), 1.0, rtol=0, atol=1e-14):
         raise ValueError("w must be non-negative probabilities summing to one")
+    # imported here, after the notebook selected this checkout (grrexp.env.use_submodule_genriesz)
+    from genriesz.solvers import _accept_newton
+
     has_checks = check_X is not None
     b = w @ M
 
