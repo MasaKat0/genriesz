@@ -8,6 +8,7 @@ Registration: doc/2026-10-07_experiment_registration.md (parent repository), §1
 - ``inference``: interval-null tests, Holm, predicted coverage (§1.8, §1.9)
 - ``bootstrap``: bootstrap families on stream 4 (§1.9)
 - ``env``, ``outputs``: provenance, data checks, outputs and manifest (§1.7)
+- ``runner``: the only way to start a registered run (``run_registered.py``)
 
 Estimators and DGPs live in genriesz ``src/`` and in each notebook (§1.3).
 """

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import pytest
 from scipy import stats
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
 
-from grrexp import bootstrap, env, inference, metrics, outputs, parallel  # noqa: E402
+from grrexp import bootstrap, env, inference, metrics, outputs, parallel, runner  # noqa: E402
 from grrexp.seeds import Seeds  # noqa: E402
 
 # ---------------------------------------------------------------- metrics (§1.5)
@@ -242,108 +244,119 @@ def test_serial_run_requires_single_thread_env(monkeypatch) -> None:
         parallel._call(_draw, (0, 0))
 
 
-# ---------------------------------------------------------------- outputs (§1.7)
+# ---------------------------------------------------------------- manifest (§1.7)
 
-FAKE_SOURCE = {
-    "sha": "a" * 40,
-    "notebook": "notebooks/experiments/14_E16_exact_examples.ipynb",
-    "notebook_code_cells_sha256": "b" * 64,
-    "loaded_modules": {"src/genriesz/__init__.py": "c" * 40},
-}
-FAKE_ENV = {
-    "platform": ["Darwin", "arm64"],
-    "python": "3.13.6",
-    "lock_sha256": "d" * 64,
-    "lock_pins_verified": 109,
+H40, H64 = "a" * 40, "b" * 64
+THREADS = {
+    "variables": {k: "1" for k in sorted(parallel.THREAD_VARIABLES)},
+    "blas_backend": "accelerate",
+    "observed_pools": [{"internal_api": "openmp", "num_threads": 1}],
+    "torch": {"num_threads": 1, "deterministic": True},
 }
 
 
-@pytest.fixture
-def fake_run(tmp_path, monkeypatch):
-    monkeypatch.setattr(env, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(env, "check_environment", lambda: dict(FAKE_ENV))
-    state = {"source": dict(FAKE_SOURCE)}
-    monkeypatch.setattr(env, "source_snapshot", lambda nb: dict(state["source"]))
-    parent = {"sha": "e" * 40, "gitlink": "a" * 40, "dirty_tracked": False}
-    monkeypatch.setattr(env, "parent_state", lambda: dict(parent))
-    monkeypatch.setattr(env, "pip_freeze", lambda: ("numpy==2.3.5\n", "f" * 64))
-    return tmp_path, state
+def make_manifest(exp: int, stage: str) -> dict:
+    R, n = outputs.registered_conditions(exp, stage)
+    if n is not None:
+        n = {p: (v if v is not None else [1000]) for p, v in n.items()}
+    cells = None if stage == "stage0" else [[0], [1]]
+    names = [o.replace("*", "main") for o in outputs.required_outputs(exp, stage)]
+    freeze = "numpy==2.3.5\n"
+    m = {
+        "experiment": f"E-{exp}",
+        "stage": stage,
+        "parent_repository": {"sha": H40, "gitlink": H40, "dirty_tracked": False},
+        "genriesz": {
+            "sha": H40,
+            "notebook": "notebooks/experiments/x.ipynb",
+            "notebook_blob": H40,
+            "notebook_code_cells_sha256": H64,
+            "loaded_modules": {"src/genriesz/__init__.py": H40},
+        },
+        "environment": {
+            "platform": ["Darwin", "arm64"],
+            "python": "3.13.6",
+            "lock_sha256": H64,
+            "lock_pins_verified": 109,
+        },
+        "threads": copy.deepcopy(THREADS),
+        "pip_freeze": freeze,
+        "pip_freeze_sha256": hashlib.sha256(freeze.encode()).hexdigest(),
+        "blas": "accelerate",
+        "cpu": "Apple M",
+        "data_sha256": {k: env.DATA_SHA256[k] for k in env.REGISTERED_DATA.get(exp, ())},
+        "entropy": outputs.STAGE_ENTROPY[stage],
+        "R": R,
+        "n": n,
+        "cells": cells,
+        "prerequisites": {
+            p: {"manifest_sha256": H64, "commit": H40}
+            for p in outputs.prerequisite_stages(exp, stage)
+        },
+        "started_utc": "2026-10-07T00:00:00+00:00",
+        "finished_utc": "2026-10-07T00:01:00+00:00",
+        "wall_seconds": 60.0,
+        "warnings": 0,
+        "failures": 0,
+        "outputs_sha256": {name: H64 for name in names},
+    }
+    if stage == "stage0.5":
+        m["parallel_identity"] = {
+            "cells": cells, "reps": 10, "n_jobs": 12, "tasks": 20, "digest": H64,
+        }  # fmt: skip
+    return m
 
 
-def _finish_e16(rec):
-    rec.write_macros({"EXVIbias": "-1/15"})
-    rec.write_table("tab_E16", "x")
-    return rec.finalize(warnings=0, failures=0)
+@pytest.mark.parametrize(
+    "exp,stage", [(16, "stage0"), (12, "stage0"), (12, "stage0.5"), (12, "stage1"), (22, "stage1")]
+)
+def test_complete_manifests_validate(exp, stage) -> None:
+    outputs.validate_manifest(make_manifest(exp, stage), exp, stage)
 
 
-def test_deterministic_run_writes_valid_manifest(fake_run) -> None:
-    tmp, _ = fake_run
-    rec = outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None)
-    path = _finish_e16(rec)
-    manifest = json.loads(path.read_text())
-    outputs.validate_manifest(manifest, 16, "stage0")
-    assert path == tmp / "E-16" / "stage0" / "manifest.json"
-    assert not (tmp / "E-16" / "stage0" / "RUNNING.json").exists()
-    with pytest.raises(RuntimeError):
-        rec.write_table("tab_E16b", "y")  # closed after finalize
-    with pytest.raises(RuntimeError):
-        rec.finalize(warnings=0, failures=0)
-
-
-def test_stage_is_reserved_even_when_interrupted(fake_run) -> None:
-    outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None)  # never finalized
-    with pytest.raises(FileExistsError):
-        outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None)
-    moved = outputs.archive_run(16, "stage0", "interrupted by a kernel restart")
-    assert (moved / "RUNNING.json").is_file()
-    assert (moved / "REASON.txt").read_text().startswith("interrupted")
-    _finish_e16(outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None))
-
-
-def test_registered_outputs_and_duplicates_are_enforced(fake_run) -> None:
-    rec = outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None)
-    rec.write_table("tab_E16", "x")
-    with pytest.raises(FileExistsError):
-        rec.write_table("tab_E16", "x")
-    with pytest.raises(ValueError, match="registered outputs not written"):
-        rec.finalize(warnings=0, failures=0)
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda m: m.update(R={"main": 1}),
+        lambda m: m.update(n={"main": [-1]}),
+        lambda m: m.update(started_utc=""),
+        lambda m: m.update(finished_utc="2026-10-06T00:00:00+00:00"),
+        lambda m: m.update(wall_seconds=float("inf")),
+        lambda m: m.update(cpu=""),
+        lambda m: m.update(pip_freeze="other\n"),
+        lambda m: m["genriesz"].update(notebook_code_cells_sha256=""),
+        lambda m: m["genriesz"].update(loaded_modules={"src/genriesz/__init__.py": "zz"}),
+        lambda m: m["threads"]["variables"].update(OMP_NUM_THREADS="4"),
+        lambda m: m["threads"].update(torch={"num_threads": 10, "deterministic": False}),
+        lambda m: m.update(prerequisites={}),
+        lambda m: m.update(cells=[]),
+        lambda m: m["outputs_sha256"].pop("tables/tab_E12_ord.tex"),
+        lambda m: m.pop("threads"),
+    ],
+)
+def test_incomplete_or_inconsistent_stage1_manifest_is_rejected(change) -> None:
+    m = make_manifest(12, "stage1")
+    change(m)
     with pytest.raises(ValueError):
-        rec.write_macros({"E16x": "1"})
+        outputs.validate_manifest(m, 12, "stage1")
 
 
-def test_source_change_during_run_stops_finalize(fake_run) -> None:
-    _, state = fake_run
-    rec = outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None)
-    state["source"]["sha"] = "9" * 40
-    with pytest.raises(RuntimeError, match="source changed"):
-        _finish_e16(rec)
-
-
-def test_stage1_needs_prior_stages_and_pilot_keeps_no_estimates(fake_run) -> None:
-    with pytest.raises(RuntimeError, match="needs a finished"):
-        outputs.RunRecorder(13, "stage1", notebook="nb", R=10, n=1000)
-    pilot = outputs.RunRecorder(13, "stage0.5", notebook="nb", R=10, n=1000)
+def test_pilot_identity_must_cover_every_cell() -> None:
+    m = make_manifest(12, "stage0.5")
+    m["parallel_identity"]["tasks"] = 10
+    with pytest.raises(ValueError, match="incomplete"):
+        outputs.validate_manifest(m, 12, "stage0.5")
+    m = make_manifest(12, "stage0.5")
+    m["parallel_identity"]["n_jobs"] = 2
     with pytest.raises(ValueError):
-        pilot.write_raw(pd.DataFrame({"x": [1.0]}))
-    with pytest.raises(ValueError):
-        pilot.write_table("tab_E13", "x")
-    with pytest.raises(ValueError):
-        pilot.write_pilot("estimates.csv", pd.DataFrame({"x": [1.0]}))
+        outputs.validate_manifest(m, 12, "stage0.5")
 
 
-def test_manifest_validation_rejects_incomplete(fake_run) -> None:
-    path = _finish_e16(outputs.RunRecorder(16, "stage0", notebook="nb", R=None, n=None))
-    good = json.loads(path.read_text())
-    for key in ("environment", "data_sha256", "blas"):
-        bad = dict(good)
-        del bad[key]
-        with pytest.raises(ValueError):
-            outputs.validate_manifest(bad, 16, "stage0")
-    bad = dict(good, outputs_sha256={"macros_E-16.tex": "0" * 64})
+def test_e22_needs_its_three_tables() -> None:
+    m = make_manifest(22, "stage1")
+    m["outputs_sha256"].pop("tables/tab_E22_smd.tex")
     with pytest.raises(ValueError, match="registered outputs missing"):
-        outputs.validate_manifest(bad, 16, "stage0")
-    with pytest.raises(ValueError, match="data checks"):
-        outputs.validate_manifest(dict(good, experiment="E-21"), 21, "stage0")
+        outputs.validate_manifest(m, 22, "stage1")
 
 
 def test_data_check_rejects_missing_file(tmp_path, monkeypatch) -> None:
@@ -356,69 +369,170 @@ def test_data_check_rejects_missing_file(tmp_path, monkeypatch) -> None:
         env.verify_data(["lalonde/lalonde.csv"])
 
 
-# ---------------------------------------------------------------- source and environment
-
-
-def _git(repo, *args):
-    subprocess.run(
-        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
-        check=True,
-        capture_output=True,
-    )
+# ---------------------------------------------------------------- kernel-side recorder
 
 
 @pytest.fixture
-def fake_checkout(tmp_path, monkeypatch):
-    root = tmp_path / "gz"
+def reserved(tmp_path, monkeypatch):
+    monkeypatch.setattr(env, "RESULTS_DIR", tmp_path)
+    for k in parallel.THREAD_VARIABLES:
+        monkeypatch.setenv(k, "1")
+    d = outputs.stage_dir(16, "stage0")
+    d.mkdir(parents=True)
+    (d / "RUNNING.json").write_text(json.dumps({"token": "t"}))
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps({"exp": 16, "stage": "stage0", "token": "t"}))
+    return d
+
+
+def test_recorder_refuses_without_the_runner(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv(outputs.RUN_ENV, raising=False)
+    with pytest.raises(RuntimeError, match="through grrexp.runner"):
+        outputs.RunRecorder(16, "stage0")
+
+
+def test_recorder_checks_token_and_reservation(reserved, monkeypatch) -> None:
+    with pytest.raises(RuntimeError, match="reserved"):
+        outputs.RunRecorder(17, "stage0")
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps({"exp": 16, "stage": "stage0", "token": "x"}))
+    with pytest.raises(RuntimeError, match="does not belong"):
+        outputs.RunRecorder(16, "stage0")
+
+
+@pytest.mark.parametrize("name", ["../../victim", "a/b", ".", "..", "x.y", ""])
+def test_output_names_cannot_escape(reserved, name) -> None:
+    rec = outputs.RunRecorder(16, "stage0")
+    with pytest.raises(ValueError):
+        rec.write_table(name, "x")
+
+
+def test_recorder_writes_kernel_record_once(reserved) -> None:
+    rec = outputs.RunRecorder(16, "stage0")
+    rec.write_table("tab_E16", "x")
+    with pytest.raises(FileExistsError):
+        rec.write_table("tab_E16", "x")
+    with pytest.raises(ValueError, match="registered outputs not written"):
+        rec.finalize(R=None, n=None, warnings=0, failures=0)
+    rec.write_macros({"EXVIbias": "-1/15"})
+    rec.finalize(R=None, n=None, warnings=0, failures=0)
+    record = json.loads((reserved / "kernel.json").read_text())
+    assert record["outputs"] == ["macros_E-16.tex", "tables/tab_E16.tex"]
+    assert record["threads"]["torch"] == {"num_threads": 1, "deterministic": True}
+    with pytest.raises(RuntimeError):
+        rec.write_table("tab_E16b", "y")
+    with pytest.raises(FileExistsError):
+        outputs.RunRecorder(16, "stage0")
+
+
+def test_archive_keeps_interrupted_runs(reserved) -> None:
+    moved = outputs.archive_run(16, "stage0", "kernel died")
+    assert (moved / "RUNNING.json").is_file()
+    assert (moved / "REASON.txt").read_text().startswith("interrupted")
+
+
+# ---------------------------------------------------------------- checkout and runner
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+
+
+E16_NOTEBOOK = {
+    "cells": [
+        {
+            "cell_type": "code",
+            "metadata": {},
+            "execution_count": None,
+            "outputs": [],
+            "source": [
+                "from grrexp import env, outputs\n",
+                "env.use_submodule_genriesz()\n",
+                "rec = outputs.RunRecorder(16, 'stage0')\n",
+                "rec.write_macros({'EXVIbias': '-1/15'})\n",
+                "rec.write_table('tab_E16', 'x')\n",
+                "rec.finalize(R=None, n=None, warnings=0, failures=0)\n",
+            ],
+        }
+    ],
+    "metadata": {
+        "kernelspec": {"name": "python3", "display_name": "Python 3", "language": "python"}
+    },
+    "nbformat": 4,
+    "nbformat_minor": 5,
+}
+
+
+@pytest.fixture
+def fake_repo(tmp_path, monkeypatch):
+    parent = tmp_path / "parent"
+    root = parent / "gz"
     (root / "src" / "genriesz").mkdir(parents=True)
-    (root / "src" / "genriesz" / "fakemod_grrexp.py").write_text("VALUE = 1\n")
-    nbdir = root / "notebooks" / "experiments"
-    nbdir.mkdir(parents=True)
-    nb = {
-        "cells": [{"cell_type": "code", "source": ["x = 1\n"], "outputs": []}],
-        "metadata": {},
-        "nbformat": 4,
-        "nbformat_minor": 5,
-    }
-    (nbdir / "run.ipynb").write_text(json.dumps(nb))
-    (root / ".gitignore").write_text("__pycache__/\n")  # as in the genriesz repository
+    (root / "src" / "genriesz" / "__init__.py").write_text("VALUE = 1\n")
+    exp_dir = root / "notebooks" / "experiments"
+    exp_dir.mkdir(parents=True)
+    shutil.copytree(
+        env.EXPERIMENTS_DIR / "grrexp", exp_dir / "grrexp",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )  # fmt: skip
+    (exp_dir / "e16.ipynb").write_text(json.dumps(E16_NOTEBOOK))
+    (root / ".gitignore").write_text("__pycache__/\n")
     _git(root, "init", "-q")
     _git(root, "add", ".")
     _git(root, "commit", "-qm", "c")
+    _git(parent, "init", "-q")
+    _git(parent, "add", "gz")
+    _git(parent, "commit", "-qm", "gitlink")
     monkeypatch.setattr(env, "GENRIESZ_ROOT", root.resolve())
-    monkeypatch.syspath_prepend(str(root / "src" / "genriesz"))
-    import fakemod_grrexp  # noqa: F401
-
-    yield root, nbdir / "run.ipynb", nb
-    sys.modules.pop("fakemod_grrexp", None)
-
-
-def test_source_snapshot_accepts_clean_checkout_and_outputs(fake_checkout) -> None:
-    root, nb_path, nb = fake_checkout
-    (root / "notebooks/experiments/results/E-16").mkdir(parents=True)
-    (root / "notebooks/experiments/results/E-16/x.json").write_text("{}")
-    nb["cells"][0]["outputs"] = [{"output_type": "stream", "name": "stdout", "text": "1"}]
-    nb_path.write_text(json.dumps(nb))  # outputs only
-    snap = env.source_snapshot(nb_path)
-    assert snap["loaded_modules"] == {
-        "src/genriesz/fakemod_grrexp.py": env.git_blob_sha1(b"VALUE = 1\n")
-    }
+    monkeypatch.setattr(env, "GENRIESZ_SRC", (root / "src").resolve())
+    monkeypatch.setattr(env, "EXPERIMENTS_DIR", exp_dir.resolve())
+    monkeypatch.setattr(env, "RESULTS_DIR", (exp_dir / "results").resolve())
+    return root, exp_dir
 
 
-def test_source_snapshot_rejects_changes(fake_checkout) -> None:
-    root, nb_path, nb = fake_checkout
-    (root / "notebooks/experiments/helper.py").write_text("y = 2\n")
+def test_checkout_state_requires_a_clean_committed_checkout(fake_repo) -> None:
+    root, exp_dir = fake_repo
+    nb = exp_dir / "e16.ipynb"
+    (exp_dir / "results" / "E-16").mkdir(parents=True)
+    (exp_dir / "results" / "E-16" / "x.json").write_text("{}")
+    state = env.checkout_state(nb)
+    assert state["notebook"] == "notebooks/experiments/e16.ipynb"
+    (exp_dir / "helper.py").write_text("y = 2\n")
     with pytest.raises(RuntimeError, match="not clean"):
-        env.source_snapshot(nb_path)
-    (root / "notebooks/experiments/helper.py").unlink()
-    (root / "src/genriesz/fakemod_grrexp.py").write_text("VALUE = 2\n")
-    with pytest.raises(RuntimeError):
-        env.source_snapshot(nb_path)
-    _git(root, "checkout", "--", "src/genriesz/fakemod_grrexp.py")
-    nb["cells"][0]["source"] = ["x = 2\n"]
-    nb_path.write_text(json.dumps(nb))
-    with pytest.raises(RuntimeError, match="code cells"):
-        env.source_snapshot(nb_path)
+        env.checkout_state(nb)
+    (exp_dir / "helper.py").unlink()
+    nb.write_text(nb.read_text() + " ")
+    with pytest.raises(RuntimeError, match="not clean"):
+        env.checkout_state(nb)
+
+
+def test_module_check_against_commit() -> None:
+    blobs = {"src/genriesz/a.py": H40}
+    env.check_modules_at_head({"src/genriesz/a.py": H40}, blobs)
+    with pytest.raises(RuntimeError, match="differ"):
+        env.check_modules_at_head({"src/genriesz/a.py": "c" * 40}, blobs)
+    with pytest.raises(RuntimeError, match="differ"):
+        env.check_modules_at_head({"src/genriesz/a.py": H40, "src/x.py": H40}, blobs)
+
+
+def test_runner_end_to_end_in_a_fresh_kernel(fake_repo) -> None:
+    root, exp_dir = fake_repo
+    path = runner.run(16, "stage0", "e16.ipynb")
+    manifest = json.loads(path.read_text())
+    outputs.validate_manifest(manifest, 16, "stage0")
+    assert manifest["threads"]["variables"] == THREADS["variables"]
+    assert manifest["threads"]["torch"] == {"num_threads": 1, "deterministic": True}
+    assert "src/genriesz/__init__.py" in manifest["genriesz"]["loaded_modules"]
+    d = path.parent
+    assert (d / "executed.ipynb").is_file() and not (d / "RUNNING.json").exists()
+    assert not _git(root, "status", "--porcelain", "--", "notebooks/experiments/e16.ipynb")
+    with pytest.raises(FileExistsError):
+        runner.run(16, "stage0", "e16.ipynb")
+    with pytest.raises(runner.RunError, match="needs a finished"):
+        runner.run(12, "stage1", "e16.ipynb")
 
 
 def test_environment_matches_lock_and_lock_covers_registration() -> None:

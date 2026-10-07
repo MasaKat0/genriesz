@@ -130,3 +130,30 @@ def verify_parallel_identity(
     serial = run_tasks(fn, tasks, 1)
     parallel = run_tasks(fn, tasks, n_jobs)
     return assert_bit_identical(serial, parallel, expected=len(tasks))
+
+
+def thread_record(variables_at_start: dict[str, str | None]) -> dict:
+    """What the manifest records about threads (§1.2).
+
+    threadpoolctl observes OpenBLAS, MKL, BLIS and OpenMP pools but not Apple
+    Accelerate; for Accelerate the evidence is ``VECLIB_MAXIMUM_THREADS=1`` in the
+    environment the runner gave the kernel before any import, which is recorded
+    separately from the observed pools.
+    """
+    import numpy as np
+    import torch
+    from threadpoolctl import threadpool_info
+
+    blas = np.show_config(mode="dicts")["Build Dependencies"]["blas"]
+    return {
+        "variables": dict(sorted(variables_at_start.items())),
+        "blas_backend": str(blas.get("name", "")),
+        "observed_pools": [
+            {"internal_api": i["internal_api"], "num_threads": i["num_threads"]}
+            for i in threadpool_info()
+        ],
+        "torch": {
+            "num_threads": torch.get_num_threads(),
+            "deterministic": torch.are_deterministic_algorithms_enabled(),
+        },
+    }

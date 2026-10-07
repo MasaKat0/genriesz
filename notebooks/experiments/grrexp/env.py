@@ -5,12 +5,10 @@ editable install outside this repository. :func:`use_submodule_genriesz` puts
 this checkout's ``src/`` first on ``sys.path`` and refuses to continue if
 genriesz was already imported from elsewhere.
 
-:func:`source_snapshot` ties a run to a commit: the genriesz checkout must have
-no tracked change and no untracked file outside ``results/``, every loaded
-module from this checkout must equal its blob at ``HEAD``, and the code cells of
-the executing notebook must equal those committed at ``HEAD``. The recorder
-takes a snapshot before computing and requires an identical one when it
-finalizes.
+:func:`checkout_state` ties a registered run to a commit (no change and no
+untracked file outside ``results/``); :mod:`grrexp.runner` checks it before and
+after the run and compares the modules the kernel loaded
+(:func:`loaded_module_blobs`) with the blobs of that commit.
 
 :func:`check_environment` enforces the registered platform and every pin of
 ``requirements-lock.txt`` (the registered packages and their dependency
@@ -227,56 +225,62 @@ def _code_cells(raw: bytes) -> list[str]:
     return out
 
 
-def source_snapshot(notebook: Path) -> dict:
-    """The commit a run computes from; raises unless the checkout matches it.
+def head_blobs(root: Path | None = None) -> dict[str, str]:
+    """``path -> blob SHA-1`` of every file committed at ``HEAD``."""
+    return _head_blobs(GENRIESZ_ROOT if root is None else root)
 
-    ``notebook`` is the executing notebook; only its outputs may differ from
-    ``HEAD``. Nothing else may be modified or untracked outside ``results/``.
+
+def checkout_state(notebook: Path) -> dict:
+    """The commit a registered run starts from; raises unless the checkout is clean.
+
+    Nothing may be modified or untracked outside ``results/`` (the executing
+    notebook included: a registered run executes the committed notebook into
+    its stage directory and never saves into the tracked file).
     """
     root = GENRIESZ_ROOT
     notebook = Path(notebook).resolve()
     nb_rel = notebook.relative_to(root).as_posix()
-    head = _git(root, "rev-parse", "HEAD").strip()
     blobs = _head_blobs(root)
     if nb_rel not in blobs:
         raise RuntimeError(f"{nb_rel} is not committed at HEAD")
-    head_cells = _code_cells(_git(root, "cat-file", "blob", blobs[nb_rel], text=False))
-    if _code_cells(notebook.read_bytes()) != head_cells:
-        raise RuntimeError(f"code cells of {nb_rel} differ from HEAD; commit them first")
-
     dirty = []
     for line in _git(root, "status", "--porcelain", "--untracked-files=all").splitlines():
         path = line[3:].strip('"')
-        if path.startswith(RESULTS_PREFIX) or path == nb_rel:
-            continue
-        dirty.append(line)
+        if not path.startswith(RESULTS_PREFIX):
+            dirty.append(line)
     if dirty:
         raise RuntimeError("genriesz checkout is not clean: " + "; ".join(dirty))
+    raw = _git(root, "cat-file", "blob", blobs[nb_rel], text=False)
+    return {
+        "sha": _git(root, "rev-parse", "HEAD").strip(),
+        "notebook": nb_rel,
+        "notebook_blob": blobs[nb_rel],
+        "notebook_code_cells_sha256": hashlib.sha256(
+            json.dumps(_code_cells(raw)).encode("utf-8")
+        ).hexdigest(),
+    }
 
-    loaded = {}
+
+def loaded_module_blobs() -> dict[str, str]:
+    """``path -> blob SHA-1`` of every loaded module file inside this checkout."""
+    out = {}
     for mod in list(sys.modules.values()):
         f = getattr(mod, "__file__", None)
-        if not f:
-            continue
+        if not isinstance(f, str) or not Path(f).is_absolute():
+            continue  # built-in, namespace, or synthetic (e.g. torch's "_ops.py")
         p = Path(f).resolve()
-        if root not in p.parents:
-            continue
-        rel = p.relative_to(root).as_posix()
-        if rel not in blobs:
-            raise RuntimeError(f"loaded module {rel} is not committed at HEAD")
-        if git_blob_sha1(p.read_bytes()) != blobs[rel]:
-            raise RuntimeError(f"loaded module {rel} differs from HEAD")
-        loaded[rel] = blobs[rel]
-    if not any(r.startswith("src/genriesz/") for r in loaded):
-        raise RuntimeError("genriesz from this checkout is not loaded; call use_submodule_genriesz")
-    return {
-        "sha": head,
-        "notebook": nb_rel,
-        "notebook_code_cells_sha256": hashlib.sha256(
-            json.dumps(head_cells).encode("utf-8")
-        ).hexdigest(),
-        "loaded_modules": dict(sorted(loaded.items())),
-    }
+        if GENRIESZ_ROOT in p.parents:
+            out[p.relative_to(GENRIESZ_ROOT).as_posix()] = git_blob_sha1(p.read_bytes())
+    return dict(sorted(out.items()))
+
+
+def check_modules_at_head(loaded: dict[str, str], blobs: dict[str, str]) -> None:
+    """Raise unless every loaded module is committed and equal to its blob."""
+    bad = [rel for rel, sha in loaded.items() if blobs.get(rel) != sha]
+    if bad:
+        raise RuntimeError(f"loaded modules differ from the commit: {bad}")
+    if not any(rel.startswith("src/genriesz/") for rel in loaded):
+        raise RuntimeError("genriesz from this checkout was not loaded")
 
 
 def parent_state() -> dict:

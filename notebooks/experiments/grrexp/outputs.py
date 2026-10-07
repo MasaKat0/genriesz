@@ -5,47 +5,74 @@ Each stage of an experiment has its own directory under
 
     stage0/   Stage 0 frozen predictions (stage0_*.json); for the deterministic
               experiments E-16, E-17 and E-23 also their tables, figures, macros
-    pilot/    Stage 0.5: timing.csv and status_counts.csv only (no estimates)
+    pilot/    Stage 0.5: timing.csv and status_counts.csv (no estimates) and the
+              1-versus-12-worker identity record
     stage1/   Stage 1: raw.parquet (one row per replication x arm, failures
               included), summary.csv, tables/*.tex, figures/*.pdf, macros_E-xx.tex
 
-A stage directory is reserved by creating it (``mkdir`` fails if it exists),
-holds ``RUNNING.json`` while the run computes and ``manifest.json`` once it is
-finished, and is written once. A finished or interrupted stage is moved aside,
-never deleted, with :func:`archive_run` before a registered re-run (§1.8).
-
-The manuscript never reads these files: the parent repository's
-``tools/sync_experiment_outputs.py`` validates the manifest with
-:func:`validate_manifest` and copies the committed outputs.
+Registered runs are started only by :mod:`grrexp.runner`. The runner reserves
+the stage directory (``mkdir`` fails if it exists), writes ``RUNNING.json`` with
+a token, executes the committed notebook in a fresh kernel, and writes
+``manifest.json`` after the kernel finished. Inside the kernel,
+:class:`RunRecorder` attaches to that directory, writes the outputs, and leaves
+``kernel.json`` (what the kernel loaded and counted). A stage is written once; a
+finished or interrupted stage is moved aside, never deleted, with
+:func:`archive_run` before a registered re-run (§1.8).
 """
 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
+import math
+import os
 import re
 import shutil
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import env
+from .parallel import THREAD_VARIABLES
 from .seeds import CONFIRMATORY_ENTROPY, PILOT_ENTROPY
 
 STAGE_DIRS = {"stage0": "stage0", "stage0.5": "pilot", "stage1": "stage1"}
 STAGE_ENTROPY = {"stage0": None, "stage0.5": PILOT_ENTROPY, "stage1": CONFIRMATORY_ENTROPY}
 MAX_FILE_BYTES = 50 * 1024 * 1024  # the repository's large-file guard
 MACRO_NAME = re.compile(r"^[A-Za-z]+$")
-OUTPUT_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
-PILOT_FILES = ("timing.csv", "status_counts.csv")
-RESERVED_NAMES = ("manifest.json", "RUNNING.json")
+STEM = re.compile(r"^[A-Za-z0-9_-]+$")
+HEX40 = re.compile(r"^[0-9a-f]{40}$")
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+RUN_ENV = "GRREXP_RUN"
+PILOT_REPS = 10
+PILOT_WORKERS = 12
+RUNNER_FILES = ("RUNNING.json", "kernel.json", "manifest.json", "executed.ipynb", "FAILED.txt")
 
 # §0.2: deterministic experiments are finished at Stage 0.
 DETERMINISTIC = frozenset({16, 17, 23})
 # §0.2: experiments whose predictions are frozen at Stage 0 before Stage 1.
 STAGE0_BEFORE_STAGE1 = frozenset({12, 13, 14, 15, 18, 19, 20, 24})
 
-# §4: manuscript-facing outputs of each experiment (patterns relative to the stage directory).
+# §2: registered replications and sample sizes per part of each Monte Carlo experiment.
+# ``None`` for n: the registration fixes R but not the sample sizes of that part.
+REGISTERED_RUNS = {
+    12: {"main": (2000, [500, 1000, 2000, 4000])},
+    13: {"main": (1000, [1000, 4000])},
+    14: {"main": (200, [4000, 8000, 16000, 32000, 64000])},
+    15: {"partB": (2000, [500, 1000, 2000, 4000, 8000])},
+    18: {"18A": (500, [1000, 2000, 4000, 8000]), "18B": (1000, [1000, 2000, 4000, 8000])},
+    19: {
+        "inference": (2000, [1000, 2000, 4000]),
+        "counterexamples": (5000, [1000, 4000]),
+        "illustration": (2000, None),
+    },
+    20: {"main": (2000, [[500, 500], [2000, 2000], [8000, 8000], [8000, 1000], [1000, 8000]])},
+    21: {"main": (100, [747])},
+    22: {"main": (100, [614])},
+    24: {"main": (1000, [1000, 2000, 4000, 8000])},
+}
+
+# §4: manuscript-facing outputs of each experiment (relative to the stage directory).
 REGISTERED_OUTPUTS = {
     12: (
         "tables/tab_E12_main.tex",
@@ -63,9 +90,18 @@ REGISTERED_OUTPUTS = {
     19: ("tables/tab_E19.tex", "figures/fig_E19_counterexamples.pdf"),
     20: ("tables/tab_E20.tex",),
     21: ("tables/tab_E21_ate.tex", "tables/tab_E21_att.tex"),
-    22: ("tables/tab_E22_*.tex", "figures/fig_E22_love.pdf"),
+    22: (
+        "tables/tab_E22_main.tex",
+        "tables/tab_E22_full.tex",
+        "tables/tab_E22_smd.tex",
+        "figures/fig_E22_love.pdf",
+    ),
     23: ("tables/tab_E23.tex",),
     24: ("tables/tab_E24.tex", "figures/fig_E24_rmse.pdf", "macros_E-24.tex"),
+}
+PILOT_COLUMNS = {
+    "timing.csv": ("cell", "workers", "seconds"),
+    "status_counts.csv": ("cell", "arm", "status", "count"),
 }
 
 MANIFEST_FIELDS = (
@@ -74,6 +110,7 @@ MANIFEST_FIELDS = (
     "parent_repository",
     "genriesz",
     "environment",
+    "threads",
     "pip_freeze",
     "pip_freeze_sha256",
     "blas",
@@ -82,6 +119,8 @@ MANIFEST_FIELDS = (
     "entropy",
     "R",
     "n",
+    "cells",
+    "prerequisites",
     "started_utc",
     "finished_utc",
     "wall_seconds",
@@ -108,9 +147,29 @@ def stage_dir(exp: int, stage: str) -> Path:
     return experiment_dir(exp) / STAGE_DIRS[stage]
 
 
+def prerequisite_stages(exp: int, stage: str) -> tuple[str, ...]:
+    if stage == "stage0":
+        return ()
+    if exp in DETERMINISTIC:
+        raise ValueError(f"E-{exp} is deterministic and has only Stage 0")
+    if stage == "stage0.5":
+        return ()
+    return ("stage0", "stage0.5") if exp in STAGE0_BEFORE_STAGE1 else ("stage0.5",)
+
+
+def registered_conditions(exp: int, stage: str) -> tuple[dict | None, dict | None]:
+    """``(R, n)`` that the manifest of this stage must carry (``None``: not applicable)."""
+    if stage == "stage0":
+        return None, None
+    runs = REGISTERED_RUNS[exp]
+    if stage == "stage0.5":
+        return {p: PILOT_REPS for p in runs}, {p: n for p, (_, n) in runs.items()}
+    return {p: r for p, (r, _) in runs.items()}, {p: n for p, (_, n) in runs.items()}
+
+
 def required_outputs(exp: int, stage: str) -> tuple[str, ...]:
     if stage == "stage0.5":
-        return PILOT_FILES
+        return tuple(PILOT_COLUMNS)
     if stage == deliverable_stage(exp):
         extra = () if exp in DETERMINISTIC else ("raw.parquet", "summary.csv")
         return REGISTERED_OUTPUTS[exp] + extra
@@ -127,43 +186,134 @@ def _require(cond: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def _timestamp(value) -> datetime:
+    try:
+        t = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"bad timestamp {value!r}") from e
+    _require(t.tzinfo is not None, f"timestamp {value!r} has no time zone")
+    return t
+
+
+def _check_n(n_registered, n_recorded) -> bool:
+    if n_registered is not None:
+        return n_recorded == n_registered
+    return (
+        isinstance(n_recorded, list)
+        and bool(n_recorded)
+        and all(isinstance(v, int) and v > 0 for v in n_recorded)
+    )
+
+
 def validate_manifest(manifest: dict, exp: int, stage: str) -> None:
-    """Raise unless ``manifest`` has every §1.7 field for this experiment and stage."""
+    """Raise unless ``manifest`` carries every §1.7 field, consistently, for this stage.
+
+    Checks that need git objects (module blobs, the lock file at the run commit,
+    committed prerequisite manifests) are made by the runner and the sync tool.
+    """
     missing = [k for k in MANIFEST_FIELDS if k not in manifest]
     _require(not missing, f"manifest lacks {missing}")
     _require(manifest["experiment"] == f"E-{exp}", "manifest names another experiment")
     _require(manifest["stage"] == stage, f"manifest stage {manifest['stage']!r} != {stage!r}")
+
     src = manifest["genriesz"]
-    for key in ("sha", "notebook", "notebook_code_cells_sha256", "loaded_modules"):
-        _require(bool(src.get(key)), f"genriesz.{key} is empty")
+    _require(bool(HEX40.match(str(src.get("sha", "")))), "genriesz.sha is not a commit")
+    _require(bool(HEX40.match(str(src.get("notebook_blob", "")))), "notebook blob missing")
     _require(
-        any(k.startswith("src/genriesz/") for k in src["loaded_modules"]),
-        "no genriesz module recorded",
+        bool(HEX64.match(str(src.get("notebook_code_cells_sha256", "")))), "notebook digest bad"
     )
+    nb = str(src.get("notebook", ""))
+    _require(nb.startswith("notebooks/experiments/") and nb.endswith(".ipynb"), "bad notebook")
+    modules = src.get("loaded_modules") or {}
+    _require(any(k.startswith("src/genriesz/") for k in modules), "no genriesz module recorded")
+    _require(all(HEX40.match(str(v)) for v in modules.values()), "bad module blob hash")
+
     parent = manifest["parent_repository"]
-    _require(bool(parent.get("sha")) and bool(parent.get("gitlink")), "parent state is empty")
+    _require(bool(HEX40.match(str(parent.get("sha", "")))), "parent sha missing")
+    _require(bool(HEX40.match(str(parent.get("gitlink", "")))), "parent gitlink missing")
+
     envr = manifest["environment"]
     _require(envr.get("platform") == list(env.REGISTERED_PLATFORM), "platform not verified")
     _require(envr.get("python") == env.REGISTERED_PYTHON, "python not verified")
+    _require(bool(HEX64.match(str(envr.get("lock_sha256", "")))), "lock digest missing")
     _require(int(envr.get("lock_pins_verified", 0)) > 0, "lock not verified")
-    _require(bool(manifest["pip_freeze"]) and bool(manifest["blas"]), "pip freeze or BLAS empty")
+
+    threads = manifest["threads"]
+    _require(
+        threads.get("variables") == {k: "1" for k in sorted(threads.get("variables", {}))}
+        and len(threads.get("variables", {})) == 3,
+        "thread variables were not all 1 at kernel start",
+    )
+    _require(bool(threads.get("blas_backend")), "BLAS backend not recorded")
+    _require(
+        all(p.get("num_threads") == 1 for p in threads.get("observed_pools", [])),
+        "an observed thread pool was not 1",
+    )
+    _require(threads.get("torch") == {"num_threads": 1, "deterministic": True}, "torch not pinned")
+
+    freeze = manifest["pip_freeze"]
+    _require(isinstance(freeze, str) and bool(freeze), "pip freeze empty")
+    _require(
+        manifest["pip_freeze_sha256"] == hashlib.sha256(freeze.encode()).hexdigest(),
+        "pip freeze digest does not match",
+    )
+    _require(bool(manifest["blas"]) and bool(str(manifest["cpu"]).strip()), "BLAS or CPU empty")
+
     expected_data = set(env.REGISTERED_DATA.get(exp, ()))
     _require(set(manifest["data_sha256"]) == expected_data, "data checks differ from registration")
     for name in expected_data:
         _require(manifest["data_sha256"][name] == env.DATA_SHA256[name], f"{name} hash differs")
     _require(manifest["entropy"] == STAGE_ENTROPY[stage], "entropy differs from the stage's")
-    if stage != "stage0":
-        _require(isinstance(manifest["R"], int) and manifest["R"] > 0, "R must be a positive int")
-        _require(manifest["n"] is not None, "n is missing")
+
+    R_reg, n_reg = registered_conditions(exp, stage)
+    if R_reg is None:
+        _require(manifest["R"] is None and manifest["n"] is None, "Stage 0 has no R or n")
+        _require(manifest["cells"] is None, "Stage 0 has no Monte Carlo cells")
+    else:
+        _require(manifest["R"] == R_reg, f"R {manifest['R']} != registered {R_reg}")
+        n_rec = manifest["n"]
+        _require(
+            isinstance(n_rec, dict)
+            and set(n_rec) == set(n_reg)
+            and all(_check_n(n_reg[p], n_rec[p]) for p in n_reg),
+            f"n {n_rec} != registered {n_reg}",
+        )
+        cells = manifest["cells"]
+        _require(isinstance(cells, list) and bool(cells), "registered cell inventory missing")
+        _require(len(set(map(json.dumps, cells))) == len(cells), "duplicate cells")
+
+    prereq = manifest["prerequisites"]
+    _require(isinstance(prereq, dict), "prerequisites must be a mapping")
+    _require(set(prereq) == set(prerequisite_stages(exp, stage)), "prerequisites differ")
+    for value in prereq.values():
+        _require(bool(HEX64.match(str(value.get("manifest_sha256", "")))), "prereq digest bad")
+        _require(bool(HEX40.match(str(value.get("commit", "")))), "prereq commit bad")
+
+    if stage == "stage0.5":
+        ident = manifest.get("parallel_identity") or {}
+        _require(ident.get("reps") == PILOT_REPS, "pilot must run 10 replications per cell")
+        _require(ident.get("n_jobs") == PILOT_WORKERS, "pilot must compare 1 and 12 workers")
+        _require(ident.get("cells") == manifest["cells"], "identity check skipped cells")
+        _require(
+            ident.get("tasks") == PILOT_REPS * len(manifest["cells"]), "identity check incomplete"
+        )
+        _require(bool(HEX64.match(str(ident.get("digest", "")))), "identity digest missing")
+
+    started, finished = _timestamp(manifest["started_utc"]), _timestamp(manifest["finished_utc"])
+    _require(finished >= started, "run finished before it started")
+    wall = manifest["wall_seconds"]
+    _require(isinstance(wall, (int, float)) and math.isfinite(wall) and wall >= 0, "bad wall time")
     for key in ("warnings", "failures"):
-        _require(isinstance(manifest[key], int) and manifest[key] >= 0, f"{key} must be >= 0")
-    _require(manifest["wall_seconds"] >= 0, "wall time is negative")
+        value = manifest[key]
+        _require(isinstance(value, int) and value >= 0, f"{key} must be an int >= 0")
+
     outputs = manifest["outputs_sha256"]
-    _require(bool(outputs), "no outputs recorded")
+    _require(isinstance(outputs, dict) and bool(outputs), "no outputs recorded")
     gaps = missing_outputs(exp, stage, outputs)
     _require(not gaps, f"registered outputs missing: {gaps}")
     for name, digest in outputs.items():
-        _require(isinstance(digest, str) and len(digest) == 64, f"bad SHA-256 for {name}")
+        _require(bool(HEX64.match(str(digest))), f"bad SHA-256 for {name}")
+        _require(name not in RUNNER_FILES[:3], f"{name} is not an output")
 
 
 def archive_run(exp: int, stage: str, reason: str) -> Path:
@@ -183,63 +333,68 @@ def archive_run(exp: int, stage: str, reason: str) -> Path:
 
 
 class RunRecorder:
-    """Reserves one stage of one experiment, collects its outputs, writes its manifest.
+    """Kernel side of a registered run: writes the outputs into the reserved stage directory.
 
-    Create it after the imports and before any computation: it checks the
-    environment, the data and the source, and fixes the source snapshot that
-    :meth:`finalize` requires to be unchanged.
+    It refuses to start unless the runner reserved this experiment and stage
+    for this process (``GRREXP_RUN`` and the token in ``RUNNING.json``) and the
+    single-thread variables were set before the kernel started.
     """
 
-    def __init__(self, exp: int, stage: str, *, notebook, R: int | None, n):
-        self.exp = exp
-        self.stage = stage
-        self.R = R
-        self.n = n
+    def __init__(self, exp: int, stage: str, *, cells: list | None = None):
+        raw = os.environ.get(RUN_ENV)
+        if not raw:
+            raise RuntimeError("registered runs start through grrexp.runner, not interactively")
+        run = json.loads(raw)
+        if run.get("exp") != exp or run.get("stage") != stage:
+            raise RuntimeError(f"the runner reserved {run.get('exp')}/{run.get('stage')}")
+        self.exp, self.stage = exp, stage
         self.dir = stage_dir(exp, stage)
-        if stage == "stage1":
-            if exp in DETERMINISTIC:
-                raise ValueError(f"E-{exp} is deterministic and finished at Stage 0")
-            needed = ["stage0.5"] + (["stage0"] if exp in STAGE0_BEFORE_STAGE1 else [])
-            for prior in needed:
-                if not (stage_dir(exp, prior) / "manifest.json").is_file():
-                    raise RuntimeError(f"Stage 1 of E-{exp} needs a finished {prior}")
-        if stage == "stage0.5" and exp in DETERMINISTIC:
-            raise ValueError(f"E-{exp} has no Monte Carlo pilot")
-        if stage != "stage0" and (not isinstance(R, int) or R <= 0):
-            raise ValueError("R must be a positive int")
-        self.environment = env.check_environment()
-        self.data_sha256 = env.verify_data(env.REGISTERED_DATA.get(exp, ()))
-        self.source = env.source_snapshot(notebook)
-        self._notebook = notebook
-        self.dir.parent.mkdir(parents=True, exist_ok=True)
-        self.dir.mkdir()  # reservation: fails if this stage was run before
-        self.started = datetime.now(timezone.utc)
-        self._t0 = time.perf_counter()
-        running = {"started_utc": self.started.isoformat(), "genriesz": self.source["sha"]}
-        (self.dir / "RUNNING.json").write_text(json.dumps(running), encoding="utf-8")
+        running = json.loads((self.dir / "RUNNING.json").read_text(encoding="utf-8"))
+        if running.get("token") != run.get("token"):
+            raise RuntimeError("RUNNING.json does not belong to this run")
+        if (self.dir / "kernel.json").exists():
+            raise FileExistsError("a recorder already ran in this stage directory")
+        self.threads_at_start = {k: os.environ.get(k) for k in sorted(THREAD_VARIABLES)}
+        if any(v != "1" for v in self.threads_at_start.values()):
+            raise RuntimeError(f"thread variables at kernel start: {self.threads_at_start}")
+        from .parallel import configure_worker
+
+        configure_worker()  # torch single-threaded and deterministic in this kernel
+        if stage == "stage0":
+            if cells is not None:
+                raise ValueError("Stage 0 has no Monte Carlo cells")
+        elif not cells:
+            raise ValueError("give the registered cell inventory")
+        self.cells = (
+            None if cells is None else [list(c) if isinstance(c, tuple) else c for c in cells]
+        )
         self.files: dict[str, Path] = {}
+        self.parallel_identity: dict | None = None
         self.closed = False
 
     # -- writers -------------------------------------------------------------
 
-    def _path(self, relative: str) -> Path:
+    def _path(self, stem: str, folder: str | None, suffix: str) -> tuple[str, Path]:
         if self.closed:
             raise RuntimeError("this run is finalized")
-        parts = relative.split("/")
-        valid = all(OUTPUT_NAME.match(p) for p in parts) and relative not in RESERVED_NAMES
-        if not valid:
-            raise ValueError(f"invalid output name {relative!r}")
-        if relative in self.files:
-            raise FileExistsError(f"{relative} was already written in this run")
-        path = self.dir / relative
+        if not STEM.match(stem):
+            raise ValueError(f"output names are single stems [A-Za-z0-9_-], got {stem!r}")
+        rel = f"{folder}/{stem}{suffix}" if folder else f"{stem}{suffix}"
+        if rel in self.files or rel in RUNNER_FILES:
+            raise FileExistsError(f"{rel} was already written in this run")
+        path = (self.dir / rel).resolve()
+        if self.dir.resolve() not in path.parents:
+            raise ValueError(f"{rel} leaves the stage directory")
+        if path.exists():
+            raise FileExistsError(f"{rel} exists")
         path.parent.mkdir(parents=True, exist_ok=True)
-        return path
+        return rel, path
 
-    def _register(self, relative: str, path: Path) -> Path:
+    def _register(self, rel: str, path: Path) -> Path:
         size = path.stat().st_size
         if size > MAX_FILE_BYTES:
-            raise ValueError(f"{relative} is {size} bytes, above the 50 MB guard")
-        self.files[relative] = path
+            raise ValueError(f"{rel} is {size} bytes, above the 50 MB guard")
+        self.files[rel] = path
         return path
 
     def _deliverable(self) -> None:
@@ -249,46 +404,66 @@ class RunRecorder:
     def write_stage0(self, name: str, payload: dict) -> Path:
         if self.stage != "stage0":
             raise ValueError("stage0_*.json is written only in Stage 0")
-        rel = f"stage0_{name}.json"
-        path = self._path(rel)
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        rel, path = self._path(f"stage0_{name}", None, ".json")
+        with open(path, "x", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True, allow_nan=False)
         return self._register(rel, path)
 
     def write_pilot(self, name: str, frame) -> Path:
-        """Stage 0.5: ``timing.csv`` or ``status_counts.csv`` (no estimates)."""
+        """Stage 0.5: ``timing.csv`` or ``status_counts.csv`` with the registered columns."""
         if self.stage != "stage0.5":
             raise ValueError("pilot files are written only in Stage 0.5")
-        if name not in PILOT_FILES:
-            raise ValueError(f"Stage 0.5 keeps only {PILOT_FILES}")
-        path = self._path(name)
+        if name not in PILOT_COLUMNS or tuple(frame.columns) != PILOT_COLUMNS[name]:
+            raise ValueError(f"Stage 0.5 keeps only {PILOT_COLUMNS}")
+        cells = {json.dumps(c) for c in self.cells}
+        if not set(frame["cell"].map(json.dumps)) <= cells:
+            raise ValueError("pilot rows name unregistered cells")
+        numeric = "seconds" if name == "timing.csv" else "count"
+        if not (frame[numeric] >= 0).all():
+            raise ValueError(f"{numeric} must be >= 0")
+        rel, path = self._path(name.removesuffix(".csv"), None, ".csv")
         frame.to_csv(path, index=False)
-        return self._register(name, path)
+        return self._register(rel, path)
+
+    def record_parallel_identity(self, *, cells, reps: int, n_jobs: int, digest: str) -> None:
+        """Stage 0.5: the result of :func:`grrexp.parallel.verify_parallel_identity`."""
+        if self.stage != "stage0.5":
+            raise ValueError("the identity check belongs to Stage 0.5")
+        cells = [list(c) if isinstance(c, tuple) else c for c in cells]
+        if cells != self.cells or reps != PILOT_REPS or n_jobs != PILOT_WORKERS:
+            raise ValueError("the identity check must cover every cell, 10 reps, 1 vs 12 workers")
+        self.parallel_identity = {
+            "cells": cells,
+            "reps": reps,
+            "n_jobs": n_jobs,
+            "tasks": reps * len(cells),
+            "digest": digest,
+        }
 
     def write_raw(self, frame) -> Path:
         if self.stage != "stage1":
             raise ValueError("raw.parquet is written only in Stage 1")
-        path = self._path("raw.parquet")
+        rel, path = self._path("raw", None, ".parquet")
         frame.to_parquet(path, index=False, compression="zstd")
-        return self._register("raw.parquet", path)
+        return self._register(rel, path)
 
     def write_summary(self, frame) -> Path:
         if self.stage != "stage1":
             raise ValueError("summary.csv is written only in Stage 1")
-        path = self._path("summary.csv")
+        rel, path = self._path("summary", None, ".csv")
         frame.to_csv(path, index=False)
-        return self._register("summary.csv", path)
+        return self._register(rel, path)
 
     def write_table(self, name: str, tex: str) -> Path:
         self._deliverable()
-        rel = f"tables/{name}.tex"
-        path = self._path(rel)
-        path.write_text(tex, encoding="utf-8")
+        rel, path = self._path(name, "tables", ".tex")
+        with open(path, "x", encoding="utf-8") as f:
+            f.write(tex)
         return self._register(rel, path)
 
     def save_figure(self, fig, name: str) -> Path:
         self._deliverable()
-        rel = f"figures/{name}.pdf"
-        path = self._path(rel)
+        rel, path = self._path(name, "figures", ".pdf")
         fig.savefig(path, format="pdf", metadata={"CreationDate": None, "ModDate": None})
         return self._register(rel, path)
 
@@ -302,53 +477,38 @@ class RunRecorder:
             if not MACRO_NAME.match(name):
                 raise ValueError(f"macro name must be letters only, got {name!r}")
             lines.append(f"\\newcommand{{\\{name}}}{{{value}}}")
-        rel = f"macros_E-{self.exp}.tex"
-        path = self._path(rel)
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        rel, path = self._path(f"macros_E-{self.exp}", None, ".tex")
+        with open(path, "x", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
         return self._register(rel, path)
 
     # -- finish ----------------------------------------------------------------
 
-    def finalize(self, *, warnings: int, failures: int, extra: dict | None = None) -> Path:
+    def finalize(self, *, R, n, warnings: int, failures: int, extra: dict | None = None) -> Path:
+        """Write ``kernel.json`` for the runner; the runner writes the manifest."""
         if self.closed:
             raise RuntimeError("this run is already finalized")
         gaps = missing_outputs(self.exp, self.stage, self.files)
         if gaps:
             raise ValueError(f"registered outputs not written: {gaps}")
-        if env.source_snapshot(self._notebook) != self.source:
-            raise RuntimeError("source changed during the run; archive it and re-run")
-        freeze, freeze_hash = env.pip_freeze()
-        manifest = {
-            "experiment": f"E-{self.exp}",
-            "stage": self.stage,
-            "parent_repository": env.parent_state(),
-            "genriesz": self.source,
-            "environment": self.environment,
-            "pip_freeze": freeze,
-            "pip_freeze_sha256": freeze_hash,
-            "blas": env.blas_config(),
-            "cpu": env.cpu_description(),
-            "data_sha256": self.data_sha256,
-            "entropy": STAGE_ENTROPY[self.stage],
-            "R": self.R,
-            "n": self.n,
-            "started_utc": self.started.isoformat(),
-            "finished_utc": datetime.now(timezone.utc).isoformat(),
-            "wall_seconds": time.perf_counter() - self._t0,
-            "warnings": int(warnings),
-            "failures": int(failures),
-            "outputs_sha256": {
-                rel: env.sha256_file(path) for rel, path in sorted(self.files.items())
-            },
+        if self.stage == "stage0.5" and self.parallel_identity is None:
+            raise ValueError("Stage 0.5 needs record_parallel_identity")
+        from . import parallel
+
+        record = {
+            "R": R,
+            "n": n,
+            "cells": self.cells,
+            "warnings": warnings,
+            "failures": failures,
+            "outputs": sorted(self.files),
+            "loaded_modules": env.loaded_module_blobs(),
+            "threads": parallel.thread_record(self.threads_at_start),
+            "extra": extra or {},
         }
-        if extra:
-            clash = set(extra) & set(manifest)
-            if clash:
-                raise ValueError(f"extra keys clash with registered fields: {sorted(clash)}")
-            manifest.update(extra)
-        validate_manifest(manifest, self.exp, self.stage)
-        path = self.dir / "manifest.json"
-        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-        (self.dir / "RUNNING.json").unlink()
+        if self.parallel_identity is not None:
+            record["parallel_identity"] = self.parallel_identity
+        with open(self.dir / "kernel.json", "x", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, allow_nan=False)
         self.closed = True
-        return path
+        return self.dir / "kernel.json"
