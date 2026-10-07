@@ -348,7 +348,9 @@ class RunRecorder:
     single-thread variables were set before the kernel started.
     """
 
-    def __init__(self, exp: int, stage: str, *, cells: list | None = None):
+    def __init__(
+        self, exp: int, stage: str, *, cells: list | None = None, arms: list[str] | None = None
+    ):
         raw = os.environ.get(RUN_ENV)
         if not raw:
             raise RuntimeError("registered runs start through grrexp.runner, not interactively")
@@ -377,6 +379,11 @@ class RunRecorder:
                 raise ValueError("Stage 0 has no Monte Carlo cells")
         elif not cells:
             raise ValueError("give the registered cell inventory")
+        if stage == "stage0.5" and not arms:
+            raise ValueError("give the registered arm labels")
+        if arms is not None and not all(isinstance(a, str) and STEM.match(a) for a in arms):
+            raise ValueError("arm labels are [A-Za-z0-9_-]")
+        self.arms = None if arms is None else list(arms)
         self.cells = (
             None if cells is None else [list(c) if isinstance(c, tuple) else c for c in cells]
         )
@@ -446,8 +453,8 @@ class RunRecorder:
 
             if not frame["status"].isin(STATUSES).all():
                 raise ValueError(f"status must be one of {STATUSES}")
-            if not frame["arm"].map(lambda a: isinstance(a, str) and bool(STEM.match(a))).all():
-                raise ValueError("arm must be a registered arm label [A-Za-z0-9_-]")
+            if not frame["arm"].isin(self.arms).all():
+                raise ValueError(f"arm must be one of the registered arms {self.arms}")
         rel, path = self._path(name.removesuffix(".csv"), None, ".csv")
         frame.to_csv(path, index=False)
         return self._register(rel, path)

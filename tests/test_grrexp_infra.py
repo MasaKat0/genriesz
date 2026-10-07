@@ -576,7 +576,7 @@ def pilot_recorder(tmp_path, monkeypatch):
     (d / "RUNNING.json").write_text(json.dumps({"token": "t"}))
     run = {"exp": 13, "stage": "stage0.5", "token": "t", "executable": sys.executable}
     monkeypatch.setenv(outputs.RUN_ENV, json.dumps(run))
-    return outputs.RunRecorder(13, "stage0.5", cells=[[0], [1]])
+    return outputs.RunRecorder(13, "stage0.5", cells=[[0], [1]], arms=["SQ", "UKL"])
 
 
 def _timing(workers, seconds, cell=(0,)):
@@ -596,6 +596,7 @@ def _counts(arm, status, count):
         ("status_counts.csv", _counts("SQ", "ok", 1.5)),
         ("status_counts.csv", _counts("SQ", "0.93", 1)),
         ("status_counts.csv", _counts("1.02 est", "ok", 1)),
+        ("status_counts.csv", _counts("not_a_registered_arm", "ok", 1)),
     ],
 )
 def test_pilot_files_carry_no_estimates(pilot_recorder, name, frame) -> None:
