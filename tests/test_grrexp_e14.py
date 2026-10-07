@@ -281,3 +281,29 @@ def test_rate_verdict_negative_and_incomplete() -> None:
     one = pd.DataFrame([r for r in rows if r["rep"] == 0])
     out = e14.rate_predictions(one, Seeds(14, entropy=PILOT_ENTROPY))
     assert out["verdict"] == "incomplete"
+
+
+def test_parent_state_override(monkeypatch) -> None:
+    """A genriesz worktree outside the parent names the parent with GRREXP_PARENT_REPO."""
+    from grrexp import env
+
+    calls = []
+
+    def fake_git(repo, *args, **kw):
+        calls.append((str(repo), args))
+        if args[:1] == ("rev-parse",):
+            return "a" * 40 + "\n"
+        if args[:1] == ("ls-tree",):
+            return f"160000 commit {'b' * 40}\t{args[2]}\n"
+        return ""
+
+    monkeypatch.setattr(env, "_git", fake_git)
+    monkeypatch.setenv(env.PARENT_ENV, "/some/parent")
+    st = env.parent_state()
+    assert st["sha"] == "a" * 40 and st["gitlink"] == "b" * 40
+    assert st["genriesz_worktree"] == str(env.GENRIESZ_ROOT)
+    assert calls[1] == ("/some/parent", ("ls-tree", "HEAD", "genriesz"))
+    monkeypatch.delenv(env.PARENT_ENV)
+    st = env.parent_state()
+    assert "genriesz_worktree" not in st
+    assert calls[-2][1] == ("ls-tree", "HEAD", env.GENRIESZ_ROOT.name)
