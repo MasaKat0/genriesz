@@ -192,7 +192,7 @@ def test_solver_options_reach_clarabel_and_default_is_unchanged() -> None:
         X=X, basis=ident, functional=fn, generator=bp, solver_options=None
     )
     np.testing.assert_array_equal(base.alpha, same.alpha)
-    with pytest.raises(Exception):  # an unknown setting is passed through and rejected
+    with pytest.raises(TypeError, match="unrecognized solver setting"):
         gr.weight_program_certificate(
             X=X, basis=ident, functional=fn, generator=bp, solver_options={"no_such_setting": 1}
         )
