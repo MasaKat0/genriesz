@@ -722,6 +722,8 @@ def tables(S):
     lines += ["\\hline",
               "\\multicolumn{12}{l}{--: not applicable, not reported, or not defined (the cross-fit "
               "dictionary SMD of D3, whose dictionaries are fold specific).}" + END,
+              "\\multicolumn{12}{l}{For D3, the SMD of the eight raw covariates evaluates functions "
+              "outside the fitted dictionary.}" + END,
               "\\hline", "\\end{tabular}"]  # fmt: skip
     out["tab_E22_full"] = "\n".join(lines) + "\n"
 

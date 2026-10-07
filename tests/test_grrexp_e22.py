@@ -287,3 +287,142 @@ def test_d3_arm_selects_lambda_from_the_grid() -> None:
     assert out["ARW"]["status"] == "ok"
     assert min(e22.LAMBDA_GRID) <= out["ARW"]["lam"] <= max(e22.LAMBDA_GRID)
     assert np.isnan(out["ARW"]["smd_dict_max"])  # fold-specific dictionaries: not defined
+
+
+# ---------------------------------------------------------------- provenance
+
+
+class _Recorder:
+    """A stand-in for a gradient-boosting model that records the rows it sees (the row id
+    is the last feature column) and predicts from a fixed rule."""
+
+    log: list = []
+
+    def __init__(self, kind, params):
+        self.kind, self.params = kind, params
+
+    def fit(self, X, y):
+        _Recorder.log.append((self.kind, "fit", self.params, tuple(X[:, -1].astype(int))))
+        return self
+
+    def predict_proba(self, X):
+        _Recorder.log.append((self.kind, "predict", self.params, tuple(X[:, -1].astype(int))))
+        p = np.full(len(X), 0.3 if self.params[0] == 0.1 else 0.5)
+        return np.column_stack([1 - p, p])
+
+    def predict(self, X):
+        _Recorder.log.append((self.kind, "predict", self.params, tuple(X[:, -1].astype(int))))
+        return np.zeros(len(X)) if self.params[0] == 0.1 else np.full(len(X), 50.0)
+
+
+def test_dml_gbm_selects_on_inner_folds_of_the_outer_training_rows(monkeypatch) -> None:
+    D, Y, Zs, _, _ = synthetic(n=200, seed=12)
+    Y = Y - Y[D == 0].mean()  # the 0-predictor wins the outcome MSE
+    D = np.where(np.arange(len(D)) % 10 < 3, 1.0, 0.0)  # share 0.3: the 0.3 classifier wins
+    ids = np.arange(len(D), dtype=float)
+    Zid = np.column_stack([Zs, ids])
+    grid = [(0.05, 7, 100), (0.1, 7, 100)]
+    monkeypatch.setattr(baselines, "GBM_GRID", grid)
+    monkeypatch.setattr(baselines, "_gbm_classifier", lambda p, s: _Recorder("clf", p))
+    monkeypatch.setattr(baselines, "_gbm_regressor", lambda p, s: _Recorder("reg", p))
+    _Recorder.log = []
+    folds = fold_ids(len(Y), e22.K, np.random.default_rng(4))
+    out = e22.dml_gbm(D, Y, Zid, folds, np.random.default_rng(5), np.random.default_rng(6))
+    assert out["status"] == "ok"
+    assert json.loads(out["gbm_params"]) == [[list(grid[1]), list(grid[1])]] * e22.K
+    log, per_fold = _Recorder.log, len(grid) * e22.GBM_INNER_FOLDS * 4 + 4
+    assert len(log) == e22.K * per_fold
+    for k in range(e22.K):
+        train = set(np.flatnonzero(folds != k))
+        test = set(np.flatnonzero(folds == k))
+        entries = log[k * per_fold:(k + 1) * per_fold]
+        inner, final = entries[:-4], entries[-4:]
+        for j in range(0, len(inner), 4):  # clf fit, clf predict, reg fit, reg predict
+            cf, cp, rf, rp = (set(e[3]) for e in inner[j:j + 4])
+            assert cf | cp <= train and not cf & cp  # inner training and validation rows
+            assert rf <= cf and rp <= cp and all(D[i] == 0 for i in rf | rp)
+        cf, cp, rf, rp = (set(e[3]) for e in final)
+        assert cf == train and cp == test  # the selected propensity: outer train -> eval fold
+        assert rf == {i for i in train if D[i] == 0} and rp == test
+
+
+def test_replicate_routes_the_registered_streams(monkeypatch) -> None:
+    D, Y, Zs, raw, X = synthetic(n=300, seed=13)
+    monkeypatch.setattr(e22, "data", lambda: {"D": D, "Y": Y, "Zs": Zs, "raw": raw, "X": X})
+    seen = {}
+
+    def grr(arm, X_, Y_, D_, Zs_, folds, inner_seed, center_seed):
+        seen.setdefault("grr", []).append((folds.copy(), inner_seed, center_seed))
+        return {e: {"status": "ok", "estimate": 0.0, "se": 1.0} for e in e22.ESTIMATORS}
+
+    def dml(D_, Y_, Zs_, folds, inner_gen, base_gen):
+        seen["dml"] = (folds.copy(), int(inner_gen.integers(0, 2**31 - 1)),
+                       int(base_gen.integers(0, 2**31 - 1)))
+        return {"status": "ok", "estimate": 0.0, "se": 1.0}
+
+    monkeypatch.setattr(e22, "_grr_arm", grr)
+    monkeypatch.setattr(e22, "dml_gbm", dml)
+    monkeypatch.setattr(e22, "logit_aipw", lambda *a: {"status": "ok", "estimate": 0.0, "se": 1.0})
+    e22.replicate((0, 7, 20261007))
+    s = Seeds(22)
+    folds = fold_ids(len(Y), e22.K, s.folds(0, 7))
+    g2 = s.inner_cv(0, 7)
+    inner_seed, center_seed = (int(g2.integers(0, 2**31 - 1)) for _ in range(2))
+    next_inner = int(g2.integers(0, 2**31 - 1))  # the GBM inner splits follow the D3 seeds
+    base = int(s.baseline(0, 7).integers(0, 2**31 - 1))
+    assert len(seen["grr"]) == len(e22.GRR_ARMS)
+    for f, a, b in seen["grr"]:
+        np.testing.assert_array_equal(f, folds)
+        assert (a, b) == (inner_seed, center_seed)
+    np.testing.assert_array_equal(seen["dml"][0], folds)
+    assert seen["dml"][1:] == (next_inner, base)
+
+
+def test_d3_tunes_and_fits_on_outer_training_rows_only(monkeypatch) -> None:
+    import genriesz.estimation as est
+
+    D, Y, Zs, _, X = synthetic(n=250, seed=14)
+    folds = fold_ids(len(Y), e22.K, np.random.default_rng(7))
+    key = {tuple(np.round(r, 12)): i for i, r in enumerate(X)}
+    tuned, fitted = [], []
+    real_select = est.select_grr_hyperparams
+    real_fit = e22.ATTArmBasis.fit
+
+    def select(**kw):
+        tuned.append({key[tuple(np.round(r, 12))] for r in kw["X_train"]})
+        return real_select(**kw)
+
+    def fit(self, X_, y=None):
+        if self.dictionary == "D3":
+            fitted.append({key[tuple(np.round(r, 12))] for r in np.atleast_2d(X_)})
+        return real_fit(self, X_, y)
+
+    monkeypatch.setattr(est, "select_grr_hyperparams", select)
+    monkeypatch.setattr(e22.ATTArmBasis, "fit", fit)
+    out = e22._grr_arm("SQ-D3", X, Y, D, Zs, folds, 4, 5)
+    assert out["ARW"]["status"] == "ok"
+    trains = [set(np.flatnonzero(folds != k)) for k in range(e22.K)]
+    assert tuned == trains  # lambda is chosen on each outer training fold only
+    assert fitted and all(any(f <= tr for tr in trains) for f in fitted)
+
+
+def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypatch) -> None:
+    import warnings as _w
+
+    from sklearn.exceptions import ConvergenceWarning
+
+    D, Y, Zs, raw, X = synthetic(n=300, seed=15)
+    monkeypatch.setattr(e22, "data", lambda: {"D": D, "Y": Y, "Zs": Zs, "raw": raw, "X": X})
+
+    def logistic(F2, D_):
+        _w.warn("did not converge", ConvergenceWarning, stacklevel=1)
+        return np.full(len(D_), 0.3)
+
+    monkeypatch.setattr(e22, "_logistic_full", logistic)
+    full = e22.full_sample(20261007)
+    ad = full["admissibility"]
+    assert ad["logit_converged"] is False
+    assert ad["logit_e_min_all"] is None and ad["logit_e_min_controls"] is None
+    assert full["n_warnings"] >= 1
+    assert full["eb_check"]["agrees"]
+    assert set(full["fits"]) == set(e22.GRR_ARMS)
