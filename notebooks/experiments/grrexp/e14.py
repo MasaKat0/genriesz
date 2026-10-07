@@ -804,7 +804,10 @@ END = " \\\\"
 
 
 def _fmt(x, d=3):
-    return "--" if x is None or x != x else f"{x:.{d}f}"
+    if x is None or x != x:
+        return "--"
+    s = f"{x:.{d}f}"
+    return s[1:] if s.startswith("-") and float(s) == 0 else s  # no "-0.000"
 
 
 def _sci(x):
@@ -812,21 +815,50 @@ def _sci(x):
 
 
 def tables(S, verdicts):
-    """``tab_E14.tex`` (longtable body with repeated head): per generator x p_c x n x penalty."""
+    """``tab_E14`` (longtable body with repeated head, per generator x p_c x n x penalty) and
+    ``tab_E14_rate`` (the H14-Rate slopes and ratios with their bootstrap intervals, and the
+    health checks), from the rows of ``summary.csv`` only."""
     heads = ["$g$", "$p_c$", "$n$", "Penalty", "Fail \\%", "CP up. \\%", "(E1)", "(E1)--(E3)",
-             "$\\lambda$", "Bound", "Mean err", "Max $\\underline{\\mathrm{err}}$/bound",
-             "Violations"]  # fmt: skip
+             "Checked", "$\\lambda$", "Bound", "Mean err", "med. support",
+             "Max $\\underline{\\mathrm{err}}$/bound", "Violations"]  # fmt: skip
     head = ["\\hline", " & ".join(heads) + END, "\\hline"]
-    lines = ["\\begin{tabular}{lrrlrrrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
+    lines = ["\\begin{tabular}{lrrlrrrrrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
     for r in S.itertuples():
+        checked = int(r.bnd_checked)
         lines.append(" & ".join([
             r.generator, str(r.p_c), str(r.n), LABEL[r.penalty], f"{100 * r.failure_rate:.1f}",
             _fmt(100 * getattr(r, "failure_rate_cp_upper", float("nan")), 2),
-            _fmt(r.E1_rate, 2), _fmt(r.events_rate, 2), _sci(r.lam_median), _sci(r.bound_median),
-            _sci(r.err_mean), _fmt(r.max_err_over_bound, 3), str(int(r.bnd_violations)),
+            _fmt(r.E1_rate, 2), _fmt(r.events_rate, 2), str(checked), _sci(r.lam_median),
+            _sci(r.bound_median), _sci(r.err_mean), _fmt(r.support_median, 0),
+            _sci(r.max_err_over_bound) if checked else "--",
+            str(int(r.bnd_violations)) if checked else "--",
         ]) + END)  # fmt: skip
     lines += ["\\hline", "\\end{tabular}"]
-    return {"tab_E14": "\n".join(lines) + "\n"}
+    out = {"tab_E14": "\n".join(lines) + "\n"}
+    if "h14_rate" not in S or "health" not in S or S["h14_rate"].dropna().empty:
+        return out  # aggregates without the Stage 1 verdicts (pilot, tests)
+    rate = json.loads(S["h14_rate"].dropna().iloc[0])
+    health = json.loads(S["health"].dropna().iloc[0])
+    rl = ["\\begin{tabular}{llrrrl}", "\\hline",
+          "Quantity & $g$ & $p_c$ & Estimate & 95\\% interval & Prediction met" + END, "\\hline"]
+    for s in rate["slopes"]:
+        rl.append(" & ".join(["Slope", s["generator"], str(s["p_c"]), _fmt(s["slope"]),
+                              f"[{_fmt(s['lo'])}, {_fmt(s['hi'])}]",
+                              "yes" if s["intersects"] else "no"]) + END)
+    for s in rate["ratios"]:
+        rl.append(" & ".join(["Ratio 800/50", s["generator"], "--", _fmt(s["ratio"]),
+                              f"[{_fmt(s['lo'])}, {_fmt(s['hi'])}]",
+                              "yes" if s["below_limit"] else "no"]) + END)
+    fails = sum(int(v[0]) for v in health["failures"].values())
+    fits = sum(int(v[1]) for v in health["failures"].values())
+    bkl = health["bkl_zero_offset"]
+    rl += ["\\hline",
+           f"\\multicolumn{{6}}{{l}}{{Failed fits with the offset: {fails} of {fits}}}" + END,
+           f"\\multicolumn{{6}}{{l}}{{BKL without the offset, infeasible starting point: "
+           f"{bkl['infeasible_start']} of {bkl['expected']}}}" + END,
+           "\\hline", "\\end{tabular}"]
+    out["tab_E14_rate"] = "\n".join(rl) + "\n"
+    return out
 
 
 def figure(S, verdicts):

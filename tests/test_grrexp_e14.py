@@ -307,3 +307,31 @@ def test_parent_state_override(monkeypatch) -> None:
     st = env.parent_state()
     assert "genriesz_worktree" not in st
     assert calls[-2][1] == ("ls-tree", "HEAD", env.GENRIESZ_ROOT.name)
+
+
+def test_rate_table_reports_slopes_ratios_and_health():
+    import json
+
+    import pandas as pd
+
+    rate = {"slopes": [{"generator": "BKL", "p_c": 50, "slope": -0.27, "lo": -0.28, "hi": -0.26,
+                        "intersects": False}],
+            "ratios": [{"generator": "SQ", "ratio": 1.17, "lo": 1.16, "hi": 1.18,
+                        "below_limit": True}]}
+    health = {"failures": {"SQ|SN": [0, 3000]},
+              "bkl_zero_offset": {"infeasible_start": 3000, "expected": 3000}}
+    S = pd.DataFrame([{
+        "generator": "SQ", "p_c": 50, "n": 4000, "penalty": "SN", "failure_rate": 0.0,
+        "failure_rate_cp_upper": 0.0149, "E1_rate": 1.0, "events_rate": 0.0, "bnd_checked": 0,
+        "lam_median": 0.25, "bound_median": 6.2, "err_mean": 0.44, "support_median": 3.0,
+        "max_err_over_bound": float("nan"), "bnd_violations": 0,
+        "h14_rate": json.dumps(rate), "health": json.dumps(health),
+    }])
+    out = e14.tables(S, None)
+    assert "Slope & BKL & 50 & -0.270 & [-0.280, -0.260] & no" in out["tab_E14_rate"]
+    assert "Ratio 800/50 & SQ & -- & 1.170" in out["tab_E14_rate"]
+    assert "3000 of 3000" in out["tab_E14_rate"]
+    row = out["tab_E14"].splitlines()[-3]
+    assert row.rstrip(" \\").endswith("-- & --")  # nothing checked: no ratio, no count
+    S2 = S.drop(columns=["h14_rate", "health"])
+    assert set(e14.tables(S2, None)) == {"tab_E14"}
