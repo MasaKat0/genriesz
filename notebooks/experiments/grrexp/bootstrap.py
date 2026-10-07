@@ -40,11 +40,14 @@ class FamilyBootstrap:
         *,
         mode: str = "indices",
         chunk: int = DEFAULT_CHUNK,
+        finite: bool = True,
     ) -> np.ndarray:
         """``B`` bootstrap values of ``statistic``.
 
         ``statistic`` maps a ``(rows, R)`` array (indices into the replications, or
-        resample counts) to ``rows`` values.
+        resample counts) to ``rows`` values. A non-finite value stops unless
+        ``finite=False``; the caller then reports the statistic as undefined
+        (the draws consumed are the same either way).
         """
         if R < 2:
             raise ValueError(f"need R >= 2, got {R}")
@@ -64,7 +67,7 @@ class FamilyBootstrap:
                 raise ValueError(f"statistic must return shape ({rows},), got {values.shape}")
             out[done : done + rows] = values
             done += rows
-        if not np.all(np.isfinite(out)):
+        if finite and not np.all(np.isfinite(out)):
             raise FloatingPointError("non-finite bootstrap statistic")
         return out
 

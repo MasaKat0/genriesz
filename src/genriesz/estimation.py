@@ -806,6 +806,10 @@ def grr_functional(
     # for the directional bias proxy and then discarded, not returned).
     imbalance_stats: dict[str, list] = {"max": [], "mean": []}
     imbalance_delta: list[NDArray[np.float64]] = []
+    # Training-fold balance of every successful GRR fit: max_j |Delta_hat_j| on
+    # the training rows (the KKT residual when lam = 0) and the target scale
+    # max(1, max_j |P_tr m(W, phi_j)|) the convergence tolerance is relative to.
+    train_balance: dict[str, list] = {"max": [], "scale": []}
 
     # Kernel-health per fold (item B), populated only when the fitted Riesz
     # basis exposes a diagnostics() method (e.g. GaussianRKHSBasis).
@@ -965,6 +969,14 @@ def grr_functional(
             if not fit_result.success:
                 failure = str(fit_result.status) or "optimizer_failure"
                 break
+
+            Phi_tr = np.asarray(basis_r(X_tr), dtype=float)
+            M_tr = np.asarray(m.m_basis_matrix(X_tr, basis_r), dtype=float)
+            alpha_tr_fit = np.asarray(grr.predict_alpha(X_tr), dtype=float)
+            train_balance["max"].append(
+                float(np.max(np.abs(np.mean(alpha_tr_fit[:, None] * Phi_tr - M_tr, axis=0))))
+            )
+            train_balance["scale"].append(max(1.0, float(np.max(np.abs(M_tr.mean(axis=0))))))
 
             # Evaluate the representer only through a domain-checked wrapper:
             # an evaluation-fold or counterfactual row outside the generator's
@@ -1420,6 +1432,11 @@ def grr_functional(
         }
         diagnostics["held_out_imbalance_max"] = float(np.max(imbalance_stats["max"]))
         diagnostics["held_out_imbalance_mean"] = float(np.mean(imbalance_stats["mean"]))
+    if train_balance["max"]:
+        diagnostics["train_imbalance"] = {
+            "max": list(train_balance["max"]),
+            "scale": list(train_balance["scale"]),
+        }
 
     # Kernel health (item B), aggregated across folds when available.
     if kernel_stats:

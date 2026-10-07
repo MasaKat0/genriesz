@@ -14,10 +14,13 @@ never an exception that is caught (registration §1.1).
 - :func:`eb_dual_newton`: an independently written Newton solver of the
   entropy-balancing dual of the ATE (each arm reweighted to the full-sample mean
   of the regressors), used to check the EB row (= UKL with C = 0).
+- :func:`run_recording_warnings`: runs one fit and records its warnings
+  (§1.1); a ConvergenceWarning makes that fit a failure.
 """
 
 from __future__ import annotations
 
+import collections
 import itertools
 import warnings
 
@@ -25,6 +28,32 @@ import numpy as np
 
 GBM_GRID = list(itertools.product((0.05, 0.1), (7, 15, 31), (100, 300)))  # lr, leaves, iters (E-12)
 FAILED = {"estimate": float("nan"), "se": float("nan")}
+#: Failure statuses of the baselines, beside the genriesz solver statuses (§1.3 B).
+BASELINE_STATUSES = ("convergence_warning", "propensity_range")
+#: The only warning filter §1.1 allows: Apple Accelerate's spurious matmul warnings.
+ACCELERATE_MATMUL = r"(?:divide by zero|overflow|invalid value) encountered in matmul$"
+
+
+def run_recording_warnings(fit):
+    """``(result, warning_counts, converged)`` of the call ``fit()`` (§1.1).
+
+    Every warning except Accelerate's spurious matmul ones is recorded, counted
+    by category and message. ``converged`` is False when a scikit-learn or
+    torch ConvergenceWarning was raised; the caller then counts the fit as
+    failed. Recording is not catching an exception: an exception propagates.
+    """
+    from sklearn.exceptions import ConvergenceWarning
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", message=ACCELERATE_MATMUL, category=RuntimeWarning)
+        result = fit()
+    counts = collections.Counter(f"{w.category.__name__}: {w.message}" for w in caught)
+    converged = not any(
+        issubclass(w.category, ConvergenceWarning) or w.category.__name__ == "ConvergenceWarning"
+        for w in caught
+    )
+    return result, dict(sorted(counts.items())), converged
 
 
 def _aipw(D, Y, e, mu1, mu0):
@@ -39,8 +68,11 @@ def _ols(F, y):
 
 
 def logit_aipw(D, Z_feats, Y, fold_ids):
-    """``Z_feats``: the non-constant regressors (n x q). Outcome OLS on (1, Z_feats) per arm."""
-    from sklearn.exceptions import ConvergenceWarning
+    """``Z_feats``: the non-constant regressors (n x q). Outcome OLS on (1, Z_feats) per arm.
+
+    Run it through :func:`run_recording_warnings`: a ConvergenceWarning of the
+    logistic fit is a failure (``convergence_warning``).
+    """
     from sklearn.linear_model import LogisticRegression
 
     n = len(Y)
@@ -50,12 +82,8 @@ def logit_aipw(D, Z_feats, Y, fold_ids):
     F = np.column_stack([np.ones(n), Z_feats])
     for k in np.unique(fold_ids):
         tr, te = fold_ids != k, fold_ids == k
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=10000, tol=1e-10)
-            clf.fit(Z_feats[tr], D[tr])
-        if any(issubclass(w.category, ConvergenceWarning) for w in caught):
-            return {**FAILED, "status": "convergence_warning"}
+        clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=10000, tol=1e-10)
+        clf.fit(Z_feats[tr], D[tr])
         e[te] = clf.predict_proba(Z_feats[te])[:, 1]
         for d, mu in ((1, mu1), (0, mu0)):
             rows = tr & (D == d)
@@ -131,11 +159,13 @@ def dml_gbm(D, Z, Y, fold_ids, prop_params, out_params, seed):
     return {"estimate": theta, "se": se, "status": "ok"}
 
 
-def eb_dual_newton(Phi_arm, target, tol=1e-12, max_iter=200):
+def eb_dual_newton(Phi_arm, target, n, tol=1e-8, max_iter=200):
     """Weights ``exp(Phi_arm c)`` with ``sum_i exp(Phi_i c) Phi_i = target`` (the EB dual).
 
     Damped Newton on the convex ``f(c) = sum exp(Phi c) - c' target``; returns the
-    weights, or ``None`` if it does not converge.
+    weights, or ``None`` if it does not converge. Convergence is the criterion of
+    registration §1.3 C on the sample-mean scale of the GRR fit it checks:
+    ``max_j |g_j| / n <= tol * max(1, max_j |target_j| / n)``.
     """
     c = np.zeros(Phi_arm.shape[1])
 
@@ -145,7 +175,7 @@ def eb_dual_newton(Phi_arm, target, tol=1e-12, max_iter=200):
     for _ in range(max_iter):
         w = np.exp(Phi_arm @ c)
         g = Phi_arm.T @ w - target
-        if np.max(np.abs(g)) <= tol * max(1.0, np.max(np.abs(target))):
+        if np.max(np.abs(g)) / n <= tol * max(1.0, np.max(np.abs(target)) / n):
             return w
         H = Phi_arm.T @ (Phi_arm * w[:, None])
         step = -np.linalg.solve(H, g)

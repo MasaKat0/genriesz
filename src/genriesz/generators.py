@@ -212,7 +212,10 @@ class BregmanGenerator:
         The generic implementation uses it only as a soft domain guard.
     branch_fn:
         Optional branch selector returning 1 (positive) or 0 (negative).
-        Built-in UKL/BP generators use this to choose the sign branch.
+        Built-in UKL/BP generators use this to choose the sign branch. It is
+        called on one row at a time, unless it has the attribute
+        ``vectorized = True``: it is then called once on the ``(n, d)`` array
+        of rows and must return ``n`` values.
 
     Notes
     -----
@@ -318,6 +321,14 @@ class BregmanGenerator:
             self._branch_cache = prev
 
     def _branch_signs(self, X: NDArray[np.float64]) -> NDArray[np.float64]:
+        if getattr(self.branch_fn, "vectorized", False):
+            # One call on all rows; the same signs as the row-by-row loop.
+            b = np.asarray(self.branch_fn(X)).reshape(-1)  # type: ignore[misc]
+            if b.shape != (len(X),):
+                raise ValueError(
+                    f"a vectorized branch_fn must return one value per row, got {b.shape}"
+                )
+            return np.where(b.astype(int) == 1, 1.0, -1.0)
         s = np.empty(len(X), dtype=float)
         for i in range(len(X)):
             s[i] = 1.0 if int(self.branch_fn(X[i])) == 1 else -1.0  # type: ignore[misc]

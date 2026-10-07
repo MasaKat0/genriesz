@@ -105,6 +105,19 @@ PILOT_COLUMNS = {
     "status_counts.csv": ("cell", "arm", "status", "count"),
 }
 
+
+def recorded_statuses() -> tuple[str, ...]:
+    """Statuses a run may record (§1.3 B): the genriesz solver statuses, the
+    outcome-model failures ``outcome_<status>`` of ``grr_functional``, and the
+    baseline failures of :mod:`grrexp.baselines`."""
+    from genriesz import STATUSES
+
+    from .baselines import BASELINE_STATUSES
+
+    outcome = tuple(f"outcome_{s}" for s in (*STATUSES, "optimizer_failure") if s != "ok")
+    return (*STATUSES, *outcome, *BASELINE_STATUSES)
+
+
 MANIFEST_FIELDS = (
     "experiment",
     "stage",
@@ -449,10 +462,9 @@ class RunRecorder:
                 raise ValueError("count must be an integer")
             if not (counts >= 0).all():
                 raise ValueError("count must be >= 0")
-            from genriesz import STATUSES
-
-            if not frame["status"].isin(STATUSES).all():
-                raise ValueError(f"status must be one of {STATUSES}")
+            statuses = recorded_statuses()
+            if not frame["status"].isin(statuses).all():
+                raise ValueError(f"status must be one of {statuses}")
             if not frame["arm"].isin(self.arms).all():
                 raise ValueError(f"arm must be one of the registered arms {self.arms}")
         rel, path = self._path(name.removesuffix(".csv"), None, ".csv")
