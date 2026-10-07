@@ -372,3 +372,72 @@ def test_fit_hook_covers_the_lbfgs_representer_fit() -> None:
         fit_hook=hook,
     )
     assert seen.count("riesz") == 3
+
+
+def _e12_sample(n=500, seed=4):
+    from grrexp.seeds import fold_ids
+
+    rng = np.random.default_rng(seed)
+    D, Z, Y = e12.draw(rng, n, 0.5)
+    return np.column_stack([D, Z]), Y, fold_ids(n, e12.K, np.random.default_rng(seed + 1))
+
+
+class _Wrapped:
+    """A GRRGLM whose ``fit`` can warn or report a failure, delegating everything else."""
+
+    def __init__(self, model, warn=False, fail=False):
+        self._model, self._warn, self._fail = model, warn, fail
+
+    def __getattr__(self, name):
+        return getattr(self._model, name)
+
+    def fit(self, *args, **kwargs):
+        from sklearn.exceptions import ConvergenceWarning
+
+        res = self._model.fit(*args, **kwargs)
+        if self._warn:
+            warnings.warn("injected", ConvergenceWarning, stacklevel=1)
+        if self._fail:
+            return type("Failed", (), {"status": "maxit", "message": "injected"})()
+        return res
+
+
+def test_arw_ef_outcome_warning_does_not_hide_a_later_fold_failure(monkeypatch) -> None:
+    from sklearn.exceptions import ConvergenceWarning
+
+    X, Y, folds = _e12_sample()
+    real_model, real_ols = e12._grr_model, e12._ols
+    models = iter(range(e12.K))
+    monkeypatch.setattr(
+        e12, "_grr_model", lambda arm, rs: _Wrapped(real_model(arm, rs), fail=next(models) == 2)
+    )
+    calls = iter(range(10))
+
+    def ols(*args):
+        if next(calls) == 0:  # the outcome fit of fold 0 warns
+            warnings.warn("injected", ConvergenceWarning, stacklevel=1)
+        return real_ols(*args)
+
+    monkeypatch.setattr(e12, "_ols", ols)
+    rec = e12._arw_ef(X, Y, folds)
+    assert rec["status"] == "maxit"  # the later fold's failure keeps its precedence
+    assert rec["train_fits"] == 2  # folds 0 and 1 were fitted and their balance kept
+    fits = json.loads(rec["warnings"])["fits"]
+    assert fits == [[0, "outcome", {"ConvergenceWarning: injected": 1}]]
+
+
+def test_rw_full_runs_inference_after_a_warning_then_fails_the_record(monkeypatch) -> None:
+    X, Y, _ = _e12_sample(seed=6)
+    real_model = e12._grr_model
+    monkeypatch.setattr(e12, "_grr_model", lambda arm, rs: _Wrapped(real_model(arm, rs), warn=True))
+    called = []
+    real_inference = gr.rw_full_inference
+
+    def spy(**kwargs):
+        called.append(True)
+        return real_inference(**{**kwargs, "grr": kwargs["grr"]._model})
+
+    monkeypatch.setattr(gr, "rw_full_inference", spy)
+    rec, alpha = e12._rw_full(X, Y, "SQ", "Include")
+    assert called == [True]
+    assert rec["status"] == "convergence_warning" and alpha is None
