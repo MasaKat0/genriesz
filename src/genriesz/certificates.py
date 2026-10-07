@@ -207,7 +207,7 @@ def _g_closure(generator: BregmanGenerator, X, alpha: NDArray[np.float64]) -> ND
 # ---------------------------------------------------------------------------
 # Backends
 # ---------------------------------------------------------------------------
-def _solve_cvxpy(Phi, b, u0, s, generator, kind, lam):
+def _solve_cvxpy(Phi, b, u0, s, generator, kind, lam, solver_options=None):
     import cvxpy as cp
 
     n, p = Phi.shape
@@ -241,7 +241,7 @@ def _solve_cvxpy(Phi, b, u0, s, generator, kind, lam):
         lo = -delta <= lam
         constraints += [up, lo]
     prob = cp.Problem(objective, constraints)
-    prob.solve(solver="CLARABEL")
+    prob.solve(solver="CLARABEL", **(solver_options or {}))
     status = str(prob.status)
     if status not in ("optimal", "optimal_inaccurate") or t.value is None:
         return None, None, status
@@ -323,6 +323,7 @@ def weight_program_certificate(
     margin_tol: float = 1e-7,
     gap_tol: float = 1e-9,
     balance_tol: float = 1e-9,
+    solver_options: dict | None = None,
 ) -> WeightProgramCertificate:
     """Solve the sample weight program for a GRR problem and classify its solution.
 
@@ -339,6 +340,10 @@ def weight_program_certificate(
         installed, otherwise ``"scipy"``; the choice is recorded in the result).
     margin_tol, gap_tol, balance_tol:
         Thresholds of the verdict (registration §1.3 A-6: ``1e-7`` and ``1e-9``).
+    solver_options:
+        Keyword settings passed to Clarabel through cvxpy (for example
+        ``{"tol_gap_abs": 1e-12}``); ``None`` keeps Clarabel's defaults. Only the
+        ``"cvxpy"`` backend accepts them.
 
     Returns
     -------
@@ -362,8 +367,10 @@ def weight_program_certificate(
     backend_ = str(backend).lower()
     if backend_ == "auto":
         backend_ = "cvxpy" if importlib.util.find_spec("cvxpy") is not None else "scipy"
+    if solver_options and backend_ != "cvxpy":
+        raise ValueError("solver_options apply only to the 'cvxpy' backend")
     if backend_ == "cvxpy":
-        t, beta, status = _solve_cvxpy(Phi, b, u0, s, generator, kind, lam)
+        t, beta, status = _solve_cvxpy(Phi, b, u0, s, generator, kind, lam, solver_options)
     elif backend_ == "scipy":
         t, beta, status = _solve_scipy(Phi, b, u0, s, generator, kind, lam, X_, margin_tol)
     else:

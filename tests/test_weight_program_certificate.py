@@ -178,3 +178,26 @@ def test_solver_status_and_weight_program_agree_on_the_probe_design(C, grr_statu
         )
     assert cert.verdict == verdict
     assert abs(cert.gap) <= 1e-9
+
+
+def test_solver_options_reach_clarabel_and_default_is_unchanged() -> None:
+    import genriesz as gr
+
+    ident = gr.CallableBasis(lambda X: np.atleast_2d(X)[:, :1].astype(float))
+    fn = gr.CallableFunctional(lambda x, gam: (3.0 if x[0] > 0 else 0.0) * gam(x))
+    bp = gr.BPGenerator(omega=1.0, C=0.0, branch_fn=lambda x: 1)
+    X = np.array([[1.0], [-1.0]])
+    base = gr.weight_program_certificate(X=X, basis=ident, functional=fn, generator=bp)
+    same = gr.weight_program_certificate(
+        X=X, basis=ident, functional=fn, generator=bp, solver_options=None
+    )
+    np.testing.assert_array_equal(base.alpha, same.alpha)
+    with pytest.raises(Exception):  # an unknown setting is passed through and rejected
+        gr.weight_program_certificate(
+            X=X, basis=ident, functional=fn, generator=bp, solver_options={"no_such_setting": 1}
+        )
+    with pytest.raises(ValueError, match="only to the 'cvxpy' backend"):
+        gr.weight_program_certificate(
+            X=X, basis=ident, functional=fn, generator=bp, backend="scipy",
+            solver_options={"tol_gap_abs": 1e-12},
+        )
