@@ -1072,7 +1072,9 @@ def _tex(x):
 
 
 def _table(df, cols, heads, spec):
-    lines = ["\\begin{tabular}{" + spec + "}", "\\hline", " & ".join(heads) + END, "\\hline"]
+    """A table body set as a longtable by the manuscript: the head is repeated on every page."""
+    head = ["\\hline", " & ".join(heads) + END, "\\hline"]
+    lines = ["\\begin{tabular}{" + spec + "}", *head, "\\endfirsthead", *head, "\\endhead"]
     for _, r in df.iterrows():
         lines.append(
             " & ".join(_fmt(r[c]) if isinstance(r[c], float) else _tex(r[c]) for c in cols) + END
@@ -1089,7 +1091,11 @@ def _main_label(row_arm, estimator):
 
 
 def tables(S):
-    """Tables and macros of E-12, from the rows of ``summary.csv`` only (§4)."""
+    """Tables and macros of E-12, from the rows of ``summary.csv`` only (§4).
+
+    The tables are longtable bodies (``\\endfirsthead``/``\\endhead`` after the head): the
+    manuscript sets them with ``longtable`` and supplies the caption.
+    """
     out = {}
     main_rows = [(a, "ARW_cf") for a in ALL_ARMS] + [("LogitAIPW", ""), ("DML-GBM", "")]
     main_rows += [(a, "TMLE_cf") for a in ALL_ARMS]
@@ -1102,6 +1108,7 @@ def tables(S):
         " & \\multicolumn{7}{c}{$n=2000$} & \\multicolumn{7}{c}{$n=4000$}" + END,
         " & ".join(heads) + END, "\\hline",
     ]  # fmt: skip
+    lines += ["\\endfirsthead", *lines[1:], "\\endhead"]  # head repeated on every page
     for s in S_VALUES:
         for set_ in SETS:
             lines.append("\\multicolumn{15}{l}{$s=" + str(s) + "$, " + set_ + "}" + END)
@@ -1125,7 +1132,8 @@ def tables(S):
 
     full_cols = [
         "arm", "s", "set", "n", "bias", "b_pred", "root_n_sd", "root_n_sd_pred", "se_ratio",
-        "coverage", "c_pred", "ci_length_mean", "failure_rate", "failure_rate_cp_upper",
+        "coverage", "c_pred", "coverage_conditional", "ci_length_mean", "failure_rate",
+        "failure_rate_cp_upper",
         "max_weight_median", "ess_median", "eval_imbalance_max",
     ]  # fmt: skip
     full = S[[c for c in full_cols if c in S.columns]]
