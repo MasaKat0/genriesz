@@ -112,11 +112,10 @@ def solve(
             status = "ok"
             break
         H = Phi.T @ (Phi * (w * dalpha)[:, None])
-        try:
-            step = -np.linalg.solve(H, grad)
-        except np.linalg.LinAlgError:
-            status = "singular"
+        if np.min(np.linalg.eigvalsh((H + H.T) / 2)) <= 1e-14 * max(1.0, np.max(np.abs(H))):
+            status = "singular"  # the Newton system has no unique solution
             break
+        step = -np.linalg.solve(H, grad)
         t = 1.0
         for _ in range(max_halvings):
             cand = beta + t * step
