@@ -278,6 +278,11 @@ def stage0():
         cert = all(checks.values())
         row = {
             "generator": gen_name,
+            # prediction fields exist for every generator; None unless eligible (§1.9)
+            "tau_pred": None,
+            "c_pred": None,
+            "cancellation": None,
+            "rho_s": None,
             "certified": cert,
             "checks": checks,
             "status_48": s48.status,
@@ -442,6 +447,8 @@ def _rw_record(X, Y, status, mdl, lam, warn_fields, detail):
         "ess": metrics.ess(a),
         "anem_gap": anem_gap,
         "rho_delta": float(RHO @ delta),
+        "train_imbalance": float(np.max(np.abs(delta))),
+        "kkt_residual": float(mdl.fit_result_.kkt_residual),
         "fold_status": detail,
         **warn_fields,
     }
@@ -469,7 +476,8 @@ def _arw_cf(X, Y, folds):
     n = len(Y)
     g = gr()
     arms = {f"{gen}-{rule}": {"psi": np.empty(n), "alpha": np.empty(n), "detail": [],
-                              "status": "ok", "lam": [], "eval_imb": []}
+                              "status": "ok", "lam": [], "eval_imb": [], "train_imb": [],
+                              "kkt": []}
             for gen in GENERATORS for rule in RULES}  # fmt: skip
     warn = {gen: _Warn() for gen in GENERATORS}
     warn_out = _Warn()
@@ -485,13 +493,19 @@ def _arw_cf(X, Y, folds):
                 fits = fit_rules(gen_name, X[tr], warn[gen_name], str(int(k)))
             for rule in RULES:
                 arm = arms[f"{gen_name}-{rule}"]
-                if arm["status"] != "ok":
-                    continue
                 status, mdl, lam = fits[rule]
                 arm["detail"].append([str(int(k)), rule, status])
+                if arm["status"] != "ok":
+                    continue  # an earlier fold failed: the fit is recorded, not scored
                 if status != "ok":
                     arm["status"] = status
                     continue
+                Xtr = X[tr]
+                a_tr = np.asarray(mdl.predict_alpha(Xtr), dtype=float)
+                Phi_tr = np.asarray(mdl.basis(Xtr), dtype=float)
+                M_tr = np.asarray(g.ATEFunctional(0).m_basis_matrix(Xtr, mdl.basis), dtype=float)
+                arm["train_imb"].append(float(np.max(np.abs(np.mean(a_tr[:, None] * Phi_tr - M_tr, 0)))))
+                arm["kkt"].append(float(mdl.fit_result_.kkt_residual))
                 pts = np.vstack([Xt, g.ATEFunctional(0).evaluation_points(Xt, mdl.basis)])
                 _, outside, nonfinite = mdl.classify(pts)
                 if np.any(outside) or np.any(nonfinite):
@@ -536,6 +550,8 @@ def _arw_cf(X, Y, folds):
             "max_abs_alpha": float(np.max(np.abs(arm["alpha"]))),
             "ess": metrics.ess(arm["alpha"]),
             "eval_imbalance": float(max(arm["eval_imb"])),
+            "train_imbalance": float(max(arm["train_imb"])),
+            "kkt_residual": float(max(arm["kkt"])),
             **common,
         }
     return out
@@ -587,14 +603,14 @@ def adml_fit(X_fit):
     G = B.T @ B / n
     Mh = Mb.mean(axis=0)
     low = max(2, math.ceil(p / 40))
-    rho = np.zeros(p)
-    try:
-        rho[:low] = np.linalg.solve(G[:low, :low], Mh[:low])
-    except np.linalg.LinAlgError:
-        return "singular", None, {}
+    D = X_fit[:, 0]
     diag = np.diag(G).copy()
-    if np.any(diag <= 0):
+    # (1, D) is singular exactly when one treatment group is empty; the callers check
+    # that before fitting, so a remaining exception is an error and stops the run (§1.1)
+    if not (np.any(D == 1) and np.any(D == 0)) or np.any(diag <= 0):
         return "degenerate_functional", None, {}
+    rho = np.zeros(p)
+    rho[:low] = np.linalg.solve(G[:low, :low], Mh[:low])
     c1, c2, c3 = ADML_C
     from scipy import stats
 
@@ -621,27 +637,35 @@ def adml_fit(X_fit):
 def _autodml(X, Y, folds):
     n = len(Y)
     psi, alpha = np.empty(n), np.empty(n)
-    detail, outer_capped, inner_capped = [], 0, 0
+    detail, fold_info = [], []
     warn = _Warn()
+
+    def record(status_detail=None):
+        return {
+            "fold_status": json.dumps(detail),
+            "adml_outer_capped": sum(int(f["outer_capped"]) for f in fold_info),
+            "adml_inner_capped": sum(int(f["inner_capped"]) for f in fold_info),
+            "adml_folds": json.dumps(fold_info),
+            **warn.fields(),
+        }
+
     for k in np.unique(folds):
         tr, te = folds != k, folds == k
         D_tr = X[tr, 0]
         if not (np.any(D_tr == 1) and np.any(D_tr == 0)):
             detail.append([str(int(k)), "riesz", "degenerate_functional"])
-            return _failed("degenerate_functional", fold_status=json.dumps(detail), **warn.fields())
+            return _failed("degenerate_functional", **record())
         status, rho, info = warn.run(f"{k}|autodml", lambda tr=tr: adml_fit(X[tr]))
         detail.append([str(int(k)), "riesz", status])
         if status != "ok":
-            return _failed(status, fold_status=json.dumps(detail), **warn.fields())
-        outer_capped += int(info["outer_capped"])
-        inner_capped += int(info["inner_capped"])
+            return _failed(status, **record())
+        fold_info.append({"fold": int(k), **info})
         Bt, _ = adml_dictionary(X[te])
         a = Bt @ rho
         pred = warn.run(f"{k}|outcome", lambda tr=tr: _ols(X, Y, X[tr], Y[tr]))
         psi[te] = _m_ols(pred, X[te]) + a * (Y[te] - pred(X[te]))
         alpha[te] = a
-    common = {"fold_status": json.dumps(detail), "adml_outer_capped": outer_capped,
-              "adml_inner_capped": inner_capped, **warn.fields()}  # fmt: skip
+    common = record()
     if not warn.converged:
         return _failed("convergence_warning", **common)
     if not np.all(np.isfinite(psi)):
@@ -680,9 +704,10 @@ def tasks_for(entropy, reps, cells=None):
 
 NUMERIC_FIELDS = (
     "estimate", "se", "lam", "nnz", "max_abs_alpha", "ess", "anem_gap", "rho_delta",
-    "eval_imbalance", "adml_outer_capped", "adml_inner_capped", "n_warnings",
+    "train_imbalance", "kkt_residual", "eval_imbalance", "adml_outer_capped",
+    "adml_inner_capped", "n_warnings",
 )  # fmt: skip
-TEXT_FIELDS = ("status", "warnings", "fold_status")
+TEXT_FIELDS = ("status", "warnings", "fold_status", "adml_folds")
 
 
 def raw_frame(tasks, results):
@@ -755,6 +780,12 @@ def summarise(raw, stage0_json):
                 if label.endswith("RW_full"):
                     row["nnz_median"] = float(g.loc[ok, "nnz"].median())
                     row["anem_gap_max"] = float(g.loc[ok, "anem_gap"].max())
+                if label != AUTODML_ARM:
+                    row["train_imbalance_max"] = float(g.loc[ok, "train_imbalance"].max())
+                    row["kkt_residual_max"] = float(g.loc[ok, "kkt_residual"].max())
+                if label.endswith("ARW_cf") and label != AUTODML_ARM:
+                    row["eval_imbalance_median"] = float(g.loc[ok, "eval_imbalance"].median())
+                    row["eval_imbalance_max"] = float(g.loc[ok, "eval_imbalance"].max())
                 if label == AUTODML_ARM:
                     row["adml_outer_capped"] = int(g["adml_outer_capped"].fillna(0).sum())
                     row["adml_inner_capped"] = int(g["adml_inner_capped"].fillna(0).sum())
@@ -771,7 +802,7 @@ def summarise(raw, stage0_json):
             if ms == "ok":
                 row.update(metrics.root_n_sd(est, ok, n))
             gen_name = label.split("-")[0]
-            if label.endswith("L_th|RW_full") and pred[gen_name]["tau_pred"] is not None:
+            if label.endswith("L_th|RW_full") and pred[gen_name].get("tau_pred") is not None:
                 row["tau_pred"] = pred[gen_name]["tau_pred"]
                 row["c_pred"] = pred[gen_name]["c_pred"]
             rows.append(row)
@@ -800,7 +831,10 @@ def families(summ, raw, seeds):
     suf = {}
     for arm in suf_arms():
         for n in SUF_N:
-            r = summ[(summ["arm"] == arm) & (summ["n"] == n)].iloc[0]
+            sel = summ[(summ["arm"] == arm) & (summ["n"] == n)]
+            if sel.empty:  # the per-cell aggregation of Stage 0.5
+                continue
+            r = sel.iloc[0]
             suf[f"{arm}|n={n}|coverage"] = inference.coverage_pvalue(
                 int(r["covered"]), int(r["R"]), 0.95, tol=SUF_TOL
             )
@@ -809,7 +843,10 @@ def families(summ, raw, seeds):
     for gen_name in GENERATORS:
         arm = f"{gen_name}-L_th|RW_full"
         for n in BIAS_N:
-            r = summ[(summ["arm"] == arm) & (summ["n"] == n)].iloc[0]
+            sel = summ[(summ["arm"] == arm) & (summ["n"] == n)]
+            if sel.empty:
+                continue
+            r = sel.iloc[0]
             if not np.isfinite(r.get("tau_pred", np.nan)):
                 continue
             g = raw[(raw["cell"] == r["cell"]) & (raw["arm"] == arm) & (raw["status"] == "ok")]
@@ -839,7 +876,7 @@ def families(summ, raw, seeds):
             bias_tests[f"{arm}|n={n}|coverage"] = inference.coverage_pvalue(
                 int(r["covered"]), int(r["R"]), float(r["c_pred"]), tol=BIAS_COVERAGE_TOL
             )
-    v_suf = inference.judge_family("H15-Suf", suf)
+    v_suf = inference.judge_family("H15-Suf", suf) if suf else None
     v_bias = inference.judge_family("H15-Bias", bias_tests) if bias_tests else None
     return {"H15-Suf": v_suf, "H15-Bias": v_bias}, {"H15-Suf": suf, "H15-Bias": bias_tests}, unavailable
 
@@ -847,6 +884,14 @@ def families(summ, raw, seeds):
 # ---------------------------------------------------------------- tables and figure
 
 LABEL = {"SQ": "SQ-$\\ell_1$", "UKL1": "UKL($C=1$)-$\\ell_1$"}
+#: §1.4: the differences between the GRR SQ-l1 fit and AutoDML-lasso, for the caption
+MC_TABLE_NOTE = (
+    "The GRR fits penalize every coefficient, including the intercepts, as deviations from "
+    "the fixed offset that corresponds to alpha = 2 for treated and -2 for control "
+    "observations, with the common weight lambda. AutoDML-lasso has no offset, uses the "
+    "data-dependent loadings D_j + 0.2, multiplies the intercept's loading by 0.1, and sets "
+    "the penalty level r_L = n^{-1/2} Phi^{-1}(1 - 0.1/(2p))."
+)
 RULE_LABEL = {"L_th": "$\\lambda_{\\mathrm{th}}$", "L_us": "$\\lambda_{\\mathrm{us}}$",
               "L_0": "$\\lambda=0$"}  # fmt: skip
 END = " \\\\"

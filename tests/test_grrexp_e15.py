@@ -194,3 +194,55 @@ def test_total_warnings_counts_each_shared_group_once() -> None:
 
 def test_fmt_has_no_negative_zero() -> None:
     assert e15._fmt(-0.0001) == "0.000" and e15._fmt(-0.01, 2) == "-0.01"
+
+
+def test_per_cell_aggregation_of_the_pilot(small_run) -> None:
+    """Stage 0.5 aggregates one cell at a time: families use the cells present."""
+    raw, s0 = small_run
+    one = raw[raw["cell"] == 0]
+    summ = e15.summarise(one, s0)
+    summ = summ.assign(**e12.family1_mcse(one, summ, Seeds(15, entropy=PILOT_ENTROPY)))
+    verdicts, tests, _ = e15.families(summ, one, Seeds(15, entropy=PILOT_ENTROPY))
+    assert verdicts["H15-Suf"] is None and tests["H15-Suf"] == {}
+    last = raw[raw["cell"] == len(e15.CELLS) - 1]
+    summ = e15.summarise(last, s0)
+    verdicts, tests, _ = e15.families(summ, last, Seeds(15, entropy=PILOT_ENTROPY))
+    assert len(tests["H15-Suf"]) == len(e15.suf_arms())
+
+
+def test_summarise_without_a_population_solution(small_run) -> None:
+    """A generator whose Stage 0 solve failed is descriptive only (§1.9)."""
+    raw, s0 = small_run
+    broken = json.loads(json.dumps(s0))
+    for g in broken["generators"]:
+        for k in ("S_star", "sigma", "signs", "tau_unconditional", "beta_rho_coords"):
+            g.pop(k, None)
+        g.update({"certified": False, "tau_pred": None, "c_pred": None})
+    summ = e15.summarise(raw, broken)
+    assert "tau_pred" not in summ.columns or summ["tau_pred"].isna().all()
+    verdicts, tests, _ = e15.families(summ, raw, Seeds(15, entropy=PILOT_ENTROPY))
+    assert verdicts["H15-Bias"] is None and tests["H15-Bias"] == {}
+
+
+def test_autodml_reports_a_missing_group_and_keeps_fold_records() -> None:
+    X, Y = _sample(200)
+    X[:, 0] = 1.0
+    status, rho, _ = e15.adml_fit(X)
+    assert status == "degenerate_functional" and rho is None
+    X, Y = _sample(400)
+    folds = np.arange(400) % e15.K
+    r = e15._autodml(X, Y, folds)
+    info = json.loads(r["adml_folds"])
+    assert r["status"] == "ok" and len(info) == e15.K
+    assert all({"outer", "sweeps", "outer_capped", "inner_capped"} <= set(f) for f in info)
+
+
+def test_arw_records_every_fold_and_training_balance() -> None:
+    X, Y = _sample(500)
+    folds = np.arange(500) % e15.K
+    out = e15._arw_cf(X, Y, folds)
+    for label, r in out.items():
+        detail = json.loads(r["fold_status"])
+        assert len([d for d in detail if d[1] != "prediction"]) == e15.K
+        if r["status"] == "ok":
+            assert r["kkt_residual"] >= 0 and r["train_imbalance"] >= 0
