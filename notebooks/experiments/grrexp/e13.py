@@ -914,7 +914,10 @@ END = " \\\\"
 
 
 def _fmt(x, d=3):
-    return "--" if x is None or x != x else f"{float(x):.{d}f}"
+    if x is None or x != x:
+        return "--"
+    s = f"{float(x):.{d}f}"
+    return s[1:] if s.startswith("-") and float(s) == 0 else s  # no "-0.000"
 
 
 def _sci(x):
@@ -925,9 +928,9 @@ def tables(S):
     """``tab_E13`` from the rows of ``summary.csv`` only (§4)."""
     heads = [
         "Pair", "Estimator", "$n$", "Cert.", "Bias ($b$)", "$\\sqrt{n}$SD (pred.)", "SE ratio",
-        "Coverage ($c(n)$)", "Fail \\%", "$\\max I_\\psi$", "med. $I_\\phi$",
+        "Coverage ($c(n)$)", "Cov. succ.", "Fail \\%", "$\\max I_\\psi$", "med. $I_\\phi$",
     ]  # fmt: skip
-    lines = ["\\begin{tabular}{llrlrrrrrrr}", "\\hline", " & ".join(heads) + END, "\\hline"]
+    lines = ["\\begin{tabular}{llrlrrrrrrrr}", "\\hline", " & ".join(heads) + END, "\\hline"]
     for pair in PAIRS:
         for est in ESTIMATORS:
             for n in N_VALUES:
@@ -941,6 +944,7 @@ def tables(S):
                             f"{_fmt(r.get('root_n_sd'), 2)} ({_fmt(r.get('root_n_sd_pred'), 2)})",
                             _fmt(r.get("se_ratio"), 2),
                             f"{_fmt(r.get('coverage'))} ({_fmt(r.get('c_pred'))})",
+                            _fmt(r.get("coverage_conditional")),
                             f"{100 * r['failure_rate']:.1f}",
                             _sci(r.get("I_psi_max")), _sci(r.get("I_phi_median")),
                         ]
@@ -949,7 +953,24 @@ def tables(S):
                 )  # fmt: skip
     fam = json.loads(S["family_verdict"].iloc[0]) if "family_verdict" in S else None
     lines += ["\\hline", "\\end{tabular}"]
-    return {"tab_E13": "\n".join(lines) + "\n"}, fam
+    status = ["\\begin{tabular}{llrrl}", "\\hline",
+              "Pair & Estimator & $n$ & Successes & Statuses" + END, "\\hline"]  # fmt: skip
+    for pair in PAIRS:
+        for est in ESTIMATORS:
+            for n in N_VALUES:
+                r = S[(S["pair"] == pair) & (S["estimator"] == est) & (S["n"] == n)].iloc[0]
+                if int(r["R_s"]) == int(r["R"]):
+                    continue
+                counts = ", ".join(
+                    f"{k.replace('_', chr(92) + '_')}: {v}"
+                    for k, v in json.loads(r["status_counts"]).items()
+                )
+                status.append(
+                    " & ".join([LABEL[pair], est.replace("_", "\\_"), str(n), str(int(r["R_s"])),
+                                counts]) + END  # fmt: skip
+                )
+    status += ["\\hline", "\\end{tabular}"]
+    return {"tab_E13": "\n".join(lines) + "\n", "tab_E13_status": "\n".join(status) + "\n"}, fam
 
 
 def figure(S):

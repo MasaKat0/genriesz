@@ -82,7 +82,7 @@ REGISTERED_OUTPUTS = {
         "tables/tab_E12_ord.tex",
         "macros_E-12.tex",
     ),
-    13: ("figures/fig_E13_tangent.pdf", "tables/tab_E13.tex"),
+    13: ("figures/fig_E13_tangent.pdf", "tables/tab_E13.tex", "tables/tab_E13_status.tex"),
     14: ("figures/fig_E14_rate.pdf", "tables/tab_E14.tex"),
     15: ("tables/tab_E15_exact.tex", "tables/tab_E15_mc.tex", "figures/fig_E15_coverage.pdf"),
     16: ("macros_E-16.tex", "tables/tab_E16.tex"),
