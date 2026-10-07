@@ -180,6 +180,7 @@ def _raw(status, estimate=1.0, ratio=1e-10, arm="SQ|RW_full", reps=4):
                 "ess": 400.0,
                 "train_imbalance": 1e-12,
                 "train_balance_ratio": ratio if status == "ok" else np.nan,
+                "train_fits": 1 if status == "ok" else 0,
                 "eval_imbalance": np.nan,
                 "n_warnings": 0.0,
                 "wp_gap": np.nan,
@@ -240,7 +241,7 @@ def test_moment_status_marks_negative_radicand_without_truncating() -> None:
     r = summ.iloc[0]
     assert r["moment_status"] == "negative_radicand" and np.isnan(r.get("root_n_sd_mcse", np.nan))
     fam, unavailable = e12.families(summ.assign(n=2000), _raw("ok", reps=2).assign(n=2000))
-    assert any("sd_ratio (negative_radicand)" in u for u in unavailable)
+    assert any("sd_ratio (negative_radicand)" in u for u in unavailable["H12-Inf"])
 
 
 def test_predictions_only_for_certified_cells_and_predicted_estimators() -> None:
@@ -284,3 +285,30 @@ def test_vectorized_branch_fn_gives_the_row_by_row_signs() -> None:
         a_vec = make(e12.sign).inv_grad(X, v)
         a_row = make(rowwise).inv_grad(X, v)
         assert np.array_equal(a_vec, a_row)
+
+
+def test_balance_checks_cover_successful_folds_of_failed_replications() -> None:
+    raw = _raw("maxit")
+    raw.loc[1, ["train_fits", "train_balance_ratio"]] = [2, 1e-6]  # 2 folds fitted, then a failure
+    with pytest.raises(AssertionError, match="training imbalance"):
+        e12.balance_checks(raw)
+    raw = _raw("ok")
+    raw.loc[0, "train_fits"] = 0  # a successful RW_full record without its fit's balance
+    with pytest.raises(AssertionError, match="without the balance"):
+        e12.balance_checks(raw)
+
+
+def test_undefined_tests_stay_in_the_family_and_zero_radicand_still_tests_coverage(
+    monkeypatch,
+) -> None:
+    raw = _raw("ok").assign(n=2000)
+    monkeypatch.setattr(e12.metrics, "moment_terms", lambda x: (1.0, 1.0))  # m4 - s^4 = 0
+    summ = e12.summarise(raw, _population(True)).assign(n=2000)
+    r = summ.iloc[0]
+    assert r["moment_status"] == "zero_radicand" and r["root_n_sd_mcse"] == 0.0
+    fam, unavailable = e12.families(summ, raw)
+    inf = fam["H12-Inf"]
+    key = "SQ|RW_full|s=0.5|Include|n=2000"
+    assert set(inf.labels) == {f"{key}|{t}" for t in ("coverage", "failure", "bias", "sd_ratio")}
+    assert dict(zip(inf.labels, inf.pvalues, strict=True))[f"{key}|sd_ratio"] == e12.UNAVAILABLE_P
+    assert unavailable["H12-Inf"] == [f"{key}|sd_ratio (zero_radicand)"]

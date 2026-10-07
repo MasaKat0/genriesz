@@ -342,35 +342,48 @@ def _grr_cf(X, Y, arm, rs, folds):
         return res, diag
 
     (res, diag), counts, converged = baselines.run_recording_warnings(fit)
+    tb = res.diagnostics.get("train_imbalance", {"max": [], "scale": []})
     common = {
-        **_warning_fields(counts),
         "fold_status": json.dumps([[str(v) for v in f] for f in res.fold_status]),
+        **_train_balance_fields(tb["max"], tb["scale"]),
         **diag,
+    }
+    # One grr_functional call fits the folds shared by ARW_cf and TMLE_cf: its
+    # warnings are counted once, on the ARW_cf record.
+    warn = {
+        "ARW_cf": _warning_fields(counts),
+        "TMLE_cf": {"n_warnings": 0, "warnings": json.dumps({"counted_in": "ARW_cf"})},
     }
     if not res.success or not converged:
         status = res.status if not res.success else "convergence_warning"
-        return {f"{arm}|{e}": _failed(status, **common) for e in ("ARW_cf", "TMLE_cf")}
+        return {f"{arm}|{e}": _failed(status, **common, **warn[e]) for e in ("ARW_cf", "TMLE_cf")}
     d = res.diagnostics
     a = np.asarray(d["alpha_values"], dtype=float)
-    tb = d["train_imbalance"]
     fit_diag = {
         "max_abs_alpha": float(np.max(np.abs(a))),
         "ess": metrics.ess(a),
-        "train_imbalance": float(max(tb["max"])),
-        "train_balance_ratio": float(
-            max(m / s for m, s in zip(tb["max"], tb["scale"], strict=True))
-        ),
         "eval_imbalance": float(d["held_out_imbalance_max"]),
     }
     return {
-        f"{arm}|{e.upper()}_cf": {
-            "estimate": float(res[e].estimate),
-            "se": float(res[e].se),
+        f"{arm}|{e}": {
+            "estimate": float(res[e.split("_")[0].lower()].estimate),
+            "se": float(res[e.split("_")[0].lower()].se),
             "status": "ok",
             **fit_diag,
             **common,
+            **warn[e],
         }
-        for e in ("arw", "tmle")
+        for e in ("ARW_cf", "TMLE_cf")
+    }
+
+
+def _train_balance_fields(maxes, scales):
+    """Training balance of the representer fits that succeeded (also in a failed call)."""
+    ratios = [m / s for m, s in zip(maxes, scales, strict=True)]
+    return {
+        "train_fits": len(ratios),
+        "train_imbalance": float(max(maxes)) if maxes else float("nan"),
+        "train_balance_ratio": float(max(ratios)) if ratios else float("nan"),
     }
 
 
@@ -425,8 +438,7 @@ def _rw_full(X, Y, arm, rs):
         "status": "ok",
         "max_abs_alpha": float(np.max(np.abs(a))),
         "ess": metrics.ess(a),
-        "train_imbalance": imb,
-        "train_balance_ratio": imb / scale,
+        **_train_balance_fields([imb], [scale]),
         **common,
     }
     return rec, a
@@ -438,42 +450,52 @@ def _arw_ef(X, Y, folds):
     thm:evaluation_design_crossfit). A failed fold is reported with its own status."""
     n = len(Y)
 
+    psi, alpha = np.empty(n), np.empty(n)
+    detail, imbs, scales = [], [], []
+    fold_warnings = collections.Counter()
+
     def fit():
-        psi, alpha = np.empty(n), np.empty(n)
-        detail, imbs, ratios = [], [], []
         for k in np.unique(folds):
             tr, te = folds != k, folds == k
             model = _grr_model("UKL1", "Include")
-            fr = model.fit(X[te], tol=SAMPLE_TOL)
-            detail.append([str(int(k)), "riesz", str(fr.status), str(fr.message)])
-            if fr.status != "ok":
-                return fr.status, detail, None
+            fr, wk, converged = baselines.run_recording_warnings(
+                lambda m=model, rows=te: m.fit(X[rows], tol=SAMPLE_TOL)
+            )
+            fold_warnings.update(wk)
+            status = str(fr.status) if converged else "convergence_warning"
+            detail.append([str(int(k)), "riesz", status, str(fr.message), json.dumps(wk)])
+            if status != "ok":
+                return status
             Xt = X[te]
+            imb, scale = _balance(
+                model, Xt
+            )  # the fold's own fit: checked even if a later fold fails
+            imbs.append(imb)
+            scales.append(scale)
             a, outside, nonfinite = model.classify(Xt)
             if np.any(outside):
-                detail.append([str(int(k)), "prediction", "domain_prediction", ""])
-                return "domain_prediction", detail, None
+                detail.append([str(int(k)), "prediction", "domain_prediction", "", "{}"])
+                return "domain_prediction"
             if np.any(nonfinite):
-                detail.append([str(int(k)), "prediction", "nonfinite", ""])
-                return "nonfinite", detail, None
-            imb, scale = _balance(model, Xt)
-            imbs.append(imb)
-            ratios.append(imb / scale)
+                detail.append([str(int(k)), "prediction", "nonfinite", "", "{}"])
+                return "nonfinite"
             pred = _ols(X, Y, "Include", X[tr], Y[tr])
             m_g = pred(np.column_stack([np.ones(te.sum()), Xt[:, 1:]])) - pred(
                 np.column_stack([np.zeros(te.sum()), Xt[:, 1:]])
             )
             psi[te] = m_g + a * (Y[te] - pred(Xt))
             alpha[te] = a
-        if not np.all(np.isfinite(psi)):
-            return "nonfinite", detail, None
-        return "ok", detail, (psi, alpha, imbs, ratios)
+        return "ok" if np.all(np.isfinite(psi)) else "nonfinite"
 
-    (status, detail, payload), counts, converged = baselines.run_recording_warnings(fit)
-    common = {**_warning_fields(counts), "fold_status": json.dumps(detail)}
+    status, counts, converged = baselines.run_recording_warnings(fit)
+    counts = dict(sorted((collections.Counter(counts) + fold_warnings).items()))
+    common = {
+        **_warning_fields(counts),
+        "fold_status": json.dumps(detail),
+        **_train_balance_fields(imbs, scales),
+    }
     if status != "ok" or not converged:
         return _failed(status if status != "ok" else "convergence_warning", **common)
-    psi, alpha, imbs, ratios = payload
     theta = float(np.mean(psi))
     return {
         "estimate": theta,
@@ -481,8 +503,6 @@ def _arw_ef(X, Y, folds):
         "status": "ok",
         "max_abs_alpha": float(np.max(np.abs(alpha))),
         "ess": metrics.ess(alpha),
-        "train_imbalance": float(max(imbs)),
-        "train_balance_ratio": float(max(ratios)),
         **common,
     }
 
@@ -589,6 +609,7 @@ NUMERIC_FIELDS = (
     "se",
     "max_abs_alpha",
     "ess",
+    "train_fits",
     "train_imbalance",
     "train_balance_ratio",
     "eval_imbalance",
@@ -672,7 +693,9 @@ def balance_checks(raw):
     """H12-Bal (deterministic). Any violation raises: an implementation error stops the run.
 
     - every successful GRR fit (RW_full, each cross-fitted fold, each ARW_EF fold)
-      has training imbalance <= 1e-8 max(1, ||P_n m(W, phi)||_inf);
+      has training imbalance <= 1e-8 max(1, ||P_n m(W, phi)||_inf), whatever the
+      final status of its replication (a later fold may have failed); a
+      successful replication carries all its fits (1 for RW_full, K otherwise);
     - the SQ RW = OLS and Include RW identities hold within their bound
       ``||c||_1 max_j |Delta_hat_j| + 1e-10`` (Amendment 5; ``c`` the OLS or gamma0
       coefficients on the span, ``Delta_hat`` the fit's imbalance);
@@ -680,8 +703,10 @@ def balance_checks(raw):
     """
     ok = raw["status"] == "ok"
     grr_ok = ok & raw["arm"].str.contains("|", regex=False)
-    missing = int((grr_ok & raw["train_balance_ratio"].isna()).sum())
-    ratio = raw.loc[grr_ok, "train_balance_ratio"]
+    expected = np.where(raw["arm"].str.endswith("RW_full"), 1, K)
+    missing = int((grr_ok & (raw["train_fits"] != expected)).sum())
+    has = raw["train_fits"] > 0
+    ratio = raw.loc[has, "train_balance_ratio"]
     identity_cols = [
         c
         for c in raw.columns
@@ -699,7 +724,7 @@ def balance_checks(raw):
         else None
     )
     bal = {
-        "fits_checked": int(grr_ok.sum()),
+        "fits_checked": int(raw.loc[has, "train_fits"].sum()),
         "train_balance_ratio_max": float(ratio.max()) if len(ratio) else None,
         "train_balance_tolerance": BALANCE_TOL,
         "identities_max": identities,
@@ -709,7 +734,7 @@ def balance_checks(raw):
     }
     violations = []
     if missing:
-        violations.append(f"{missing} successful GRR fits without a training balance")
+        violations.append(f"{missing} successful GRR records without the balance of every fit")
     if len(ratio) and not ratio.max() <= BALANCE_TOL:
         violations.append("training imbalance above 1e-8 max(1, ||P_n m||)")
     violations += [c for c, v in excess.items() if not v <= 0.0]
@@ -726,14 +751,27 @@ def moment_status(x):
     ``ok``; ``fewer_than_two`` (no SD); ``zero_variance`` (no bias test, no SD
     ratio); ``negative_radicand``: the plug-in ``m4 - s^4`` of the delta-method
     MCSE of the SD is negative (possible for a few successes), so the SD MCSE and
-    the SD-ratio test are undefined. The radicand is reported, never truncated.
+    the SD-ratio test are undefined; ``zero_radicand``: ``m4 - s^4 = 0``, so the
+    SD MCSE is 0 and the SD-ratio test (a normal approximation with se 0) is
+    undefined. The variance, the fourth moment and the radicand are reported in
+    the summary, never truncated.
     """
     if x.size < 2:
         return "fewer_than_two"
     var, m4 = metrics.moment_terms(x)
     if not var > 0.0:
         return "zero_variance"
-    return "ok" if m4 - var**2 >= 0.0 else "negative_radicand"
+    radicand = m4 - var**2
+    if radicand < 0.0:
+        return "negative_radicand"
+    return "ok" if radicand > 0.0 else "zero_radicand"
+
+
+#: moment statuses with a positive variance: the bias test and the SE ratio are defined
+POSITIVE_VARIANCE = ("ok", "negative_radicand", "zero_radicand")
+#: an undefined test stays in its registered family as a non-rejecting entry, so
+#: the Holm multiplicity of the family does not depend on the outcome (§1.8)
+UNAVAILABLE_P = 1.0
 
 
 def summarise(raw, population_rows):
@@ -765,7 +803,7 @@ def summarise(raw, population_rows):
             )
             row["warnings"] = int(g["n_warnings"].sum())
             x = est[ok]
-            row["moment_status"] = moment_status(x)
+            ms = row["moment_status"] = moment_status(x)
             if r_s >= 1:
                 row.update(metrics.ci_length(se, ok))
                 if g.loc[ok, "max_abs_alpha"].notna().all():
@@ -776,13 +814,17 @@ def summarise(raw, population_rows):
                         row["eval_imbalance_median"] = float(g.loc[ok, "eval_imbalance"].median())
                         row["eval_imbalance_max"] = float(g.loc[ok, "eval_imbalance"].max())
             if r_s >= 2:
+                var, m4 = metrics.moment_terms(x)
+                row.update({"moment_var": var, "moment_m4": m4, "moment_radicand": m4 - var**2})
                 row.update(metrics.bias(est, ok, THETA0))
                 row["rmse"] = metrics.rmse(est, ok, THETA0)
                 row["root_n_sd"] = float(np.sqrt(n) * x.std(ddof=1))
-            if row["moment_status"] in ("ok", "negative_radicand"):
+            if ms in POSITIVE_VARIANCE:
                 row["se_ratio"] = metrics.se_ratio(est, se, ok)
-            if row["moment_status"] == "ok":
+            if ms == "ok":
                 row.update(metrics.root_n_sd(est, ok, n))
+            elif ms == "zero_radicand":
+                row["root_n_sd_mcse"] = 0.0
             arm, _, estimator = label.partition("|")
             if estimator:
                 p = pop[(arm, rs, s)]
@@ -821,18 +863,22 @@ def family1_mcse(raw, summ, seeds):
     resampling unit is a successful replication (the three statistics are
     defined over successful replications); rows with fewer than two successes
     are skipped. A resample in which every SE-ratio draw repeats one estimate has
-    no SD; the SE-ratio interval is then reported as undefined.
+    no SD; the SE-ratio interval is then reported as undefined. Each interval
+    carries its status (``ok``, ``fewer_than_two_successes``, ``no_weights``,
+    ``zero_sd_resample``).
     """
     from .bootstrap import FamilyBootstrap, percentile_interval
 
     fb = FamilyBootstrap(seeds, 1)
     names = ("ci_length_mean", "max_weight_median", "se_ratio")
     out = {f"{k}_mcse_{side}": [np.nan] * len(summ) for k in names for side in ("lo", "hi")}
+    out.update({f"{k}_mcse_status": ["fewer_than_two_successes"] * len(summ) for k in names})
     for i, (_, r) in enumerate(summ.iterrows()):
         g = raw[(raw["cell"] == r["cell"]) & (raw["arm"] == r["arm"])].sort_values("rep")
         g = g[g["status"] == "ok"]
         if len(g) < 2:
             continue
+        out["max_weight_median_mcse_status"][i] = "no_weights"
         est, se = g["estimate"].to_numpy(), g["se"].to_numpy()
         length = 2.0 * metrics.Z_95 * se
         stats = [("ci_length_mean", lambda idx, v=length: v[idx].mean(axis=1))]
@@ -851,39 +897,50 @@ def family1_mcse(raw, summ, seeds):
             if np.all(np.isfinite(boot)):
                 lo, hi = percentile_interval(boot, 1)
                 out[f"{name}_mcse_lo"][i], out[f"{name}_mcse_hi"][i] = lo, hi
+                out[f"{name}_mcse_status"][i] = "ok"
+            else:
+                out[f"{name}_mcse_status"][i] = "zero_sd_resample"
     return out
 
 
 def families(summ, raw):
     """H12-Inf, H12-Bias, H12-EF and H12-BP (Holm 0.01, §1.8); ``None`` for a family
-    with no certified cell in ``summ``."""
+    with no certified cell in ``summ``.
+
+    Every registered null stays in its family. A test that is undefined for the
+    observed replications (see :func:`moment_status`) enters as a non-rejecting
+    entry (``UNAVAILABLE_P``), so the multiplicity is the registered one, and is
+    listed per family in the returned ``unavailable``.
+    """
     from . import inference
 
-    unavailable = []
+    unavailable = {}
 
-    def tests_for(sub):
-        tests = {}
+    def tests_for(hypothesis, sub):
+        tests, missing = {}, unavailable.setdefault(hypothesis, [])
         for _, r in sub.iterrows():
             key = f"{r['arm']}|s={r['s']}|{r['set']}|n={r['n']}"
-            ms = r["moment_status"]
-            g = raw[(raw["cell"] == r["cell"]) & (raw["arm"] == r["arm"])]
-            x = g.loc[g["status"] == "ok", "estimate"].to_numpy()
-            if ms in ("ok", "negative_radicand"):
-                tests[key + "|bias"] = inference.bias_pvalue(
-                    x, THETA0, r["b_pred"], r["sigma_true"], r["n"]
-                )
-            else:
-                unavailable.append(f"{key}|bias ({ms})")
-            if ms == "ok":
-                tests[key + "|sd_ratio"] = inference.sd_ratio_pvalue(x, r["sigma_true"], r["n"])
-            else:
-                unavailable.append(f"{key}|sd_ratio ({ms})")
             tests[key + "|coverage"] = inference.coverage_pvalue(
                 int(r["covered"]), int(r["R"]), r["c_pred"]
             )
             tests[key + "|failure"] = inference.failure_rate_pvalue(
                 int(r["R"] - r["R_s"]), int(r["R"]), 0.01
             )
+            ms = r["moment_status"]
+            g = raw[(raw["cell"] == r["cell"]) & (raw["arm"] == r["arm"])]
+            x = g.loc[g["status"] == "ok", "estimate"].to_numpy()
+            if ms in POSITIVE_VARIANCE:
+                tests[key + "|bias"] = inference.bias_pvalue(
+                    x, THETA0, r["b_pred"], r["sigma_true"], r["n"]
+                )
+            else:
+                tests[key + "|bias"] = UNAVAILABLE_P
+                missing.append(f"{key}|bias ({ms})")
+            if ms == "ok":
+                tests[key + "|sd_ratio"] = inference.sd_ratio_pvalue(x, r["sigma_true"], r["n"])
+            else:
+                tests[key + "|sd_ratio"] = UNAVAILABLE_P
+                missing.append(f"{key}|sd_ratio ({ms})")
         return tests
 
     def judge(hypothesis, tests):
@@ -893,9 +950,13 @@ def families(summ, raw):
     big = summ["n"].isin([2000, 4000]) & predicted
     rw_arw = summ["arm"].isin([f"{a}|{e}" for a in GRR_ARMS for e in ("RW_full", "ARW_cf")])
     fam = {
-        "H12-Inf": judge("H12-Inf", tests_for(summ[big & rw_arw & (summ["set"] == "Include")])),
-        "H12-Bias": judge("H12-Bias", tests_for(summ[big & rw_arw & (summ["set"] == "Omit")])),
-        "H12-EF": judge("H12-EF", tests_for(summ[big & (summ["arm"] == "UKL1|ARW_EF")])),
+        "H12-Inf": judge(
+            "H12-Inf", tests_for("H12-Inf", summ[big & rw_arw & (summ["set"] == "Include")])
+        ),
+        "H12-Bias": judge(
+            "H12-Bias", tests_for("H12-Bias", summ[big & rw_arw & (summ["set"] == "Omit")])
+        ),
+        "H12-EF": judge("H12-EF", tests_for("H12-EF", summ[big & (summ["arm"] == "UKL1|ARW_EF")])),
     }
     bp = summ[
         (summ["n"] == 4000)
@@ -1055,16 +1116,16 @@ def tables(S):
     bp["statuses"] = bp["status_counts"].map(counts)
     for c in ("wp_verdicts", "wp_solver_statuses"):
         bp[c] = bp[c].map(counts) if c in bp else ""
-    for c in ("wp_n_at_boundary_max", "wp_gap_max"):
+    for c in ("wp_n_at_boundary_max", "wp_gap_max", "wp_min_margin_min"):
         if c not in bp:
             bp[c] = np.nan
     out["tab_E12_bp"] = _table(
         bp,
         ["arm", "s", "set", "n", "failure_rate", "statuses", "wp_verdicts", "wp_n_at_boundary_max",
-         "wp_gap_max", "wp_solver_statuses"],
+         "wp_gap_max", "wp_min_margin_min", "wp_solver_statuses"],
         ["Arm", "$s$", "Set", "$n$", "Failure rate", "Statuses", "Weight program",
-         "At boundary (max)", "Gap (max)", "Solver"],
-        "llllrlllrl",
+         "At boundary (max)", "Gap (max)", "Margin (min)", "Solver"],
+        "llllrlllrrl",
     )  # fmt: skip
 
     ordr = json.loads(S["ord"].iloc[0])
@@ -1090,11 +1151,16 @@ def tables(S):
     out["tab_E12_ord"] = "\n".join(lines) + "\n"
 
     fv = json.loads(S["family_verdicts"].iloc[0])
+    unavailable = json.loads(S["unavailable_tests"].iloc[0])
 
     def verdict_word(k, v):
         if v is None:
             return "none"
-        return "negative" if v.startswith(k + ": negative") else "no departure detected"
+        if v.startswith(k + ": negative"):
+            return "negative"
+        if unavailable.get(k):
+            return "no departure detected among the defined tests"
+        return "no departure detected"
 
     macros = {
         "EXIIR": str(int(S["R"].max())),
@@ -1103,6 +1169,12 @@ def tables(S):
         **{
             "EXII" + k.replace("H12-", "").replace("-", "") + "Verdict": verdict_word(k, v)
             for k, v in fv.items()
+        },
+        **{
+            "EXII" + k.replace("H12-", "").replace("-", "") + "Undefined": str(
+                len(unavailable.get(k, []))
+            )
+            for k in fv
         },
     }
     return out, macros

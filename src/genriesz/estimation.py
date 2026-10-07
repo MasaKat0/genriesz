@@ -352,8 +352,13 @@ def _failed_estimate(
     status: str,
     fold_status: list[tuple[int, str, str, str]],
     optimizer: dict,
+    train_imbalance: dict | None = None,
 ) -> FunctionalEstimate:
-    """A result whose every requested estimate is NaN, carrying the failure status."""
+    """A result whose every requested estimate is NaN, carrying the failure status.
+
+    ``train_imbalance`` (when given) keeps the training balance of the folds
+    fitted successfully before the failure.
+    """
 
     nan = float("nan")
     labels = {"ra": "RA", "rw": "RW", "arw": "ARW", "tmle": "TMLE"}
@@ -374,6 +379,8 @@ def _failed_estimate(
     diagnostics: dict[str, object] = {"failure": {"status": status, "folds": list(fold_status)}}
     if optimizer:
         diagnostics["optimizer"] = optimizer
+    if train_imbalance and train_imbalance["max"]:
+        diagnostics["train_imbalance"] = {k: list(v) for k, v in train_imbalance.items()}
     return FunctionalEstimate(
         estimand=m.name,
         n=n,
@@ -809,7 +816,7 @@ def grr_functional(
     # Training-fold balance of every successful GRR fit: max_j |Delta_hat_j| on
     # the training rows (the KKT residual when lam = 0) and the target scale
     # max(1, max_j |P_tr m(W, phi_j)|) the convergence tolerance is relative to.
-    train_balance: dict[str, list] = {"max": [], "scale": []}
+    train_balance: dict[str, list] = {"fold": [], "max": [], "scale": []}
 
     # Kernel-health per fold (item B), populated only when the fitted Riesz
     # basis exposes a diagnostics() method (e.g. GaussianRKHSBasis).
@@ -977,6 +984,7 @@ def grr_functional(
                 float(np.max(np.abs(np.mean(alpha_tr_fit[:, None] * Phi_tr - M_tr, axis=0))))
             )
             train_balance["scale"].append(max(1.0, float(np.max(np.abs(M_tr.mean(axis=0))))))
+            train_balance["fold"].append(int(fold_id))
 
             # Evaluate the representer only through a domain-checked wrapper:
             # an evaluation-fold or counterfactual row outside the generator's
@@ -1198,6 +1206,7 @@ def grr_functional(
             status=failure,
             fold_status=fold_status,
             optimizer=optimizer_diag,
+            train_imbalance=train_balance,
         )
 
     # ------------------------------------------------------------------
@@ -1350,6 +1359,7 @@ def grr_functional(
             status=NONFINITE,
             fold_status=fold_status,
             optimizer=optimizer_diag,
+            train_imbalance=train_balance,
         )
 
     # ------------------------------------------------------------------
@@ -1433,10 +1443,7 @@ def grr_functional(
         diagnostics["held_out_imbalance_max"] = float(np.max(imbalance_stats["max"]))
         diagnostics["held_out_imbalance_mean"] = float(np.mean(imbalance_stats["mean"]))
     if train_balance["max"]:
-        diagnostics["train_imbalance"] = {
-            "max": list(train_balance["max"]),
-            "scale": list(train_balance["scale"]),
-        }
+        diagnostics["train_imbalance"] = {k: list(v) for k, v in train_balance.items()}
 
     # Kernel health (item B), aggregated across folds when available.
     if kernel_stats:

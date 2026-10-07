@@ -215,7 +215,10 @@ class BregmanGenerator:
         Built-in UKL/BP generators use this to choose the sign branch. It is
         called on one row at a time, unless it has the attribute
         ``vectorized = True``: it is then called once on the ``(n, d)`` array
-        of rows and must return ``n`` values.
+        of rows and must return ``n`` values. Marking a function vectorized is
+        the caller's guarantee that value ``i`` depends on row ``i`` alone and
+        equals what the function returns for that row on its own; the result
+        is then identical to the row-by-row evaluation.
 
     Notes
     -----
