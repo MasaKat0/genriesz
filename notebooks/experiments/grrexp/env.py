@@ -283,6 +283,20 @@ def check_modules_at_head(loaded: dict[str, str], blobs: dict[str, str]) -> None
         raise RuntimeError("genriesz from this checkout was not loaded")
 
 
+COMPUTATION_TREES = ("src/genriesz", "notebooks/experiments/grrexp")
+
+
+def computation_inputs(commit: str, notebook_rel: str, root: Path | None = None) -> dict:
+    """Git object ids of what a run computes with: the genriesz and grrexp trees,
+    the notebook and the lock at ``commit``. Equal ids mean identical code."""
+    root = GENRIESZ_ROOT if root is None else root
+    lock_rel = "notebooks/experiments/requirements-lock.txt"
+    out = {t: _git(root, "rev-parse", f"{commit}:{t}").strip() for t in COMPUTATION_TREES}
+    out[notebook_rel] = _git(root, "rev-parse", f"{commit}:{notebook_rel}").strip()
+    out[lock_rel] = _git(root, "rev-parse", f"{commit}:{lock_rel}").strip()
+    return dict(sorted(out.items()))
+
+
 def parent_state() -> dict:
     parent = GENRIESZ_ROOT.parent
     return {

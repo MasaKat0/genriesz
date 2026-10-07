@@ -29,6 +29,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -224,6 +225,12 @@ def validate_manifest(manifest: dict, exp: int, stage: str) -> None:
     )
     nb = str(src.get("notebook", ""))
     _require(nb.startswith("notebooks/experiments/") and nb.endswith(".ipynb"), "bad notebook")
+    computation = src.get("computation") or {}
+    _require(
+        set(env.COMPUTATION_TREES) <= set(computation) and nb in computation,
+        "computation inputs not recorded",
+    )
+    _require(all(HEX40.match(str(v)) for v in computation.values()), "bad computation object id")
     modules = src.get("loaded_modules") or {}
     _require(any(k.startswith("src/genriesz/") for k in modules), "no genriesz module recorded")
     _require(all(HEX40.match(str(v)) for v in modules.values()), "bad module blob hash")
@@ -237,6 +244,7 @@ def validate_manifest(manifest: dict, exp: int, stage: str) -> None:
     _require(envr.get("python") == env.REGISTERED_PYTHON, "python not verified")
     _require(bool(HEX64.match(str(envr.get("lock_sha256", "")))), "lock digest missing")
     _require(int(envr.get("lock_pins_verified", 0)) > 0, "lock not verified")
+    _require(bool(str(envr.get("executable", "")).strip()), "kernel interpreter not recorded")
 
     threads = manifest["threads"]
     _require(
@@ -360,6 +368,10 @@ class RunRecorder:
         from .parallel import configure_worker
 
         configure_worker()  # torch single-threaded and deterministic in this kernel
+        if run.get("executable") != sys.executable:
+            raise RuntimeError(f"kernel runs {sys.executable}, the runner {run.get('executable')}")
+        self.environment = {**env.check_environment(), "executable": sys.executable}
+        self.data_sha256 = env.verify_data(env.REGISTERED_DATA.get(exp, ()))
         if stage == "stage0":
             if cells is not None:
                 raise ValueError("Stage 0 has no Monte Carlo cells")
@@ -418,9 +430,24 @@ class RunRecorder:
         cells = {json.dumps(c) for c in self.cells}
         if not set(frame["cell"].map(json.dumps)) <= cells:
             raise ValueError("pilot rows name unregistered cells")
-        numeric = "seconds" if name == "timing.csv" else "count"
-        if not (frame[numeric] >= 0).all():
-            raise ValueError(f"{numeric} must be >= 0")
+        if name == "timing.csv":
+            seconds = frame["seconds"].astype(float)
+            if not (seconds.map(math.isfinite).all() and (seconds >= 0).all()):
+                raise ValueError("seconds must be finite and >= 0")
+            if not frame["workers"].isin([1, PILOT_WORKERS]).all():
+                raise ValueError(f"workers must be 1 or {PILOT_WORKERS}")
+        else:
+            counts = frame["count"]
+            if not (counts.map(lambda v: isinstance(v, int) or float(v).is_integer()).all()):
+                raise ValueError("count must be an integer")
+            if not (counts >= 0).all():
+                raise ValueError("count must be >= 0")
+            from genriesz import STATUSES
+
+            if not frame["status"].isin(STATUSES).all():
+                raise ValueError(f"status must be one of {STATUSES}")
+            if not frame["arm"].map(lambda a: isinstance(a, str) and bool(STEM.match(a))).all():
+                raise ValueError("arm must be a registered arm label [A-Za-z0-9_-]")
         rel, path = self._path(name.removesuffix(".csv"), None, ".csv")
         frame.to_csv(path, index=False)
         return self._register(rel, path)
@@ -495,6 +522,7 @@ class RunRecorder:
             raise ValueError("Stage 0.5 needs record_parallel_identity")
         from . import parallel
 
+        freeze, freeze_hash = env.pip_freeze()
         record = {
             "R": R,
             "n": n,
@@ -504,6 +532,12 @@ class RunRecorder:
             "outputs": sorted(self.files),
             "loaded_modules": env.loaded_module_blobs(),
             "threads": parallel.thread_record(self.threads_at_start),
+            "environment": self.environment,
+            "data_sha256": self.data_sha256,
+            "pip_freeze": freeze,
+            "pip_freeze_sha256": freeze_hash,
+            "blas": env.blas_config(),
+            "cpu": env.cpu_description(),
             "extra": extra or {},
         }
         if self.parallel_identity is not None:

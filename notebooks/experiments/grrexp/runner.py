@@ -54,8 +54,14 @@ def _committed_and_clean(path: Path) -> None:
         raise RunError(f"{rel}/manifest.json is not committed")
 
 
-def check_prerequisites(exp: int, stage: str, commit: str) -> tuple[dict, list | None]:
-    """Validate the committed earlier stages; return their digests and the pilot cells."""
+def check_prerequisites(
+    exp: int, stage: str, commit: str, computation: dict
+) -> tuple[dict, list | None]:
+    """Validate the committed earlier stages; return their digests and the pilot cells.
+
+    The pilot's evidence (timing, statuses, 1-vs-12 identity) holds only for the
+    code it ran, so Stage 1 must compute with the same trees, notebook and lock.
+    """
     out, pilot_cells = {}, None
     for prior in outputs.prerequisite_stages(exp, stage):
         d = outputs.stage_dir(exp, prior)
@@ -74,6 +80,8 @@ def check_prerequisites(exp: int, stage: str, commit: str) -> tuple[dict, list |
         out[prior] = {"manifest_sha256": hashlib.sha256(raw).hexdigest(), "commit": commit}
         if prior == "stage0.5":
             pilot_cells = manifest["cells"]
+            if manifest["genriesz"]["computation"] != computation:
+                raise RunError("the code changed after the pilot; archive and re-run Stage 0.5")
     return out, pilot_cells
 
 
@@ -81,10 +89,11 @@ def run(exp: int, stage: str, notebook: str) -> Path:
     nb_path = env.EXPERIMENTS_DIR / notebook
     if nb_path.parent != env.EXPERIMENTS_DIR or nb_path.suffix != ".ipynb":
         raise RunError("give the file name of a notebook in notebooks/experiments/")
-    environment = env.check_environment()
-    data = env.verify_data(env.REGISTERED_DATA.get(exp, ()))
+    env.check_environment()
+    env.verify_data(env.REGISTERED_DATA.get(exp, ()))
     state = env.checkout_state(nb_path)
-    prerequisites, pilot_cells = check_prerequisites(exp, stage, state["sha"])
+    computation = env.computation_inputs(state["sha"], state["notebook"])
+    prerequisites, pilot_cells = check_prerequisites(exp, stage, state["sha"], computation)
 
     d = outputs.stage_dir(exp, stage)
     d.parent.mkdir(parents=True, exist_ok=True)
@@ -98,10 +107,13 @@ def run(exp: int, stage: str, notebook: str) -> Path:
 
     kernel_env = dict(os.environ)
     kernel_env.update({k: "1" for k in THREAD_VARIABLES})
-    kernel_env[outputs.RUN_ENV] = json.dumps({"exp": exp, "stage": stage, "token": token})
+    kernel_env[outputs.RUN_ENV] = json.dumps(
+        {"exp": exp, "stage": stage, "token": token, "executable": sys.executable}
+    )
     cmd = [
         sys.executable, "-m", "nbconvert", "--to", "notebook", "--execute",
-        "--ExecutePreprocessor.timeout=-1", "--output", "executed.ipynb",
+        "--ExecutePreprocessor.timeout=-1", "--ExecutePreprocessor.kernel_name=python3",
+        "--output", "executed.ipynb",
         "--output-dir", str(d), str(nb_path),
     ]  # fmt: skip
     proc = subprocess.run(
@@ -130,19 +142,22 @@ def run(exp: int, stage: str, notebook: str) -> Path:
     if pilot_cells is not None and kernel["cells"] != pilot_cells:
         raise RunError("Stage 1 cells differ from the cells the pilot covered")
 
-    freeze, freeze_hash = env.pip_freeze()
     manifest = {
         "experiment": f"E-{exp}",
         "stage": stage,
         "parent_repository": env.parent_state(),
-        "genriesz": {**state, "loaded_modules": kernel["loaded_modules"]},
-        "environment": environment,
+        "genriesz": {
+            **state,
+            "computation": computation,
+            "loaded_modules": kernel["loaded_modules"],
+        },
+        "environment": kernel["environment"],
         "threads": kernel["threads"],
-        "pip_freeze": freeze,
-        "pip_freeze_sha256": freeze_hash,
-        "blas": env.blas_config(),
-        "cpu": env.cpu_description(),
-        "data_sha256": data,
+        "pip_freeze": kernel["pip_freeze"],
+        "pip_freeze_sha256": kernel["pip_freeze_sha256"],
+        "blas": kernel["blas"],
+        "cpu": kernel["cpu"],
+        "data_sha256": kernel["data_sha256"],
         "entropy": outputs.STAGE_ENTROPY[stage],
         "R": kernel["R"],
         "n": kernel["n"],

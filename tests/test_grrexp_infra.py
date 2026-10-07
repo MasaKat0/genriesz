@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy import stats
 
@@ -271,6 +272,12 @@ def make_manifest(exp: int, stage: str) -> dict:
             "notebook": "notebooks/experiments/x.ipynb",
             "notebook_blob": H40,
             "notebook_code_cells_sha256": H64,
+            "computation": {
+                "src/genriesz": H40,
+                "notebooks/experiments/grrexp": H40,
+                "notebooks/experiments/x.ipynb": H40,
+                "notebooks/experiments/requirements-lock.txt": H40,
+            },
             "loaded_modules": {"src/genriesz/__init__.py": H40},
         },
         "environment": {
@@ -278,6 +285,7 @@ def make_manifest(exp: int, stage: str) -> dict:
             "python": "3.13.6",
             "lock_sha256": H64,
             "lock_pins_verified": 109,
+            "executable": "/usr/bin/python3",
         },
         "threads": copy.deepcopy(THREADS),
         "pip_freeze": freeze,
@@ -332,6 +340,8 @@ def test_complete_manifests_validate(exp, stage) -> None:
         lambda m: m.update(cells=[]),
         lambda m: m["outputs_sha256"].pop("tables/tab_E12_ord.tex"),
         lambda m: m.pop("threads"),
+        lambda m: m["genriesz"].pop("computation"),
+        lambda m: m["environment"].pop("executable"),
     ],
 )
 def test_incomplete_or_inconsistent_stage1_manifest_is_rejected(change) -> None:
@@ -380,7 +390,8 @@ def reserved(tmp_path, monkeypatch):
     d = outputs.stage_dir(16, "stage0")
     d.mkdir(parents=True)
     (d / "RUNNING.json").write_text(json.dumps({"token": "t"}))
-    monkeypatch.setenv(outputs.RUN_ENV, json.dumps({"exp": 16, "stage": "stage0", "token": "t"}))
+    run = {"exp": 16, "stage": "stage0", "token": "t", "executable": sys.executable}
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps(run))
     return d
 
 
@@ -393,8 +404,13 @@ def test_recorder_refuses_without_the_runner(tmp_path, monkeypatch) -> None:
 def test_recorder_checks_token_and_reservation(reserved, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="reserved"):
         outputs.RunRecorder(17, "stage0")
-    monkeypatch.setenv(outputs.RUN_ENV, json.dumps({"exp": 16, "stage": "stage0", "token": "x"}))
+    run = {"exp": 16, "stage": "stage0", "token": "x", "executable": sys.executable}
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps(run))
     with pytest.raises(RuntimeError, match="does not belong"):
+        outputs.RunRecorder(16, "stage0")
+    run = {"exp": 16, "stage": "stage0", "token": "t", "executable": "/other/python"}
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps(run))
+    with pytest.raises(RuntimeError, match="kernel runs"):
         outputs.RunRecorder(16, "stage0")
 
 
@@ -417,6 +433,7 @@ def test_recorder_writes_kernel_record_once(reserved) -> None:
     record = json.loads((reserved / "kernel.json").read_text())
     assert record["outputs"] == ["macros_E-16.tex", "tables/tab_E16.tex"]
     assert record["threads"]["torch"] == {"num_threads": 1, "deterministic": True}
+    assert record["environment"]["executable"] == sys.executable
     with pytest.raises(RuntimeError):
         rec.write_table("tab_E16b", "y")
     with pytest.raises(FileExistsError):
@@ -479,6 +496,7 @@ def fake_repo(tmp_path, monkeypatch):
         ignore=shutil.ignore_patterns("__pycache__"),
     )  # fmt: skip
     (exp_dir / "e16.ipynb").write_text(json.dumps(E16_NOTEBOOK))
+    shutil.copy(env.LOCK_FILE, exp_dir / "requirements-lock.txt")
     (root / ".gitignore").write_text("__pycache__/\n")
     _git(root, "init", "-q")
     _git(root, "add", ".")
@@ -526,6 +544,7 @@ def test_runner_end_to_end_in_a_fresh_kernel(fake_repo) -> None:
     assert manifest["threads"]["variables"] == THREADS["variables"]
     assert manifest["threads"]["torch"] == {"num_threads": 1, "deterministic": True}
     assert "src/genriesz/__init__.py" in manifest["genriesz"]["loaded_modules"]
+    assert set(manifest["genriesz"]["computation"]) >= set(env.COMPUTATION_TREES)
     d = path.parent
     assert (d / "executed.ipynb").is_file() and not (d / "RUNNING.json").exists()
     assert not _git(root, "status", "--porcelain", "--", "notebooks/experiments/e16.ipynb")
@@ -545,3 +564,71 @@ def test_environment_matches_lock_and_lock_covers_registration() -> None:
 def test_submodule_genriesz_is_the_imported_source() -> None:
     mod = env.use_submodule_genriesz()
     assert Path(mod.__file__).resolve().parents[1] == env.GENRIESZ_SRC
+
+
+@pytest.fixture
+def pilot_recorder(tmp_path, monkeypatch):
+    monkeypatch.setattr(env, "RESULTS_DIR", tmp_path)
+    for k in parallel.THREAD_VARIABLES:
+        monkeypatch.setenv(k, "1")
+    d = outputs.stage_dir(13, "stage0.5")
+    d.mkdir(parents=True)
+    (d / "RUNNING.json").write_text(json.dumps({"token": "t"}))
+    run = {"exp": 13, "stage": "stage0.5", "token": "t", "executable": sys.executable}
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps(run))
+    return outputs.RunRecorder(13, "stage0.5", cells=[[0], [1]])
+
+
+def _timing(workers, seconds, cell=(0,)):
+    return pd.DataFrame({"cell": [list(cell)], "workers": [workers], "seconds": [seconds]})
+
+
+def _counts(arm, status, count):
+    return pd.DataFrame({"cell": [[0]], "arm": [arm], "status": [status], "count": [count]})
+
+
+@pytest.mark.parametrize(
+    "name,frame",
+    [
+        ("timing.csv", _timing(3, 1.0)),
+        ("timing.csv", _timing(1, np.inf)),
+        ("timing.csv", _timing(1, 1.0, cell=(7,))),
+        ("status_counts.csv", _counts("SQ", "ok", 1.5)),
+        ("status_counts.csv", _counts("SQ", "0.93", 1)),
+        ("status_counts.csv", _counts("1.02 est", "ok", 1)),
+    ],
+)
+def test_pilot_files_carry_no_estimates(pilot_recorder, name, frame) -> None:
+    with pytest.raises(ValueError):
+        pilot_recorder.write_pilot(name, frame)
+
+
+def test_valid_pilot_files_are_written(pilot_recorder) -> None:
+    timing = pd.DataFrame({"cell": [[0], [1]], "workers": [1, 12], "seconds": [1.0, 0.2]})
+    pilot_recorder.write_pilot("timing.csv", timing)
+    pilot_recorder.write_pilot("status_counts.csv", _counts("SQ", "ok", 10))
+
+
+def _commit_stage(stage_path, manifest):
+    stage_path.mkdir(parents=True)
+    for name in list(manifest["outputs_sha256"]):
+        (stage_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (stage_path / name).write_text("x")
+        manifest["outputs_sha256"][name] = env.sha256_file(stage_path / name)
+    (stage_path / "manifest.json").write_text(json.dumps(manifest))
+
+
+def test_stage1_refuses_a_pilot_of_other_code(fake_repo) -> None:
+    root, _ = fake_repo
+    pilot = make_manifest(13, "stage0.5")
+    stage0 = make_manifest(13, "stage0")
+    stage0["outputs_sha256"] = {"stage0_pred.json": H64}
+    _commit_stage(outputs.stage_dir(13, "stage0.5"), pilot)
+    _commit_stage(outputs.stage_dir(13, "stage0"), stage0)
+    _git(root, "add", "-f", "notebooks/experiments/results")
+    _git(root, "commit", "-qm", "earlier stages")
+    sha = _git(root, "rev-parse", "HEAD").strip()
+    with pytest.raises(runner.RunError, match="code changed after the pilot"):
+        runner.check_prerequisites(13, "stage1", sha, {"src/genriesz": "c" * 40})
+    digests, cells = runner.check_prerequisites(13, "stage1", sha, pilot["genriesz"]["computation"])
+    assert cells == [[0], [1]] and set(digests) == {"stage0", "stage0.5"}
