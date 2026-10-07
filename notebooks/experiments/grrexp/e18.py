@@ -73,6 +73,9 @@ N_EVAL = 100_000
 T_FOLD = float(np.log(2 * M / 0.01))
 EB_DELTA = 0.001 / (2 * M * K)  # one side of one interval (H18-Thm)
 THM_P0 = 0.05 + 0.001
+#: the solver works on the ball of radius R_g (1 - 1e-9): its ``"ok"`` solutions satisfy
+#: ||beta||_1 <= radius (1 + 1e-12) (polishing allowance), so the stated R_g holds exactly.
+SOLVER_RADIUS_FACTOR = 1.0 - 1e-9
 SAMPLE_TOL = 1e-8  # §1.3 C (lam = 0: scaled by max(1, ||P_n m||_inf); ridge/ball: 1e-8)
 INF_N = (2000, 4000, 8000)
 EMP_N = (1000, 8000)
@@ -317,7 +320,7 @@ class _Fit:
         u = self.u(d, Psi4)
         s = 2.0 * d - 1.0
         su = s * u
-        out = np.abs(u - self.u_ref[d]) > RADIUS[self.gen_name] * (1.0 + 1e-9)
+        out = np.abs(u - self.u_ref[d]) > RADIUS[self.gen_name]
         name = self.gen_name
         if name == "SQ":
             a = u / 2.0
@@ -330,7 +333,7 @@ class _Fit:
         else:  # BP(omega = 0.5, C = 0): |alpha| = (1 + s u / k)^(1/omega), k = 3
             out = out | (su <= -3.0)
             a = s * (1.0 + su / 3.0) ** 2
-        return a, out | ~np.isfinite(a)
+        return a, out | ~np.isfinite(a) | (np.abs(a) > A_ALPHA)
 
     def conj(self, d, Psi4):
         X = np.zeros((len(Psi4), 4))
@@ -360,12 +363,18 @@ def fit_candidate(index, X_fit):
         mdl = g.GRRGLM(
             basis=_arm_basis(arm, degree), generator=gen, functional=g.ATEFunctional(0),
             penalty=None if lam == 0.0 else "l2", lam=lam,
-            offset=g.offset_from_alpha(gen, alpha_ref), l1_radius=RADIUS[gen_name],
+            offset=g.offset_from_alpha(gen, alpha_ref),
+            l1_radius=RADIUS[gen_name] * SOLVER_RADIUS_FACTOR,
         )  # fmt: skip
         fr = mdl.fit(X_fit, tol=SAMPLE_TOL)
         if fr.status != "ok":
             return str(fr.status), None
-        betas[arm] = np.asarray(mdl.beta_, dtype=float)
+        beta = np.asarray(mdl.beta_, dtype=float)
+        if not float(np.sum(np.abs(beta))) <= RADIUS[gen_name]:
+            # the solver radius leaves room for its polishing allowance (1e-12, relative);
+            # a coefficient outside the stated ball would break the |alpha| <= 50 envelope
+            raise RuntimeError(f"candidate {index}: ||beta||_1 exceeds R_g after the fit")
+        betas[arm] = beta
     return "ok", _Fit(gen_name, degree, betas)
 
 
@@ -463,28 +472,52 @@ def _fold_selection(design, X, Z, fit_idx, sel_idx, Psi4, Psi_eval, e_eval, b_ra
         "violation": bool(lo[sel] > rhs(rstar_u, design, n_v)),
         "n_v": n_v,
         "n_failed": int(sum(s != "ok" for s in statuses)),
+        "control_status": statuses[CONTROL],
         "statuses": collections.Counter(statuses),
         "warnings": warn,
     }, fits
 
 
+def _arm_ols(Q, X, Y, comp):
+    """Arm-specific quadratic OLS on the rows ``comp``; ``(status, coef1, coef0)``. An arm
+    without enough rows for a full-rank fit is a failure, never a zero regression."""
+    coefs = {}
+    for arm in (1.0, 0.0):
+        rows = comp[X[comp, 0] == arm]
+        if len(rows) < Q.shape[1]:
+            return "degenerate_functional", None, None
+        coef, _, rank, _ = np.linalg.lstsq(Q[rows], Y[rows], rcond=None)
+        if rank < Q.shape[1]:
+            return "singular", None, None
+        coefs[arm] = coef
+    return "ok", coefs[1.0], coefs[0.0]
+
+
 def _arw_fold(fitted, X, Y, Psi4, Q, comp, te):
-    """psi of the ARW score on fold ``te`` with the representer ``fitted`` (a _Fit or the
-    constant) and the arm-specific quadratic OLS fitted on ``comp``."""
-    Qc, Dc, Yc = Q[comp], X[comp, 0], Y[comp]
-    c1 = _ols(Qc[Dc == 1], Yc[Dc == 1])
-    c0 = _ols(Qc[Dc == 0], Yc[Dc == 0])
+    """ARW score on fold ``te`` with the representer ``fitted`` (a _Fit, or ``None`` for the
+    constant a0) and the arm-specific quadratic OLS fitted on ``comp``.
+
+    Returns ``(status, psi, alpha)``; the observed and counterfactual predictions of the
+    representer on the fold are checked (§1.3 B ``domain_prediction``)."""
+    status, c1, c0 = _arm_ols(Q, X, Y, comp)
+    if status != "ok":
+        return status, None, None
     Qt, Dt = Q[te], X[te, 0]
     g1, g0 = Qt @ c1, Qt @ c0
     if fitted is None:
         a1 = np.full(len(Qt), 2.0)
         a0 = np.full(len(Qt), -2.0)
     else:
-        a1, _ = fitted.alpha(1.0, Psi4[te])
-        a0, _ = fitted.alpha(0.0, Psi4[te])
+        a1, o1 = fitted.alpha(1.0, Psi4[te])
+        a0, o0 = fitted.alpha(0.0, Psi4[te])
+        if np.any(o1) or np.any(o0):
+            return "domain_prediction", None, None
     a = np.where(Dt == 1, a1, a0)
     gx = np.where(Dt == 1, g1, g0)
-    return g1 - g0 + a * (Y[te] - gx), a
+    psi = g1 - g0 + a * (Y[te] - gx)
+    if not np.all(np.isfinite(psi)):
+        return "nonfinite", None, None
+    return "ok", psi, a
 
 
 def replicate(task):
@@ -505,9 +538,9 @@ def replicate(task):
     out = {}
     for con in CONSTRUCTIONS:
         recs, statuses, warns = [], collections.Counter(), collections.Counter()
-        psi_sel, psi_ctl = np.empty(n), np.empty(n)
+        psi = {"SEL": np.empty(n), "CTRL": np.empty(n)}
+        est_status = {"SEL": "ok", "CTRL": "ok"}
         alpha_sel = np.empty(n)
-        ctl_ok = True
         for k in range(K):
             te = np.flatnonzero(folds == k)
             comp = np.flatnonzero(folds != k)
@@ -525,11 +558,25 @@ def replicate(task):
             recs.append(rec)
             if design == "18B":
                 chosen = None if rec["sel"] == A0 else fits[rec["sel"]]
-                psi_sel[te], alpha_sel[te] = _arw_fold(chosen, X, Y, Psi4, Q, comp, te)
-                if fits[CONTROL] is None:
-                    ctl_ok = False
-                else:
-                    psi_ctl[te], _ = _arw_fold(fits[CONTROL], X, Y, Psi4, Q, comp, te)
+                for name, fitted, failed in (
+                    ("SEL", chosen, None),
+                    (
+                        "CTRL",
+                        fits[CONTROL],
+                        None if fits[CONTROL] is not None else rec["control_status"],
+                    ),
+                ):
+                    if est_status[name] != "ok":
+                        continue  # the first failed fold fails the replication (§1.3 D)
+                    if failed is not None:
+                        est_status[name] = failed
+                        continue
+                    st, p_k, a_k = _arw_fold(fitted, X, Y, Psi4, Q, comp, te)
+                    est_status[name] = st
+                    if st == "ok":
+                        psi[name][te] = p_k
+                        if name == "SEL":
+                            alpha_sel[te] = a_k
         res = {
             "folds": recs,
             "statuses": dict(statuses),
@@ -537,21 +584,20 @@ def replicate(task):
             "violation_any": bool(any(r["violation"] for r in recs)),
         }
         if design == "18B":
-            for name, psi, ok in (("SEL", psi_sel, True), ("CTRL", psi_ctl, ctl_ok)):
-                if ok and np.all(np.isfinite(psi)):
-                    th = float(np.mean(psi))
+            for name in ("SEL", "CTRL"):
+                if est_status[name] == "ok":
+                    th = float(np.mean(psi[name]))
                     res[name] = {
                         "estimate": th,
-                        "se": float(np.std(psi - th) / np.sqrt(n)),  # §1.4: P_n psi^2
+                        "se": float(np.std(psi[name] - th) / np.sqrt(n)),  # §1.4: P_n psi^2
                         "status": "ok",
                     }
                 else:
-                    res[name] = {
-                        "estimate": float("nan"),
-                        "se": float("nan"),
-                        "status": "control_candidate_failed" if ok is False else "nonfinite",
-                    }
-            res["SEL"]["max_abs_alpha"] = float(np.max(np.abs(alpha_sel)))
+                    res[name] = {"estimate": float("nan"), "se": float("nan"),
+                                 "status": est_status[name]}  # fmt: skip
+            res["SEL"]["max_abs_alpha"] = (
+                float(np.max(np.abs(alpha_sel))) if est_status["SEL"] == "ok" else float("nan")
+            )
         out[con] = res
     return out
 
@@ -646,7 +692,8 @@ def summarise(raw):
             "median_risk_sel": float(np.median(rs)),
             "median_risk_star": float(np.median(rstar)),
             "median_ratio_raw": float(np.median(_folds(g, "risk_raw_sel") / rstar)),
-            "median_ratio_control": float(np.median(_folds(g, "risk_control") / rstar)),
+            # the control candidate can fail in a fold: median over the folds where it was fitted
+            "median_ratio_control": float(np.nanmedian(_folds(g, "risk_control") / rstar)),
             "mean_failed_candidates": float(_folds(g, "n_failed").mean()),
             "selected_generators": json.dumps(dict(sorted(gens.items()))),
             "candidate_statuses": json.dumps(dict(sorted(st.items()))),
@@ -656,6 +703,11 @@ def summarise(raw):
                 ok = (g[f"{est}_status"] == "ok").to_numpy()
                 row[f"{est}_R_s"] = int(ok.sum())
                 row[f"{est}_failure_rate"] = float(1.0 - ok.mean())
+                row[f"{est}_status_counts"] = json.dumps(
+                    dict(sorted(collections.Counter(g[f"{est}_status"]).items()))
+                )
+                if ok.all():
+                    row[f"{est}_failure_rate_cp_upper"] = metrics.clopper_pearson_upper(0, len(ok))
                 if not ok.any():
                     row[f"{est}_covered"] = 0
                     row[f"{est}_coverage"] = 0.0
@@ -664,6 +716,10 @@ def summarise(raw):
                 se_v = g[f"{est}_se"].to_numpy()
                 x = est_v[ok]
                 row[f"{est}_bias"] = float(x.mean() - THETA0)
+                row[f"{est}_bias_mcse"] = (
+                    float(x.std(ddof=1) / np.sqrt(x.size)) if x.size >= 2 else float("nan")
+                )
+                row[f"{est}_rmse"] = float(np.sqrt(np.mean((x - THETA0) ** 2)))
                 # the SD MCSE (fourth moment) is not needed by any E-18 test; with the few
                 # pilot replications its radicand can be negative, so it is not computed
                 row[f"{est}_root_n_sd"] = (
@@ -778,8 +834,8 @@ def tables(S, intervals):
     macros, from ``summary.csv`` and the H18-Emp intervals only (§4)."""
     head = ("Design & Constr. & $n$ & Viol. & med. $\\varrho_{\\widehat a}/\\varrho^*$ & "
             "med. raw$/\\varrho^*$ & Bias (SEL) & $\\sqrt n$SD & SE ratio & Coverage & "
-            "Coverage (SQ-1) & Fail.\\ cand." + END)  # fmt: skip
-    lines = ["\\begin{tabular}{llrrrrrrrrrr}", "\\hline", head, "\\hline", "\\endfirsthead",
+            "Coverage (SQ-1) & Fail \\% (SEL) & Fail.\\ cand." + END)  # fmt: skip
+    lines = ["\\begin{tabular}{llrrrrrrrrrrr}", "\\hline", head, "\\hline", "\\endfirsthead",
              "\\hline", head, "\\hline", "\\endhead"]  # fmt: skip
     for _, r in S.sort_values(["design", "construction", "n"]).iterrows():
         b = r["design"] == "18B"
@@ -792,6 +848,7 @@ def tables(S, intervals):
             _fmt(r.get("SEL_se_ratio"), 2) if b else "--",
             _fmt(r.get("SEL_coverage")) if b else "--",
             _fmt(r.get("CTRL_coverage")) if b else "--",
+            f"{100 * r['SEL_failure_rate']:.1f}" if b else "--",
             _fmt(r["mean_failed_candidates"], 2),
         ]) + END)  # fmt: skip
     lines += ["\\hline", "\\end{tabular}"]
