@@ -194,7 +194,10 @@ def test_raw_frame_and_aggregation(small_task, stage0) -> None:
     bnd = e14.h14_bnd(S)
     assert bnd["checked"] == int(S["bnd_checked"].sum())
     hl = e14.health(raw)
-    assert hl["bkl_zero_offset"] == {"replications": 3, "infeasible_start": 3}
+    z = hl["bkl_zero_offset"]
+    got = (z["verdict"], z["expected"], z["replications"], z["infeasible_start"])
+    assert got == ("pass", 3, 3, 3)
+    assert "CP up." in e14.tables(S, None)["tab_E14"]
     tabs = e14.tables(S, None)
     assert "\\endhead" in tabs["tab_E14"] and tabs["tab_E14"].count("\\endfirsthead") == 1
 
@@ -220,3 +223,61 @@ def test_rate_slope_recovers_a_known_power() -> None:
         assert s["lo"] <= -0.5 <= s["hi"] and s["intersects"]
     for r in out["ratios"]:
         assert r["ratio"] == pytest.approx(1.1 / 1.00625, rel=1e-12) and r["below_limit"]
+
+
+# ---------------------------------------------------------------- review round 1
+
+
+def test_nonfinite_evaluation_fails_the_fit(designs) -> None:
+    import genriesz as gr
+
+    des = designs["UKL"]
+    beta = des.beta_star(4)
+    beta[1] = -1000.0  # a = exp(-u) overflows on the evaluation sample
+    ev = e14.evaluate(des, e14.generator("UKL"), beta, PILOT_ENTROPY, 0, N=1000)
+    assert ev == {"eval_status": "nonfinite"}
+    res = gr.solvers.SolverResult(beta=beta, status="ok", n_iter=1)
+    events = {"lam_min_Sigma_hat": 1.0, "lam_min_E3": 1.0, "E2": True, "E3": True}
+    rec = e14._fit_record(des, e14.generator("UKL"), res, 0.1, events, PILOT_ENTROPY, 0, 0.0)
+    assert rec["status"] == "nonfinite"
+    assert "bnd_violation" not in rec and "err2_lower" not in rec
+
+
+def test_evaluation_outside_the_certified_range_stops(designs) -> None:
+    des = designs["SQ"]
+    beta = des.beta_star(4)
+    beta[1] = -50.0  # far outside the l1 ball: |alpha| above A_alpha
+    with pytest.raises(RuntimeError, match="certified range"):
+        e14.evaluate(des, e14.generator("SQ"), beta, PILOT_ENTROPY, 0, N=1000)
+
+
+def _bkl_raw(statuses):
+    rows = []
+    for rep, st in enumerate(statuses):
+        rows.append({"cell": 45, "rep": rep, "generator": "BKL", "penalty": "SN", "status": "ok"})
+        if st is not None:
+            rows.append({"cell": 45, "rep": rep, "generator": "BKL", "penalty": "BKL_u0",
+                         "status": st})
+    return pd.DataFrame(rows)
+
+
+def test_bkl_zero_offset_verdict() -> None:
+    assert e14.bkl_zero_offset(_bkl_raw(["infeasible_start"] * 3))["verdict"] == "pass"
+    out = e14.bkl_zero_offset(_bkl_raw(["infeasible_start", "ok", "infeasible_start"]))
+    assert out["verdict"] == "fail" and out["mismatches"] == [(45, 1, "ok")]
+    out = e14.bkl_zero_offset(_bkl_raw(["infeasible_start", None]))
+    assert out["verdict"] == "incomplete" and out["missing"] == [[45, 1]]
+
+
+def test_rate_verdict_negative_and_incomplete() -> None:
+    rows = []
+    for ci, (_name, p_c, n) in enumerate(e14.CELLS):
+        for rep in range(20):
+            err = (n / 16000) ** -1.0 * (1.0 + 0.01 * ((rep % 5) - 2)) * (1 + p_c / 50)
+            rows.append({"cell": ci, "penalty": "SN", "status": "ok", "rep": rep, "err2": err**2})
+    out = e14.rate_predictions(pd.DataFrame(rows), Seeds(14, entropy=PILOT_ENTROPY))
+    assert out["verdict"] == "negative" and not out["incomplete"]
+    assert all(f.startswith(("slope|", "ratio|")) for f in out["failed"])
+    one = pd.DataFrame([r for r in rows if r["rep"] == 0])
+    out = e14.rate_predictions(one, Seeds(14, entropy=PILOT_ENTROPY))
+    assert out["verdict"] == "incomplete"

@@ -34,6 +34,7 @@ import math
 import numpy as np
 from scipy import optimize, stats
 
+from . import metrics
 from .seeds import CONFIRMATORY_ENTROPY, Seeds
 
 EXP = 14
@@ -281,6 +282,7 @@ def certificate(name):
     gen = generator(name)
     res = {}
     pis = {}
+    pi_stored = design_values(name, points=QUAD_FROZEN)["pi1"]  # used by the replications
     for pts in QUAD_CERT:
         Z4, W = _grid4(pts)
         u0 = planted_u(name, Z4)
@@ -294,7 +296,19 @@ def certificate(name):
         g_c = (F * (W * ((1.0 - e) * (-a0) + e / pi1))[:, None]).sum(axis=0)
         res[f"gradient_max_{pts}"] = float(max(abs(g_t), np.abs(g_c).max()))
         res[f"pi1_consistency_{pts}"] = float(abs(np.sum(W * e) - pi1))
+        # the stored (40-point) design on this grid: E[e] = pi1 is the only condition, since
+        # (1 - e) a0 = e / pi1 makes every population imbalance vanish for any pi1
+        e_s = pi_stored * a0 / (1.0 + pi_stored * a0)
+        res[f"stored_design_consistency_{pts}"] = float(abs(np.sum(W * e_s) - pi_stored))
+    pis[QUAD_FROZEN] = pi_stored
     res["pi1_diff"] = float(abs(pis[48] - pis[64]))
+    res["pi1_diff_40"] = float(max(abs(pis[40] - pis[48]), abs(pis[40] - pis[64])))
+    bstar = {}
+    for pts, q in pis.items():
+        uref_c = float(dual(name, 0, -1.0 / (1.0 - q), gen)[0])
+        bstar[pts] = np.r_[0.0, PLANT[name]["c"] - uref_c, PLANT[name]["k"] * B_VEC]
+    res["beta_star_diff"] = float(max(np.abs(bstar[a] - bstar[b]).max()
+                                      for a, b in ((48, 64), (40, 48), (40, 64))))  # fmt: skip
     pi1 = pis[64]
     vals = design_values(name, points=64)
     c, k = PLANT[name]["c"], PLANT[name]["k"]
@@ -316,7 +330,9 @@ def certificate(name):
     res["hessian_lam_min_Sigma"] = vals["lam_min_Sigma"]
     checks = {
         "i_gradient": all(res[f"gradient_max_{p}"] <= CERT_GRADIENT for p in QUAD_CERT),
-        "i_difference": res["pi1_diff"] <= CERT_DIFF,
+        "i_difference": res["beta_star_diff"] <= CERT_DIFF and res["pi1_diff_40"] <= CERT_DIFF,
+        "i_stored_design": all(res[f"stored_design_consistency_{p}"] <= CERT_GRADIENT
+                               for p in QUAD_CERT),
         "ii_hessian_pd": vals["lam_min_Sigma"] > 0.0 and vals["mu"] > 0.0,
         "iii_interior": math.isinf(finite["margin_beta_star"])
         or finite["margin_beta_star"] >= CERT_MARGIN,
@@ -479,16 +495,29 @@ def evaluate(des, gen, beta, entropy, rep, *, block=999, N=N_EVAL):
     u = np.full(N, des.uref_c + beta[1])
     for j in sup:
         u += beta[2 + j] * Zc[j]
-    a_hat = control_weight(des.name, u, gen)
-    at = float(treated_alpha(des.name, des.uref_t + beta[0], gen)[0])
-    f = (1.0 - e) * (a_hat - a0) ** 2 + e * (at - 1.0 / des.pi1) ** 2
+    with np.errstate(all="ignore"):
+        a_hat = control_weight(des.name, u, gen)
+        at = float(treated_alpha(des.name, des.uref_t + beta[0], gen)[0])
+        f = (1.0 - e) * (a_hat - a0) ** 2 + e * (at - 1.0 / des.pi1) ** 2
+    finite = bool(np.all(np.isfinite(a_hat)) and math.isfinite(at) and np.all(np.isfinite(f)))
+    if not finite:
+        return {"eval_status": "nonfinite"}
+    max_alpha = float(max(np.abs(a_hat).max(), abs(at)))
+    if max_alpha > des.A_alpha or f.max() > des.B_eval**2:
+        # beta_hat is in the l1 ball, whose induced range is certified at Stage 0: a value
+        # outside it is an implementation error, not a statistical outcome (stop).
+        raise RuntimeError(
+            f"evaluation outside the certified range: max |alpha| = {max_alpha} "
+            f"(A_alpha = {des.A_alpha}), max integrand = {float(f.max())} (B^2 = {des.B_eval**2})"
+        )
     mean = float(f.mean())
     var = float(f.var(ddof=1))
     lg = math.log(2.0 / DELTA_EVAL)
     lower = mean - math.sqrt(2.0 * var * lg / N) - 7.0 * des.B_eval**2 * lg / (3.0 * (N - 1))
-    in_range = bool(np.all(np.isfinite(f)) and f.max() <= des.B_eval**2)
-    return {"err2": mean, "err2_var": var, "err2_lower": lower, "eval_in_range": in_range,
-            "max_abs_alpha_eval": float(max(np.abs(a_hat).max(), abs(at)))}  # fmt: skip
+    if not (math.isfinite(mean) and math.isfinite(var) and math.isfinite(lower)):
+        return {"eval_status": "nonfinite"}
+    return {"eval_status": "ok", "err2": mean, "err2_var": var, "err2_lower": lower,
+            "eval_in_range": True, "max_abs_alpha_eval": max_alpha}  # fmt: skip
 
 
 def _fit_record(des, gen, res, lam, events, entropy, rep, xi_star_inf):
@@ -503,7 +532,11 @@ def _fit_record(des, gen, res, lam, events, entropy, rep, xi_star_inf):
     if res.status == "ok":
         nz = np.flatnonzero(res.beta)
         rec["beta_hat"] = json.dumps({int(j): float(res.beta[j]) for j in nz})
-        rec.update(evaluate(des, gen, res.beta, entropy, rep))
+        ev = evaluate(des, gen, res.beta, entropy, rep)
+        if ev.pop("eval_status") != "ok":
+            rec["status"] = "nonfinite"  # §1.3 B: a non-finite prediction fails the fit
+            return rec
+        rec.update(ev)
         rec["l1_beta_hat"] = float(np.abs(res.beta).sum())
         rec["bnd_violation"] = bool(rec["events"] and rec["err2_lower"] > rec["bound"] ** 2)
     return rec
@@ -536,9 +569,13 @@ def _replicate(task):
     xi_star = xi_matrix(alpha_star, Phi, D, Z, des.pi1)
     grad_star = xi_star.mean(axis=0)
     xi_star_inf = float(np.abs(grad_star).max())
+    if not (math.isfinite(xi_star_inf) and np.all(np.isfinite(Phi))):
+        raise FloatingPointError("non-finite design or gradient at beta*")
     Sig_hat = Phi.T @ Phi / n
     ev_hat = float(np.linalg.eigvalsh(Sig_hat).min())
     ev_e3 = float(np.linalg.eigvalsh(Sig_hat - 0.5 * des.sigma(p_c)).min())
+    if not (math.isfinite(ev_hat) and math.isfinite(ev_e3)):
+        raise FloatingPointError("non-finite eigenvalue in the (E2)/(E3) checks")
     events = {"lam_min_Sigma_hat": ev_hat, "lam_min_E3": ev_e3,
               "E2": bool(ev_hat >= des.lam_min_Sigma / 2.0), "E3": bool(ev_e3 >= 0.0)}  # fmt: skip
     out = {"n_treated": int(D.sum()), "grad_star_inf": xi_star_inf}
@@ -629,7 +666,7 @@ def summarise(raw):
             ev = _flag(g["events"]).to_numpy()
             row = {
                 "cell": ci, "generator": name, "p_c": p_c, "n": n, "penalty": pen,
-                "R": len(g), "R_s": int(ok.sum()), "failure_rate": float(1 - ok.mean()),
+                **metrics.failure_rate(ok),
                 "status_counts": json.dumps(dict(sorted(collections.Counter(g["status"]).items()))),
                 "E1_rate": float(_flag(g["E1"]).mean()),
                 "E2_rate": float(_flag(g["E2"]).mean()),
@@ -640,13 +677,16 @@ def summarise(raw):
                 "err_mean": float(err.mean()) if err.size else float("nan"),
                 "err_median": float(np.median(err)) if err.size else float("nan"),
                 "err_max": float(err.max()) if err.size else float("nan"),
-                "support_median": float(g.loc[ok, "support"].median()) if ok.any() else float("nan"),
+                "support_median": (
+                    float(g.loc[ok, "support"].median()) if ok.any() else float("nan")
+                ),
                 "ball_active_rate": float(_flag(g.loc[ok, "ball_active"]).mean())
                 if ok.any() else float("nan"),
                 "bnd_checked": int((ok & ev).sum()),
                 "bnd_violations": int(_flag(g["bnd_violation"]).sum()),
                 "max_err_over_bound": float(
-                    (np.sqrt(np.maximum(g.loc[ok & ev, "err2_lower"], 0.0)) / g.loc[ok & ev, "bound"]).max()
+                    (np.sqrt(np.maximum(g.loc[ok & ev, "err2_lower"], 0.0))
+                     / g.loc[ok & ev, "bound"]).max()
                 ) if (ok & ev).any() else float("nan"),
                 "eval_out_of_range": int((ok & ~_flag(g["eval_in_range"], True).to_numpy()).sum()),
             }  # fmt: skip
@@ -661,7 +701,9 @@ def h14_bnd(summ):
         "verdict": "negative" if len(v) else "no violation",
         "violations": int(summ["bnd_violations"].sum()),
         "checked": int(summ["bnd_checked"].sum()),
-        "violating_cells": [f"{r.generator}|p_c={r.p_c}|n={r.n}|{r.penalty}" for r in v.itertuples()],
+        "violating_cells": [
+            f"{r.generator}|p_c={r.p_c}|n={r.n}|{r.penalty}" for r in v.itertuples()
+        ],
     }  # fmt: skip
 
 
@@ -709,7 +751,15 @@ def rate_predictions(raw, seeds):
         else:
             ratios.append({"generator": name, "ratio": None, "lo": None, "hi": None,
                            "below_limit": None})  # fmt: skip
-    return {"slopes": slopes, "ratios": ratios}
+    failed = [f"slope|{s['generator']}|p_c={s['p_c']}" for s in slopes if s["intersects"] is False]
+    failed += [f"ratio|{r['generator']}" for r in ratios if r["below_limit"] is False]
+    incomplete = [
+        f"slope|{s['generator']}|p_c={s['p_c']}" for s in slopes if s["intersects"] is None
+    ]
+    incomplete += [f"ratio|{r['generator']}" for r in ratios if r["below_limit"] is None]
+    verdict = "negative" if failed else ("incomplete" if incomplete else "no departure detected")
+    return {"slopes": slopes, "ratios": ratios, "verdict": verdict, "failed": failed,
+            "incomplete": incomplete}
 
 
 def health(raw):
@@ -726,13 +776,25 @@ def health(raw):
             tests[f"{name}|{pen}"] = float(stats.binom.sf(k - 1, len(g), FAILURE_LIMIT))
             counts[f"{name}|{pen}"] = [k, int(len(g))]
     verdict = judge_family("H14-health", tests, level=HEALTH_LEVEL)
-    z = raw[raw["penalty"] == "BKL_u0"]
     return {
         "failures": counts, "pvalues": tests, "rejected": list(verdict.rejected),
-        "verdict": verdict.sentence(),
-        "bkl_zero_offset": {"replications": int(len(z)),
-                            "infeasible_start": int((z["status"] == "infeasible_start").sum())},
+        "verdict": verdict.sentence(), "bkl_zero_offset": bkl_zero_offset(raw),
     }  # fmt: skip
+
+
+def bkl_zero_offset(raw):
+    """Deterministic (PR4a 2(c-1)): every BKL replication's ``u_ref = 0`` start is
+    ``infeasible_start``. ``incomplete`` if a BKL replication has no such record."""
+    bkl = raw[(raw["generator"] == "BKL") & raw["penalty"].isin(PENALTIES)]
+    expected = set(zip(bkl["cell"], bkl["rep"], strict=True))
+    z = raw[raw["penalty"] == "BKL_u0"]
+    got = dict(zip(zip(z["cell"], z["rep"], strict=True), z["status"], strict=True))
+    missing = sorted(k for k in expected if k not in got)
+    mismatches = sorted((int(c), int(r), s) for (c, r), s in got.items() if s != "infeasible_start")
+    verdict = "fail" if mismatches else ("incomplete" if missing or not expected else "pass")
+    return {"verdict": verdict, "expected": len(expected), "replications": len(got),
+            "infeasible_start": int(sum(s == "infeasible_start" for s in got.values())),
+            "mismatches": mismatches[:50], "missing": [list(map(int, k)) for k in missing[:50]]}
 
 
 # ---------------------------------------------------------------- reporting
@@ -751,13 +813,15 @@ def _sci(x):
 
 def tables(S, verdicts):
     """``tab_E14.tex`` (longtable body with repeated head): per generator x p_c x n x penalty."""
-    heads = ["$g$", "$p_c$", "$n$", "Penalty", "Fail \\%", "(E1)", "(E1)--(E3)", "$\\lambda$",
-             "Bound", "Mean err", "Max $\\underline{\\mathrm{err}}$/bound", "Violations"]  # fmt: skip
+    heads = ["$g$", "$p_c$", "$n$", "Penalty", "Fail \\%", "CP up. \\%", "(E1)", "(E1)--(E3)",
+             "$\\lambda$", "Bound", "Mean err", "Max $\\underline{\\mathrm{err}}$/bound",
+             "Violations"]  # fmt: skip
     head = ["\\hline", " & ".join(heads) + END, "\\hline"]
-    lines = ["\\begin{tabular}{lrrlrrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
+    lines = ["\\begin{tabular}{lrrlrrrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
     for r in S.itertuples():
         lines.append(" & ".join([
             r.generator, str(r.p_c), str(r.n), LABEL[r.penalty], f"{100 * r.failure_rate:.1f}",
+            _fmt(100 * getattr(r, "failure_rate_cp_upper", float("nan")), 2),
             _fmt(r.E1_rate, 2), _fmt(r.events_rate, 2), _sci(r.lam_median), _sci(r.bound_median),
             _sci(r.err_mean), _fmt(r.max_err_over_bound, 3), str(int(r.bnd_violations)),
         ]) + END)  # fmt: skip
@@ -804,6 +868,8 @@ def reevaluate(stage0_json, raw, entropy=CONFIRMATORY_ENTROPY):
             beta[int(j)] = x
         ev = evaluate(des, generator(r.generator), beta, entropy, int(r.rep), block=REEVAL_BLOCK,
                       N=N_REEVAL)  # fmt: skip
+        if ev["eval_status"] != "ok":
+            raise FloatingPointError("non-finite re-evaluation")
         out.append({"cell": int(r.cell), "rep": int(r.rep), "penalty": r.penalty,
                     "err2_lower_1e6": float(r.err2_lower), "bound": float(r.bound),
                     "err2_1e7": ev["err2"], "err2_lower_1e7": ev["err2_lower"]})  # fmt: skip
