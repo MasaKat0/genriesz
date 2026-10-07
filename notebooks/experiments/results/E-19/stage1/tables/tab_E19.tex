@@ -1,0 +1,28 @@
+\begin{tabular}{llrrrrrrrl}
+\hline
+Part & Estimator & $n$ & Bias & $\sqrt{n}$SD (ref.) & SE ratio & Coverage (pred.) & Cov. succ. & Fail \% & Failures by status \\
+\hline
+\multicolumn{10}{l}{DGP19Q} \\
+ & ARW\_cf & 1000 & 0.001 & 1.53 (1.48) & 0.99 & 0.950 (0.950) & 0.950 & 0.0 ($\le$0.15) & -- \\
+ & ARW\_cf & 2000 & 0.001 & 1.53 (1.48) & 0.98 & 0.941 (0.950) & 0.941 & 0.0 ($\le$0.15) & -- \\
+ & ARW\_cf & 4000 & -0.001 & 1.45 (1.48) & 1.03 & 0.954 (0.950) & 0.954 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 1000 & 0.001 & 1.53 (1.48) & 0.99 & 0.950 (0.950) & 0.950 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 2000 & 0.001 & 1.53 (1.48) & 0.98 & 0.941 (0.950) & 0.941 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 4000 & -0.001 & 1.45 (1.48) & 1.03 & 0.954 (0.950) & 0.954 & 0.0 ($\le$0.15) & -- \\
+\multicolumn{10}{l}{DGP19L, random features} \\
+ & ARW\_cf & 1000 & -0.002 & 1.05 (1.02) & 0.98 & 0.942 & 0.942 & 0.0 ($\le$0.15) & -- \\
+ & ARW\_cf & 2000 & -0.001 & 1.04 (1.02) & 0.95 & 0.939 & 0.939 & 0.0 ($\le$0.15) & -- \\
+ & ARW\_cf & 4000 & -0.001 & 1.04 (1.02) & 0.94 & 0.933 & 0.933 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 1000 & -0.002 & 1.04 (1.02) & 0.98 & 0.944 & 0.944 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 2000 & -0.001 & 1.04 (1.02) & 0.96 & 0.940 & 0.940 & 0.0 ($\le$0.15) & -- \\
+ & TMLE\_cf & 4000 & -0.001 & 1.04 (1.02) & 0.94 & 0.933 & 0.933 & 0.0 ($\le$0.15) & -- \\
+\hline
+\multicolumn{10}{l}{Counterexamples (oracle perturbations, DGP19Q)} \\
+Example & Statistic & $n$ & \multicolumn{2}{r}{Estimate} & \multicolumn{2}{r}{Prediction} & \multicolumn{3}{r}{Population value at $n$} \\
+\hline
+(i) & $n\,\mathrm{Var}(\widehat\theta)/(V^*+1/2)$ & 1000 & \multicolumn{2}{r}{1.020} & \multicolumn{2}{r}{1.000} & \multicolumn{3}{r}{1.000} \\
+(i) & $n\,\mathrm{Var}(\widehat\theta)/(V^*+1/2)$ & 4000 & \multicolumn{2}{r}{0.969} & \multicolumn{2}{r}{1.000} & \multicolumn{3}{r}{1.000} \\
+(ii) & mean of $\sqrt{n}(\widehat\theta-\theta_0)$ & 1000 & \multicolumn{2}{r}{-2.394} & \multicolumn{2}{r}{-2.399} & \multicolumn{3}{r}{-2.399} \\
+(ii) & mean of $\sqrt{n}(\widehat\theta-\theta_0)$ & 4000 & \multicolumn{2}{r}{-3.429} & \multicolumn{2}{r}{-3.393} & \multicolumn{3}{r}{-3.393} \\
+\hline
+\end{tabular}
