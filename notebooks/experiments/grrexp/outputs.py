@@ -89,7 +89,7 @@ REGISTERED_OUTPUTS = {
     17: ("figures/fig_E17_bounds.pdf", "tables/tab_E17.tex"),
     18: ("figures/fig_E18_oracle.pdf", "tables/tab_E18_inference.tex", "macros_E-18.tex"),
     19: ("tables/tab_E19.tex", "figures/fig_E19_counterexamples.pdf"),
-    20: ("tables/tab_E20.tex",),
+    20: ("tables/tab_E20.tex", "tables/tab_E20_status.tex"),
     21: ("tables/tab_E21_ate.tex", "tables/tab_E21_att.tex"),
     22: (
         "tables/tab_E22_main.tex",
