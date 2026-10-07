@@ -216,3 +216,76 @@ def test_fmt_has_no_negative_zero() -> None:
     assert e21._fmt(-0.0001) == "0.000"
     assert e21._fmt(-0.0006) == "-0.001"
     assert e21._fmt(float("nan")) == "--"
+
+
+# ---------------------------------------------------------------- review fixes (round 1)
+
+
+def test_att_m_of_ignores_control_counterfactuals() -> None:
+    X = np.array([[0.0, 1.0], [1.0, 2.0]])
+
+    def f(rows):  # undefined at the control unit's counterfactual rows
+        return np.where(rows[:, 1] == 1.0, np.nan, 4.0 * rows[:, 0])
+
+    assert np.array_equal(e21.m_of("ATT", X, f, 0.5), np.array([0.0, 8.0]))
+
+
+def test_any_warning_invalidates_a_cv_candidate(monkeypatch) -> None:
+    X, _ = _toy(200, seed=10)
+    inner = fold_ids(len(X), e21.INNER, np.random.default_rng(2))
+    real = e21.baselines.run_recording_warnings
+
+    def noisy(fn):
+        result, counts, converged = real(fn)
+        return result, {"RuntimeWarning: injected": 1, **counts}, converged
+
+    monkeypatch.setattr(e21.baselines, "run_recording_warnings", noisy)
+    warn = e21._Warn()
+    st, mdl, lam, detail = e21.select_and_fit("ATE", "lin", "SQ", X, inner, 0.5, 0, warn, "t")
+    assert st == "cv_failed" and mdl is None
+    assert {d[2] for d in detail} == {"warning"}
+
+
+def test_records_are_finite_or_nonfinite_status() -> None:
+    D = np.array([0.0, 1.0])
+    big = e21._score_record("ATE", np.array([1e200, -1e200]), np.array([1e200, -1e200]), D, 0.5, {})
+    assert big["status"] == "ok" and np.isfinite(big["se"]) and np.isfinite(big["ess"])
+    over = e21._score_record("ATE", np.array([1e308, 1e308]), np.ones(2), D, 0.5, {})
+    assert over["status"] == "nonfinite"
+
+
+def test_all_failed_arm_summary_has_the_schema() -> None:
+    raw = _fake_raw(4)
+    raw["status"] = "cv_failed"
+    raw["estimate"] = np.nan
+    raw["se"] = np.nan
+    summ = e21.summarise(raw)
+    arw = summ[summ["arm"] == "ATE|lin-SQ|ARW"].iloc[0]
+    assert arw["coverage"] == 0.0 and np.isnan(arw["coverage_conditional"])
+    assert np.isnan(summ.loc[summ["arm"] == "ATE|RA", "coverage"]).all()
+    assert list(summ.columns) == ["arm", *e21.SUMMARY_COLUMNS, "s2"]
+
+
+def test_shared_fit_warnings_are_counted_once(monkeypatch) -> None:
+    X, Y = _toy(300, seed=11)
+    D = X[:, 0]
+    pi_hat = float(D.mean())
+    folds = fold_ids(len(X), e21.K, np.random.default_rng(3))
+    inner = {
+        k: fold_ids(int((folds != k).sum()), e21.INNER, np.random.default_rng(k))
+        for k in range(e21.K)
+    }
+
+    def fake_select(estimand, dictionary, gen_name, X_fit, inner_k, pi, seed, warn, tag):
+        warn.fits.append([tag, {"RuntimeWarning: injected": 1}])
+        mdl = e21.model(estimand, "lin", "SQ", 0.01, pi, 0)
+        mdl.fit(X_fit)
+        return "ok", mdl, 0.01, []
+
+    monkeypatch.setattr(e21, "select_and_fit", fake_select)
+    gamma = {k: (lambda rows: np.zeros(len(rows))) for k in range(e21.K)}
+    out = e21._grr_arms("ATE", X, Y, D, folds, inner, gamma, pi_hat, 0, True)
+    base = "ATE|lin-SQ"
+    assert out[f"{base}|ARW"]["n_warnings"] == e21.K
+    assert out[f"{base}|RW"]["n_warnings"] == 0 and out[f"{base}|TMLE"]["n_warnings"] == 0
+    assert json.loads(out[f"{base}|RW"]["warnings"]) == {"shared_with": "ARW"}

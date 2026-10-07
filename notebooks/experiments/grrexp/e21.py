@@ -177,9 +177,18 @@ def toggle(X, d):
 
 
 def m_of(estimand, X, pred, pi_hat):
-    """``m(W_i, f)`` for a function ``pred(rows)`` (ATE: f(1,x) - f(0,x); ATT: D(...)/pi)."""
-    diff = pred(toggle(X, 1.0)) - pred(toggle(X, 0.0))
-    return diff if estimand == "ATE" else X[:, 0] * diff / pi_hat
+    """``m(W_i, f)`` for a function ``pred(rows)`` (ATE: f(1,x) - f(0,x); ATT: D(...)/pi).
+
+    For the ATT, ``f`` is evaluated at the counterfactual rows of the treated units only
+    (``m`` vanishes on control units, whose counterfactual rows are not checked)."""
+    if estimand == "ATE":
+        return pred(toggle(X, 1.0)) - pred(toggle(X, 0.0))
+    out = np.zeros(len(X))
+    t = X[:, 0] != 0
+    if np.any(t):
+        Xt = X[t]
+        out[t] = X[t, 0] * (pred(toggle(Xt, 1.0)) - pred(toggle(Xt, 0.0))) / pi_hat
+    return out
 
 
 def center(estimand, theta, D, pi_hat):
@@ -198,13 +207,13 @@ class _Warn:
     """Warnings of the individual fits of one record (§1.1)."""
 
     def __init__(self):
-        self.fits, self.converged, self.last = [], True, True
+        self.fits, self.converged, self.last, self.last_counts = [], True, True, {}
 
     def run(self, tag, fn):
         result, counts, converged = baselines.run_recording_warnings(fn)
         if counts:
             self.fits.append([tag, counts])
-        self.last = converged
+        self.last, self.last_counts = converged, counts
         self.converged = self.converged and converged
         return result
 
@@ -276,8 +285,9 @@ def riesz_criterion(estimand, X_va, pred, pi_hat):
 def select_and_fit(estimand, dictionary, gen_name, X_fit, inner, pi_hat, center_seed, warn, tag):
     """Inner CV over ``LAM_GRID`` then the refit on ``X_fit``.
 
-    A candidate is valid when every inner fit succeeds without a convergence
-    warning and its validation and counterfactual predictions are in the domain.
+    A candidate is valid when every inner fit succeeds without any recorded warning,
+    its validation and counterfactual predictions are in the domain, and its
+    criterion is finite (the reason of an invalid candidate is in ``detail``).
     No valid candidate: ``cv_failed``. Returns ``(status, model, lam, detail)``."""
     crit = np.full(len(LAM_GRID), np.inf)
     detail = []
@@ -288,15 +298,19 @@ def select_and_fit(estimand, dictionary, gen_name, X_fit, inner, pi_hat, center_
             mdl = model(estimand, dictionary, gen_name, lam, pi_hat, center_seed)
             fr = warn.run(f"{tag}|cv|{lam:g}|{j}", lambda mdl=mdl, tr=tr: mdl.fit(X_fit[tr]))
             st = str(fr.status)
-            if st == "ok" and not warn.last:
-                st = "convergence_warning"
+            if st == "ok" and warn.last_counts:  # any recorded warning invalidates a candidate
+                st = "convergence_warning" if not warn.last else "warning"
             if st == "ok":
                 st, pred = _predict_checked(mdl, estimand, X_fit[va])
+            if st == "ok":
+                crit_j = riesz_criterion(estimand, X_fit[va], pred, pi_hat)
+                if not np.isfinite(crit_j):
+                    st = "nonfinite"
             if st != "ok":
                 detail.append([f"{lam:g}", j, st])
                 ok = False
                 break
-            total += riesz_criterion(estimand, X_fit[va], pred, pi_hat) * va.sum()
+            total += crit_j * va.sum()
         if ok and np.isfinite(total):
             crit[i] = total
     if not np.any(np.isfinite(crit)):
@@ -426,15 +440,41 @@ def autodml_fit(estimand, X_fit, pi_hat):
 # ---------------------------------------------------------------- one replication
 
 
-def _score_record(estimand, psi_parts, alpha, D, pi_hat, extra):
-    """``theta`` and the §1.4 standard error from ``m + alpha (Y - gamma)`` per row."""
-    theta = float(np.mean(psi_parts))
-    psi = psi_parts - center(estimand, theta, D, pi_hat)
-    if not (np.isfinite(theta) and np.all(np.isfinite(psi))):
+def _stable_sd(x):
+    """Population SD computed after scaling by ``max |x|`` (no overflow of ``x**2``)."""
+    s = float(np.max(np.abs(x)))
+    return 0.0 if s == 0.0 else s * float(np.std(x / s))
+
+
+def _stable_ess(alpha):
+    """``(sum |alpha|)^2 / sum alpha^2`` after scaling by ``max |alpha|``."""
+    a = np.abs(alpha) / float(np.max(np.abs(alpha)))
+    return float(np.sum(a) ** 2 / np.sum(a**2))
+
+
+def _estimate_record(estimand, theta, psi_parts, alpha, D, pi_hat, extra):
+    """The record of an estimate ``theta`` with the §1.4 standard error from the score
+    terms ``m + alpha (Y - gamma)`` centred at ``theta``; any non-finite quantity is
+    the status ``nonfinite``."""
+    if not (np.isfinite(theta) and np.all(np.isfinite(psi_parts)) and np.all(np.isfinite(alpha))):
         return _failed("nonfinite", **extra)
-    return {"estimate": theta, "se": float(np.std(psi) / np.sqrt(len(psi))), "status": "ok",
-            "max_abs_alpha": float(np.max(np.abs(alpha))), "ess": metrics.ess(alpha),
-            **extra}  # fmt: skip
+    psi = psi_parts - center(estimand, theta, D, pi_hat)
+    if not np.all(np.isfinite(psi)) or not np.any(alpha):
+        return _failed("nonfinite", **extra)
+    se = _stable_sd(psi) / math.sqrt(len(psi))
+    max_a = float(np.max(np.abs(alpha)))
+    ess = _stable_ess(alpha)
+    if not all(np.isfinite(v) for v in (se, max_a, ess)):
+        return _failed("nonfinite", **extra)
+    return {"estimate": float(theta), "se": se, "status": "ok", "max_abs_alpha": max_a,
+            "ess": ess, **extra}  # fmt: skip
+
+
+def _score_record(estimand, psi_parts, alpha, D, pi_hat, extra):
+    """ARW-type record: ``theta = mean(m + alpha (Y - gamma))``."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        theta = float(np.mean(psi_parts))
+    return _estimate_record(estimand, theta, psi_parts, alpha, D, pi_hat, extra)
 
 
 def replicate(task):
@@ -529,8 +569,11 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
         if status == "ok" and not out_ok:
             status = "convergence_warning"
         if status != "ok":
-            for est in ("ARW", "RW", "TMLE") if gen != "EB" else ("ARW",):
-                out[f"{base}|{est}"] = _failed(status, **extra)
+            out[f"{base}|ARW"] = _failed(status, **extra)
+            if gen != "EB":
+                shared = {**extra, "n_warnings": 0, "warnings": json.dumps({"shared_with": "ARW"})}
+                for est in ("RW", "TMLE"):
+                    out[f"{base}|{est}"] = _failed(status, **shared)
             continue
         extra["lam"] = float(np.mean(lams))
         if eb_diff:
@@ -538,20 +581,22 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
         out[f"{base}|ARW"] = _score_record(estimand, m_g + alpha * resid_g, alpha, D, pi_hat, extra)
         if gen == "EB":
             continue
+        # RW and TMLE share the fit of ARW: its warnings are counted once, on the ARW row
+        shared = {**extra, "n_warnings": 0, "warnings": json.dumps({"shared_with": "ARW"})}
         # RW: mean alpha_hat_{-k}(X) Y; standard error from the same score terms (§1.4)
-        theta_rw = float(np.mean(alpha * Y))
-        psi_rw = m_g + alpha * resid_g - center(estimand, theta_rw, D, pi_hat)
-        if not (np.isfinite(theta_rw) and np.all(np.isfinite(psi_rw))):
-            out[f"{base}|RW"] = _failed("nonfinite", **extra)
-        else:
-            out[f"{base}|RW"] = {"estimate": theta_rw, "se": float(np.std(psi_rw) / np.sqrt(n)),
-                                 "status": "ok", "max_abs_alpha": float(np.max(np.abs(alpha))),
-                                 "ess": metrics.ess(alpha), **extra}  # fmt: skip
+        with np.errstate(over="ignore", invalid="ignore"):
+            theta_rw = float(np.mean(alpha * Y))
+        out[f"{base}|RW"] = _estimate_record(estimand, theta_rw, m_g + alpha * resid_g, alpha, D,
+                                             pi_hat, shared)  # fmt: skip
         # TMLE (§1.4): linear fluctuation, epsilon pooled over the folds
-        eps = float(np.sum(alpha * resid_g) / np.sum(alpha**2))
-        parts = m_g + eps * m_a + alpha * (resid_g - eps * alpha)
-        out[f"{base}|TMLE"] = _score_record(estimand, parts, alpha, D, pi_hat,
-                                            {**extra, "epsilon": eps})  # fmt: skip
+        with np.errstate(over="ignore", invalid="ignore"):
+            eps = float(np.sum(alpha * resid_g) / np.sum(alpha**2))
+            parts = m_g + eps * m_a + alpha * (resid_g - eps * alpha)
+        if not np.isfinite(eps):
+            out[f"{base}|TMLE"] = _failed("nonfinite", **shared)
+        else:
+            out[f"{base}|TMLE"] = _score_record(estimand, parts, alpha, D, pi_hat,
+                                                {**shared, "epsilon": eps})  # fmt: skip
     return out
 
 
@@ -706,24 +751,38 @@ def eb_summary(raw):
             float(eb["eb_diff"].max()) if len(eb) else None, "tolerance": EB_TOL}  # fmt: skip
 
 
-def _arm_summary(g):
+SUMMARY_COLUMNS = ("R", "R_s", "failure_rate", "failure_rate_cp_upper", "status_counts",
+                   "bias", "sd", "rmse", "coverage", "coverage_conditional", "se_mean",
+                   "se_ratio", "max_weight_median", "ess_median")  # fmt: skip
+
+
+def _arm_summary(arm, g):
+    """Errors against the replication's true value. Inferential arms (all but RA):
+    unconditional coverage counts failures as non-covering (0 when every replication
+    fails); RA has no standard error and no coverage."""
+    nan = float("nan")
+    out = dict.fromkeys(SUMMARY_COLUMNS, nan)
     ok = (g["status"] == "ok").to_numpy()
     err = (g["estimate"] - g["theta0"]).to_numpy()
     se = g["se"].to_numpy()
-    out = metrics.failure_rate(ok, g["status"].to_numpy())
-    out["status_counts"] = json.dumps(out["status_counts"])
+    fr = metrics.failure_rate(ok, g["status"].to_numpy())
+    out.update(fr)
+    out["status_counts"] = json.dumps(fr["status_counts"])
     if ok.sum() >= 2:
         e = err[ok]
         out.update({"bias": float(e.mean()), "sd": float(np.std(e, ddof=1)),
                     "rmse": float(np.sqrt(np.mean(e**2)))})  # fmt: skip
-    if ok.any() and np.all(np.isfinite(se[ok])):
-        lo, hi = err - 1.959963984540054 * se, err + 1.959963984540054 * se
-        cov = ok & (lo <= 0) & (0 <= hi)
-        out.update({"coverage": float(cov.sum() / len(ok)),
-                    "coverage_conditional": float(cov.sum() / ok.sum()),
-                    "se_mean": float(np.mean(se[ok]))})  # fmt: skip
-        if "sd" in out and out["sd"] > 0:
-            out["se_ratio"] = out["se_mean"] / out["sd"]
+    if not arm.endswith("|RA"):
+        if ok.any() and not np.all(np.isfinite(se[ok])):
+            raise AssertionError(f"{arm}: a successful record without a finite SE")
+        z = 1.959963984540054
+        cov = ok & (err - z * se <= 0) & (0 <= err + z * se)
+        out["coverage"] = float(cov.sum() / len(ok))
+        if ok.any():
+            out["coverage_conditional"] = float(cov.sum() / ok.sum())
+            out["se_mean"] = float(np.mean(se[ok]))
+            if np.isfinite(out["sd"]) and out["sd"] > 0:
+                out["se_ratio"] = out["se_mean"] / out["sd"]
     if ok.any() and g["max_abs_alpha"][ok].notna().all():
         out["max_weight_median"] = float(np.median(g["max_abs_alpha"][ok]))
         out["ess_median"] = float(np.median(g["ess"][ok]))
@@ -736,8 +795,8 @@ def summarise(raw):
     rows = []
     for arm in ARM_LABELS:
         g = raw[raw["arm"] == arm].sort_values("rep")
-        rows.append({"arm": arm, **_arm_summary(g)})
-    summ = pd.DataFrame(rows)
+        rows.append({"arm": arm, **_arm_summary(arm, g)})
+    summ = pd.DataFrame(rows, columns=["arm", *SUMMARY_COLUMNS])
     summ["s2"] = (summ["coverage"] - 0.95).abs() <= S2_TOL
     summ.loc[summ["coverage"].isna(), "s2"] = False
     return summ
