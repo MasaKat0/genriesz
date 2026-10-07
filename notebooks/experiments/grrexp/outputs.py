@@ -84,7 +84,12 @@ REGISTERED_OUTPUTS = {
     ),
     13: ("figures/fig_E13_tangent.pdf", "tables/tab_E13.tex", "tables/tab_E13_status.tex"),
     14: ("figures/fig_E14_rate.pdf", "tables/tab_E14.tex"),
-    15: ("tables/tab_E15_exact.tex", "tables/tab_E15_mc.tex", "figures/fig_E15_coverage.pdf"),
+    15: (
+        "tables/tab_E15_exact.tex",
+        "tables/tab_E15_mc.tex",
+        "tables/tab_E15_status.tex",
+        "figures/fig_E15_coverage.pdf",
+    ),
     16: ("macros_E-16.tex", "tables/tab_E16.tex"),
     17: ("figures/fig_E17_bounds.pdf", "tables/tab_E17.tex"),
     18: ("figures/fig_E18_oracle.pdf", "tables/tab_E18_inference.tex", "macros_E-18.tex"),
