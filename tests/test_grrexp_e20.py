@@ -274,7 +274,7 @@ def test_fmt_has_no_negative_zero() -> None:
     assert e20._fmt(float("nan")) == "--"
 
 
-# ---------------------------------------------------------------- labels, predictions and failure paths
+# ------------------------------------------------ labels, predictions and failure paths
 
 
 def test_recorder_labels_are_valid_and_distinct() -> None:
