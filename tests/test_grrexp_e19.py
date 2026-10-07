@@ -268,3 +268,14 @@ def test_unavailable_tests_are_not_read_as_non_rejections(pop, pilot) -> None:
     some = {k: v for k, v in tests.items()}
     sentence = e19.family_sentence(verdict, some, unavailable[:1])
     assert "1 of 4 tests unavailable" in sentence
+
+
+def test_ess_is_scale_free() -> None:
+    from grrexp import metrics
+
+    # the weights are divided by their maximum before the ESS (no overflow at 1e152)
+    a = np.full(300, 1e152)
+    assert math.isclose(metrics.ess(a / np.max(np.abs(a))), 300.0, rel_tol=1e-12)
+    X, Y = _rows(300, 6)
+    arw, _ = e19._inference(X, Y, fold_ids(300, e19.K, np.random.default_rng(2)))
+    assert 0 < arw["ess"] <= 300

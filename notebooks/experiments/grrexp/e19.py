@@ -503,7 +503,17 @@ def _crossfit(X, Y, folds, riesz_basis, gamma_feats, penalty, lam_riesz, lam_rid
             # evaluation-sample imbalance (§1.5) on the Riesz dictionary of the fold
             eval_imb.append(_eval_imbalance(af, bas, Xt))
         status, arw, tmle = _scores(a, da, g_hat, dg_hat, Y)
-        out.update(arw=arw, tmle=tmle)
+        if status != "ok":
+            return status
+        # diagnostics (§1.5), computed inside the recorder and checked; the ESS is
+        # scale-free, so it is computed from the weights divided by their maximum
+        top = float(np.max(np.abs(a)))
+        ess = metrics.ess(a / top) if top > 0 else float("nan")
+        diag = {"max_abs_alpha": top, "ess": ess, "eval_imbalance": float(max(eval_imb))}
+        if not _finite(*diag.values()):
+            detail.append(["all", "diagnostics", "nonfinite"])
+            return "nonfinite"
+        out.update(arw=arw, tmle=tmle, diag=diag)
         return status
 
     status, other, converged = baselines.run_recording_warnings(run)
@@ -513,8 +523,7 @@ def _crossfit(X, Y, folds, riesz_basis, gamma_feats, penalty, lam_riesz, lam_rid
     if status != "ok" or not converged:
         failed = _failed(status if status != "ok" else "convergence_warning", **common)
         return failed, dict(failed)
-    weights = {"max_abs_alpha": float(np.max(np.abs(a))), "ess": metrics.ess(a),
-               "eval_imbalance": float(max(eval_imb))}  # fmt: skip
+    weights = out["diag"]
     theta, se = out["arw"]
     theta_t, se_t, eps = out["tmle"]
     arw = {"estimate": theta, "se": se, "status": "ok", **weights, **common}
