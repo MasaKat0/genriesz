@@ -101,6 +101,8 @@ REGISTERED_OUTPUTS = {
         "tables/tab_E22_full.tex",
         "tables/tab_E22_smd.tex",
         "figures/fig_E22_love.pdf",
+        "tables/tab_E22_diag.tex",
+        "tables/tab_E22_status.tex",
     ),
     23: ("tables/tab_E23.tex",),
     24: ("tables/tab_E24.tex", "figures/fig_E24_rmse.pdf", "macros_E-24.tex"),
