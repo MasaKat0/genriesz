@@ -379,17 +379,19 @@ def test_replicate_routes_the_registered_streams(monkeypatch) -> None:
 
 
 def test_d3_tunes_and_fits_on_outer_training_rows_only(monkeypatch) -> None:
-    """Per outer fold k, in order: the selector sees exactly the training rows of k; every
-    basis fit inside the selection uses inner-training rows only (their complements in the
-    training rows are the inner validation folds, which partition them); the last fit of
-    fold k is the refit on exactly its training rows. No fit sees an evaluation row of k."""
+    """Per outer fold k, in order: the selector sees exactly the training rows of k; each
+    basis fit inside a scored candidate is matched to its inner fold (genriesz fits the
+    candidate basis once per inner fold, in the order of ``inner_folds``) and uses exactly
+    that fold's inner-training rows, never its validation rows; the last fit of fold k is
+    the refit on exactly its training rows. No fit sees an evaluation row of k."""
     import genriesz.estimation as est
+    import genriesz.model_selection as ms
 
     D, Y, Zs, _, X = synthetic(n=250, seed=14)
     folds = fold_ids(len(Y), e22.K, np.random.default_rng(7))
     key = {tuple(np.round(r, 12)): i for i, r in enumerate(X)}
-    events = []
-    real_select = est.select_grr_hyperparams
+    events, expected = [], []
+    real_select, real_score = est.select_grr_hyperparams, ms.score_grr_candidate
     real_fit = e22.ATTArmBasis.fit
 
     def rows(A):
@@ -399,29 +401,41 @@ def test_d3_tunes_and_fits_on_outer_training_rows_only(monkeypatch) -> None:
         events.append(("select", rows(kw["X_train"])))
         return real_select(**kw)
 
+    def score(**kw):
+        Xt = kw["X_train"]
+        expected.extend((rows(Xt[f.train]), rows(Xt[f.test])) for f in kw["inner_folds"])
+        events.append(("score", None))
+        return real_score(**kw)
+
     def fit(self, X_, y=None):
         if self.dictionary == "D3":
-            events.append(("fit", rows(X_)))
+            f = rows(X_)
+            if expected:  # inside a scored candidate: the next inner fold
+                tr, va = expected.pop(0)
+                events.append(("inner_fit", (f, tr, va)))
+            else:
+                events.append(("fit", f))
         return real_fit(self, X_, y)
 
     monkeypatch.setattr(est, "select_grr_hyperparams", select)
+    monkeypatch.setattr(ms, "score_grr_candidate", score)
     monkeypatch.setattr(e22.ATTArmBasis, "fit", fit)
     out = e22._grr_arm("SQ-D3", X, Y, D, Zs, folds, 4, 5)
     assert out["ARW"]["status"] == "ok"
+    assert not expected  # every inner fold of every scored candidate fitted a basis
     starts = [i for i, e in enumerate(events) if e[0] == "select"]
     assert len(starts) == e22.K and starts[0] == 0
     for k, s in enumerate(starts):
         train = frozenset(np.flatnonzero(folds != k))
         seg = events[s:(starts[k + 1] if k + 1 < len(starts) else len(events))]
         assert seg[0] == ("select", train)
-        fits = [f for kind, f in seg[1:] if kind == "fit"]
-        assert fits[-1] == train  # the outer refit
-        inner = fits[:-1]
-        assert inner and all(f < train for f in inner)  # strict subsets of the training rows
-        holdouts = {train - f for f in inner}
-        assert len(holdouts) == e22.INNER_FOLDS
-        assert frozenset().union(*holdouts) == train
-        assert sum(len(h) for h in holdouts) == len(train)  # the inner folds partition train
+        inner = [e[1] for e in seg if e[0] == "inner_fit"]
+        assert len(inner) == len(e22.LAMBDA_GRID) * e22.INNER_FOLDS
+        for f, tr, va in inner:
+            assert f == tr and not f & va  # exactly its inner-training rows
+            assert tr | va == train and not tr & va
+        assert [e for e in seg if e[0] == "fit"] == [("fit", train)]  # the outer refit
+        assert seg[-1] == ("fit", train)
 
 
 def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypatch) -> None:
