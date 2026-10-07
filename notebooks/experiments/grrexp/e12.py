@@ -316,12 +316,13 @@ class _FitWarnings:
     """``fit_hook`` of ``grr_functional``: records the warnings of each individual fit."""
 
     def __init__(self):
-        self.fits, self.converged = [], True
+        self.fits, self.converged, self.last_converged = [], True, True
 
     def hook(self, stage, fold, fit):
         result, counts, converged = baselines.run_recording_warnings(fit)
         if counts:
             self.fits.append([int(fold), stage, counts])
+        self.last_converged = converged
         self.converged = self.converged and converged
         return result
 
@@ -444,21 +445,20 @@ def _rw_full(X, Y, arm, rs):
     fw = _FitWarnings()
     fr = fw.hook("riesz", -1, lambda: model.fit(X, tol=SAMPLE_TOL))  # fold -1: the full sample
     detail = json.dumps([["full", "riesz", str(fr.status), str(fr.message)]])
-    if fr.status != "ok" or not fw.converged:
+    if fr.status != "ok":
         diag, diag_counts = {}, {}
-        if fr.status != "ok" and arm in BP_ARMS:
+        if arm in BP_ARMS:
             diag, diag_counts, _ = baselines.run_recording_warnings(
                 lambda: _bp_diagnostic(arm, rs, X)
             )
-        status = fr.status if fr.status != "ok" else "convergence_warning"
         return _failed(
-            status, fold_status=detail, **_warning_record(fw.fits, None, diag_counts), **diag
+            fr.status, fold_status=detail, **_warning_record(fw.fits, None, diag_counts), **diag
         ), None
     inf, other, converged = baselines.run_recording_warnings(
         lambda: gr().rw_full_inference(grr=model, X=X, Y=Y)
     )
     common = {"fold_status": detail, **_warning_record(fw.fits, other)}
-    if not converged:
+    if not (converged and fw.converged):
         return _failed("convergence_warning", **common), None
     a = np.asarray(model.predict_alpha(X), dtype=float)
     imb, scale = _balance(model, X)
@@ -489,7 +489,7 @@ def _arw_ef(X, Y, folds):
             tr, te = folds != k, folds == k
             model = _grr_model("UKL1", "Include")
             fr = fw.hook("riesz", k, lambda m=model, rows=te: m.fit(X[rows], tol=SAMPLE_TOL))
-            status = str(fr.status) if fw.converged else "convergence_warning"
+            status = str(fr.status) if fw.last_converged else "convergence_warning"
             detail.append([str(int(k)), "riesz", status, str(fr.message)])
             if status != "ok":
                 return status
@@ -505,10 +505,8 @@ def _arw_ef(X, Y, folds):
             if np.any(nonfinite):
                 detail.append([str(int(k)), "prediction", "nonfinite", ""])
                 return "nonfinite"
+            # a warning of the outcome fit fails the replication after the loop (as before)
             pred = fw.hook("outcome", k, lambda tr=tr: _ols(X, Y, "Include", X[tr], Y[tr]))
-            if not fw.converged:
-                detail.append([str(int(k)), "outcome", "convergence_warning", ""])
-                return "convergence_warning"
             m_g = pred(np.column_stack([np.ones(te.sum()), Xt[:, 1:]])) - pred(
                 np.column_stack([np.zeros(te.sum()), Xt[:, 1:]])
             )
@@ -517,6 +515,7 @@ def _arw_ef(X, Y, folds):
         return "ok" if np.all(np.isfinite(psi)) else "nonfinite"
 
     status, other, converged = baselines.run_recording_warnings(fit)
+    converged = converged and fw.converged
     common = {
         **_warning_record(fw.fits, other),
         "fold_status": json.dumps(detail),

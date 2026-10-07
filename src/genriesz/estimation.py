@@ -967,7 +967,12 @@ def grr_functional(
                 l1_radius=riesz_l1_radius,
             )
             if grr.solver == "lbfgs":
-                fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+                fit_result = _run_fit(
+                    fit_hook, "riesz", fold_id,
+                    lambda grr=grr, X_tr=X_tr: grr.fit(
+                        X_tr, max_iter=max_iter, tol=tol, verbose=verbose
+                    ),
+                )  # fmt: skip
             else:
                 fit_result = _run_fit(
                     fit_hook, "riesz", fold_id,

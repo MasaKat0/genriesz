@@ -349,3 +349,26 @@ def test_fit_hook_sees_every_nuisance_fit_and_records_warnings() -> None:
     rec = e12._warning_record(fw.fits, {"UserWarning: x": 2}, {"UserWarning: d": 1})
     assert rec["n_warnings"] == 4
     assert json.loads(rec["warnings"])["diagnostic"] == {"UserWarning: d": 1}
+
+
+def test_fit_hook_covers_the_lbfgs_representer_fit() -> None:
+    X, Y, basis = _ate_sample(seed=3)
+    basis.fit(X)
+    seen = []
+
+    def hook(stage, fold, fit):
+        seen.append(stage)
+        return fit()
+
+    gr.grr_functional(
+        X=X,
+        Y=Y,
+        m=gr.ATEFunctional(0),
+        basis=basis,
+        generator=gr.SquaredGenerator(C=0.0),
+        riesz_solver="lbfgs",
+        fold_ids=np.arange(len(Y)) % 3,
+        estimators=("arw",),
+        fit_hook=hook,
+    )
+    assert seen.count("riesz") == 3
