@@ -21,6 +21,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import os
 import platform
 import re
 import subprocess
@@ -297,15 +298,29 @@ def computation_inputs(commit: str, notebook_rel: str, root: Path | None = None)
     return dict(sorted(out.items()))
 
 
+PARENT_ENV = "GRREXP_PARENT_REPO"
+
+
 def parent_state() -> dict:
-    parent = GENRIESZ_ROOT.parent
-    return {
+    """The parent repository's commit and its recorded genriesz gitlink (read only).
+
+    A run from a ``git worktree`` of genriesz outside the parent repository names the
+    parent with ``GRREXP_PARENT_REPO``; its submodule path is then ``genriesz`` and the
+    worktree path is recorded.
+    """
+    override = os.environ.get(PARENT_ENV)
+    parent = Path(override) if override else GENRIESZ_ROOT.parent
+    name = "genriesz" if override else GENRIESZ_ROOT.name
+    state = {
         "sha": _git(parent, "rev-parse", "HEAD").strip(),
-        "gitlink": _git(parent, "ls-tree", "HEAD", GENRIESZ_ROOT.name).split()[2],
+        "gitlink": _git(parent, "ls-tree", "HEAD", name).split()[2],
         "dirty_tracked": bool(
             _git(parent, "status", "--porcelain", "--untracked-files=no").strip()
         ),
     }
+    if override:
+        state["genriesz_worktree"] = str(GENRIESZ_ROOT)
+    return state
 
 
 def pip_freeze() -> tuple[str, str]:
