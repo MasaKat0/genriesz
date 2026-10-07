@@ -173,7 +173,8 @@ def test_counterfactual_overflow_of_a_finite_ukl_coordinate_is_rejected() -> Non
 
 
 def test_backtracking_and_failed_acceptance() -> None:
-    # starting next to the BKL boundary (|alpha_ref| = 1.01), the full Newton step leaves the domain:
+    # starting next to the BKL boundary (|alpha_ref| = 1.01), the full Newton step leaves the
+    # domain:
     # with halvings the solve converges, without them it stops with "linesearch"
     bkl = gr.BKLGenerator(C=1.0, branch_fn=sign)
     X, w, Phi, M, _ = ate_population(0.8, 1.5)
