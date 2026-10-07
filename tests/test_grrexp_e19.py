@@ -86,7 +86,7 @@ def test_dgamma0_is_the_derivative_of_gamma0() -> None:
 
 def test_sq_riesz_matches_the_closed_form_and_its_derivative() -> None:
     X, _ = _rows(400, 7)
-    status, af, daf, imb = e19._fit_sq_riesz(X, e19.alpha_basis(), None, 0.0)
+    status, af, daf, imb, _ = e19._fit_sq_riesz(X, e19.alpha_basis(), None, 0.0)
     assert status == "ok" and imb <= 1e-8
     Phi, M = e19.feat_alpha(X), e19.dfeat_alpha(X)
     beta = np.linalg.solve(Phi.T @ Phi / len(X), M.mean(axis=0))  # alpha = Phi beta
@@ -100,7 +100,7 @@ def test_sq_riesz_matches_the_closed_form_and_its_derivative() -> None:
 
 def test_rff_riesz_derivative_matches_finite_differences() -> None:
     X, _ = e19.draw_l(np.random.default_rng(3), 300)
-    status, af, daf, _ = e19._fit_sq_riesz(X, e19.rff_basis(11), "l2", e19.RIESZ_LAM)
+    status, af, daf, _, _ = e19._fit_sq_riesz(X, e19.rff_basis(11), "l2", e19.RIESZ_LAM)
     assert status == "ok"
     h = 1e-6
     Xp, Xm = X.copy(), X.copy()
@@ -117,7 +117,7 @@ def test_crossfit_arw_and_tmle_follow_the_definitions() -> None:
     a, da, g, dg = (np.empty(len(Y)) for _ in range(4))
     for k in range(e19.K):
         tr, te = folds != k, folds == k
-        _, af, daf, _ = e19._fit_sq_riesz(X[tr], e19.alpha_basis(), None, 0.0)
+        _, af, daf, _, _ = e19._fit_sq_riesz(X[tr], e19.alpha_basis(), None, 0.0)
         coef, *_ = np.linalg.lstsq(e19.feat_gamma(X[tr]), Y[tr], rcond=None)
         a[te], da[te] = af(X[te]), daf(X[te])
         g[te], dg[te] = e19.feat_gamma(X[te]) @ coef, e19.dfeat_gamma(X[te]) @ coef
@@ -128,6 +128,10 @@ def test_crossfit_arw_and_tmle_follow_the_definitions() -> None:
     assert math.isclose(tmle["estimate"], np.mean(dg + eps * da), abs_tol=1e-10)
     # the fluctuation solves the score equation along alpha_hat
     assert abs(np.sum(a * (Y - g - eps * a))) < 1e-8
+    g_s, dg_s = g + eps * a, dg + eps * da
+    psi_t = dg_s + a * (Y - g_s) - np.mean(dg_s)
+    assert math.isclose(tmle["se"], np.sqrt(np.mean(psi_t**2) / len(Y)), abs_tol=1e-12)
+    assert arw["ess"] > 0 and np.isfinite(arw["eval_imbalance"])
 
 
 def test_counterexamples_use_the_registered_perturbations() -> None:
@@ -214,3 +218,53 @@ def test_summary_families_table_and_figure(pop, pilot) -> None:
 
 def test_fmt_has_no_negative_zero() -> None:
     assert e19._fmt(-0.0001) == "0.000" and e19._fmt(-0.01) == "-0.010" and e19._fmt(None) == "--"
+
+
+def test_nonfinite_scores_fail_both_arms() -> None:
+    X, Y = _rows(300, 2)
+    folds = fold_ids(len(Y), e19.K, np.random.default_rng(1))
+    arw, tmle = e19._inference(X, Y * 1e200, folds)
+    assert arw["status"] == tmle["status"] == "nonfinite"
+    assert np.isnan(arw["estimate"]) and np.isnan(tmle["se"])
+    Y_bad = Y.copy()
+    Y_bad[0] = np.inf
+    out = e19._counterexamples(X, Y_bad, len(Y))
+    assert out["Cex_i"]["status"] == "nonfinite" and np.isnan(out["Cex_i"]["se"])
+
+
+def test_family_inputs_match_independent_computations(pop, pilot) -> None:
+    from grrexp import inference
+
+    summ = e19.summarise(pilot, pop)
+    _, tests, _ = e19.family_inf(summ, pilot)
+    th, v = pop["inference"]["theta0"], pop["inference"]["V_star"]
+    g = pilot[(pilot["arm"] == "inference|ARW_cf") & (pilot["n"] == 1000)].sort_values("rep")
+    ok = g["status"] == "ok"
+    x, se = g.loc[ok, "estimate"].to_numpy(), g.loc[ok, "se"].to_numpy()
+    covered = int(np.sum(np.abs(x - th) <= 1.96 * se))
+    assert tests["ARW_cf|n=1000|coverage"] == inference.coverage_pvalue(
+        covered, len(g), pop["inference"]["c_n"]["1000"]
+    )
+    assert tests["ARW_cf|n=1000|sd_ratio"] == inference.sd_ratio_pvalue(x, np.sqrt(v), 1000)
+    assert tests["ARW_cf|n=1000|bias"] == inference.bias_pvalue(x, th, 0.0, np.sqrt(v), 1000)
+    _, tc, _ = e19.family_cex(summ, pilot, pop)
+    gi = pilot[(pilot["arm"] == "counterexamples|Cex_ii") & (pilot["n"] == 4000)]
+    xi = gi.loc[gi["status"] == "ok", "estimate"].to_numpy()
+    rb = np.sqrt(4000) * (xi.mean() - th)
+    rb_se = np.sqrt(4000) * xi.std(ddof=1) / np.sqrt(xi.size)
+    pred = -(4000**0.25) * pop["counterexamples"]["f_D_at_0"]
+    assert math.isclose(tc["Cex_ii|n=4000"], inference.interval_null_pvalue(rb, rb_se, pred, pred))
+
+
+def test_unavailable_tests_are_not_read_as_non_rejections(pop, pilot) -> None:
+    raw = pilot.copy()
+    cex = raw["part"] == "counterexamples"
+    raw.loc[cex, "status"] = "nonfinite"
+    raw.loc[cex, ["estimate", "se"]] = np.nan
+    summ = e19.summarise(raw, pop)
+    verdict, tests, unavailable = e19.family_cex(summ, raw, pop)
+    assert len(unavailable) == len(tests) == 4
+    assert "not evaluable" in e19.family_sentence(verdict, tests, unavailable)
+    some = {k: v for k, v in tests.items()}
+    sentence = e19.family_sentence(verdict, some, unavailable[:1])
+    assert "1 of 4 tests unavailable" in sentence

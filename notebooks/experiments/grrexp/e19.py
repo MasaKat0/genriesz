@@ -411,7 +411,7 @@ class _Rec:
 
 def _fit_sq_riesz(X_fit, basis, penalty, lam):
     """SQ-Riesz (C = 0, compatible link alpha = u/2, no offset) for the AME. Returns
-    ``(status, alpha_fn, dalpha_fn, train_imbalance)``."""
+    ``(status, alpha_fn, dalpha_fn, train_imbalance, fitted_basis)``."""
     g = gr()
     mdl = g.GRRGLM(
         basis=basis, generator=g.SquaredGenerator(C=0.0), functional=g.AMEFunctional(0),
@@ -419,7 +419,7 @@ def _fit_sq_riesz(X_fit, basis, penalty, lam):
     )  # fmt: skip
     fr = mdl.fit(X_fit, tol=SAMPLE_TOL)
     if fr.status != "ok":
-        return str(fr.status), None, None, None
+        return str(fr.status), None, None, None, None
     beta = np.asarray(mdl.beta_, dtype=float)
 
     def alpha(rows):
@@ -432,7 +432,7 @@ def _fit_sq_riesz(X_fit, basis, penalty, lam):
     Phi = np.asarray(mdl.basis(X_fit), dtype=float)
     M = np.asarray(mdl.basis.derivative(X_fit, 0), dtype=float)
     imb = float(np.max(np.abs(np.mean(alpha(X_fit)[:, None] * Phi - M, axis=0))))
-    return "ok", alpha, dalpha, imb
+    return "ok", alpha, dalpha, imb, mdl.basis
 
 
 def _ols(F, y, lam=0.0):
@@ -444,17 +444,46 @@ def _ols(F, y, lam=0.0):
     return np.linalg.solve(F.T @ F / n + lam * np.eye(p), F.T @ y / n)
 
 
+def _finite(*values):
+    return all(np.all(np.isfinite(np.asarray(v, dtype=float))) for v in values)
+
+
+def _scores(a, da, g_hat, dg_hat, Y):
+    """ARW (§1.4) and TMLE (§1.4, §1.3 E) from the cross-fitted nuisances. Returns
+    ``(status, arw, tmle)``; every quantity is checked before ``ok`` is returned."""
+    n = len(Y)
+    psi = dg_hat + a * (Y - g_hat)
+    theta = float(np.mean(psi))
+    se = float(np.std(psi - theta) / np.sqrt(n))  # §1.4: sigma^2 = P_n psi^2
+    denom = float(np.sum(a**2))
+    if not (_finite(psi, theta, se, denom) and denom > 0):
+        return "nonfinite", None, None
+    # TMLE: linear fluctuation of the cross-fitted regression along alpha_hat
+    eps = float(np.sum(a * (Y - g_hat)) / denom)
+    g_star, dg_star = g_hat + eps * a, dg_hat + eps * da
+    theta_t = float(np.mean(dg_star))
+    psi_t = dg_star + a * (Y - g_star) - theta_t
+    se_t = float(np.sqrt(np.mean(psi_t**2) / n))
+    if not _finite(eps, g_star, dg_star, theta_t, psi_t, se_t):
+        return "nonfinite", None, None
+    return "ok", (theta, se), (theta_t, se_t, eps)
+
+
 def _crossfit(X, Y, folds, riesz_basis, gamma_feats, penalty, lam_riesz, lam_ridge):
-    """ARW_cf and TMLE_cf (§1.4) with fold-wise SQ-Riesz and (ridge) least squares."""
+    """ARW_cf and TMLE_cf (§1.4) with fold-wise SQ-Riesz and (ridge) least squares.
+
+    The nuisances, the scores, the fluctuation and the SEs are computed inside the
+    warning recorder; a non-finite value anywhere fails both arms (``nonfinite``)."""
     n = len(Y)
     a, da, g_hat, dg_hat = (np.empty(n) for _ in range(4))
-    detail, imb = [], []
+    detail, imb, eval_imb = [], [], []
     rec = _Rec()
+    out = {}
 
     def run():
         for k in np.unique(folds):
             tr, te = folds != k, folds == k
-            status, af, daf, im = rec.run(
+            status, af, daf, im, bas = rec.run(
                 "riesz", k, lambda tr=tr: _fit_sq_riesz(X[tr], riesz_basis(k), penalty, lam_riesz)
             )
             if status == "ok" and not rec.last_converged:
@@ -468,8 +497,14 @@ def _crossfit(X, Y, folds, riesz_basis, gamma_feats, penalty, lam_riesz, lam_rid
             Xt = X[te]
             a[te], da[te] = af(Xt), daf(Xt)
             g_hat[te], dg_hat[te] = feats(Xt) @ coef, dfeats(Xt) @ coef
-        vals = (a, da, g_hat, dg_hat)
-        return "ok" if all(np.all(np.isfinite(v)) for v in vals) else "nonfinite"
+            if not _finite(a[te], da[te], g_hat[te], dg_hat[te]):
+                detail.append([str(int(k)), "prediction", "nonfinite"])
+                return "nonfinite"
+            # evaluation-sample imbalance (§1.5) on the Riesz dictionary of the fold
+            eval_imb.append(_eval_imbalance(af, bas, Xt))
+        status, arw, tmle = _scores(a, da, g_hat, dg_hat, Y)
+        out.update(arw=arw, tmle=tmle)
+        return status
 
     status, other, converged = baselines.run_recording_warnings(run)
     converged = converged and rec.converged
@@ -478,29 +513,20 @@ def _crossfit(X, Y, folds, riesz_basis, gamma_feats, penalty, lam_riesz, lam_rid
     if status != "ok" or not converged:
         failed = _failed(status if status != "ok" else "convergence_warning", **common)
         return failed, dict(failed)
-    psi = dg_hat + a * (Y - g_hat)
-    theta = float(np.mean(psi))
-    arw = {
-        "estimate": theta,
-        "se": float(np.std(psi - theta) / np.sqrt(n)),  # §1.4: sigma^2 = P_n psi^2
-        "status": "ok",
-        "max_abs_alpha": float(np.max(np.abs(a))),
-        **common,
-    }
-    # TMLE (§1.4): linear fluctuation of the cross-fitted regression along alpha_hat
-    eps = float(np.sum(a * (Y - g_hat)) / np.sum(a**2))
-    g_star, dg_star = g_hat + eps * a, dg_hat + eps * da
-    theta_t = float(np.mean(dg_star))
-    psi_t = dg_star + a * (Y - g_star) - theta_t
-    tmle = {
-        "estimate": theta_t,
-        "se": float(np.sqrt(np.mean(psi_t**2) / n)),  # §1.3 E
-        "status": "ok",
-        "max_abs_alpha": float(np.max(np.abs(a))),
-        "epsilon": eps,
-        **common,
-    }
+    weights = {"max_abs_alpha": float(np.max(np.abs(a))), "ess": metrics.ess(a),
+               "eval_imbalance": float(max(eval_imb))}  # fmt: skip
+    theta, se = out["arw"]
+    theta_t, se_t, eps = out["tmle"]
+    arw = {"estimate": theta, "se": se, "status": "ok", **weights, **common}
+    tmle = {"estimate": theta_t, "se": se_t, "status": "ok", "epsilon": eps, **weights, **common}
     return arw, tmle
+
+
+def _eval_imbalance(af, basis, Xt):
+    """``max_j |P_fold[alpha_hat phi_j - d phi_j / d d]|`` on the evaluation fold."""
+    Phi = np.asarray(basis(Xt), dtype=float)
+    M = np.asarray(basis.derivative(Xt, 0), dtype=float)
+    return float(np.max(np.abs(np.mean(af(Xt)[:, None] * Phi - M, axis=0))))
 
 
 def _inference(X, Y, folds):
@@ -528,29 +554,33 @@ def _illustration(X, Y, folds, seed):
 
 def _counterexamples(X, Y, n):
     """Oracle perturbations of ``rem:ame_conditions`` (alpha_hat = alpha_0, not fitted;
-    the fold structure plays no role): the full-sample score average and its sample SD."""
+    the fold structure plays no role): the full-sample score average and its sample SD,
+    computed inside the warning recorder and checked for finiteness."""
     a0 = alpha0_q(X)
     d = X[:, 0]
     j = math.ceil(math.sqrt(n))
-    out = {}
-    g_i = gamma0(X) + np.sin(j * d) / j
-    dg_i = dgamma0(X) + np.cos(j * d)
     c = n**-0.25
-    g_ii = gamma0(X) + c * (d > 0)
-    dg_ii = dgamma0(X)  # the almost-everywhere derivative of the indicator is 0
-    for name, g, dg in (("Cex_i", g_i, dg_i), ("Cex_ii", g_ii, dg_ii)):
-        psi = dg + a0 * (Y - g)
-        theta = float(np.mean(psi))
-        if not np.all(np.isfinite(psi)):
-            out[name] = _failed("nonfinite", n_warnings=0, warnings="{}")
-            continue
-        out[name] = {
-            "estimate": theta,
-            "se": float(np.std(psi - theta) / np.sqrt(n)),
-            "status": "ok",
-            "n_warnings": 0,
-            "warnings": "{}",
-        }
+    arms = {
+        "Cex_i": (gamma0(X) + np.sin(j * d) / j, dgamma0(X) + np.cos(j * d)),
+        # the almost-everywhere derivative of the indicator is 0
+        "Cex_ii": (gamma0(X) + c * (d > 0), dgamma0(X)),
+    }
+    out = {}
+    for name, (g, dg) in arms.items():
+
+        def score(g=g, dg=dg):
+            psi = dg + a0 * (Y - g)
+            theta = float(np.mean(psi))
+            return psi, theta, float(np.std(psi - theta) / np.sqrt(n))
+
+        (psi, theta, se), counts, converged = baselines.run_recording_warnings(score)
+        fields = {"n_warnings": int(sum(counts.values())), "warnings": json.dumps({"other": counts})}
+        if not _finite(psi, theta, se):
+            out[name] = _failed("nonfinite", **fields)
+        elif not converged:
+            out[name] = _failed("convergence_warning", **fields)
+        else:
+            out[name] = {"estimate": theta, "se": se, "status": "ok", **fields}
     return out
 
 
@@ -588,7 +618,10 @@ def tasks_for(entropy, reps=None, cells=None):
 
 # ---------------------------------------------------------------- aggregation
 
-NUMERIC_FIELDS = ("estimate", "se", "max_abs_alpha", "train_imbalance_max", "epsilon", "n_warnings")
+NUMERIC_FIELDS = (
+    "estimate", "se", "max_abs_alpha", "ess", "eval_imbalance", "train_imbalance_max", "epsilon",
+    "n_warnings",
+)  # fmt: skip
 TEXT_FIELDS = ("status", "warnings", "fold_status")
 
 
@@ -647,8 +680,11 @@ def summarise(raw, pop):
             if r_s >= 1:
                 row.update(metrics.ci_length(se, ok))
                 if part != "counterexamples":
-                    row["max_abs_alpha_median"] = float(g.loc[ok, "max_abs_alpha"].median())
+                    row.update(metrics.max_weight_summary(g["max_abs_alpha"].to_numpy(), ok))
+                    row["ess_median"] = float(g.loc[ok, "ess"].median())
                     row["train_imbalance_max"] = float(g.loc[ok, "train_imbalance_max"].max())
+                    row["eval_imbalance_median"] = float(g.loc[ok, "eval_imbalance"].median())
+                    row["eval_imbalance_max"] = float(g.loc[ok, "eval_imbalance"].max())
             if r_s >= 2:
                 var, m4 = metrics.moment_terms(x)
                 row.update({"moment_var": var, "moment_m4": m4, "moment_radicand": m4 - var**2})
@@ -682,6 +718,21 @@ def summarise(raw, pop):
                     row["root_n_bias_pred"] = cex["ii"][str(n)]["mean_root_n_error"]
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def family_sentence(verdict, tests, unavailable):
+    """The family's conclusion. An unavailable test stays in the Holm family as ``p = 1``
+    (so the multiplicity does not depend on the outcome) but is never read as a
+    computed non-rejection: a family whose tests are all unavailable is not evaluable,
+    and a partly unavailable family says how many tests were computed."""
+    hyp = verdict.hypothesis if verdict is not None else "family"
+    m, u = len(tests), len(unavailable)
+    if verdict is None or m == 0 or u == m:
+        return f"{hyp}: not evaluable (no test could be computed)"
+    s = verdict.sentence()
+    if u:
+        s += f"; {u} of {m} tests unavailable (entered as p = 1, not computed)"
+    return s
 
 
 def family_inf(summ, raw):
@@ -762,6 +813,13 @@ def _fmt(x, d=3):
     return s[1:] if s.startswith("-") and float(s) == 0 else s  # no "-0.000"
 
 
+def _fail(r):
+    """Failure percentage; with no failure, the one-sided 95% Clopper-Pearson upper bound."""
+    if r["failure_rate"] == 0 and r.get("failure_rate_cp_upper") == r.get("failure_rate_cp_upper"):
+        return f"0.0 ($\\le${100 * float(r['failure_rate_cp_upper']):.2f})"
+    return f"{100 * r['failure_rate']:.1f}"
+
+
 def _statuses(c):
     counts = {k: v for k, v in json.loads(c).items() if k != "ok"}
     return ", ".join(f"{k.replace('_', chr(92) + '_')}: {v}" for k, v in counts.items()) or "--"
@@ -774,7 +832,7 @@ def tables(S):
         "\\begin{tabular}{llrrrrrrrl}",
         "\\hline",
         "Part & Estimator & $n$ & Bias & $\\sqrt{n}$SD (ref.) & SE ratio & Coverage (pred.)"
-        " & Cov. succ. & Fail \\% & Failures" + END,
+        " & Cov. succ. & Fail \\% & Failures by status" + END,
         "\\hline",
     ]
     for part, title in (("inference", "DGP19Q"), ("illustration", "DGP19L, random features")):
@@ -792,7 +850,7 @@ def tables(S):
                             "", est.replace("_", "\\_"), str(n), _fmt(r.get("bias")),
                             f"{_fmt(r.get('root_n_sd'), 2)} ({_fmt(ref, 2)})",
                             _fmt(r.get("se_ratio"), 2), cov, _fmt(r.get("coverage_conditional")),
-                            f"{100 * r['failure_rate']:.1f}", _statuses(r["status_counts"]),
+                            _fail(r), _statuses(r["status_counts"]),
                         ]
                     )
                     + END
