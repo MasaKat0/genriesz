@@ -834,8 +834,8 @@ def tables(S, intervals):
     macros, from ``summary.csv`` and the H18-Emp intervals only (§4)."""
     head = ("Design & Constr. & $n$ & Viol. & med. $\\varrho_{\\widehat a}/\\varrho^*$ & "
             "med. raw$/\\varrho^*$ & Bias (SEL) & $\\sqrt n$SD & SE ratio & Coverage & "
-            "Coverage (SQ-1) & Fail \\% (SEL) & Fail.\\ cand." + END)  # fmt: skip
-    lines = ["\\begin{tabular}{llrrrrrrrrrrr}", "\\hline", head, "\\hline", "\\endfirsthead",
+            "Coverage (SQ-1) & Fail \\% (SEL) & Fail \\% (SQ-1) & Fail.\\ cand." + END)  # fmt: skip
+    lines = ["\\begin{tabular}{llrrrrrrrrrrrr}", "\\hline", head, "\\hline", "\\endfirsthead",
              "\\hline", head, "\\hline", "\\endhead"]  # fmt: skip
     for _, r in S.sort_values(["design", "construction", "n"]).iterrows():
         b = r["design"] == "18B"
@@ -849,6 +849,7 @@ def tables(S, intervals):
             _fmt(r.get("SEL_coverage")) if b else "--",
             _fmt(r.get("CTRL_coverage")) if b else "--",
             f"{100 * r['SEL_failure_rate']:.1f}" if b else "--",
+            f"{100 * r['CTRL_failure_rate']:.1f}" if b else "--",
             _fmt(r["mean_failed_candidates"], 2),
         ]) + END)  # fmt: skip
     lines += ["\\hline", "\\end{tabular}"]

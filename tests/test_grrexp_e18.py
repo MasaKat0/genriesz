@@ -289,3 +289,60 @@ def test_emp_bootstrap_is_reproducible_and_clustered():
     ]  # fmt: skip
     for r in a:
         assert r["lower"] <= r["upper"]
+
+
+def test_emp_bootstrap_resamples_whole_replications(monkeypatch):
+    """Each call resamples the R replications (not the R*K folds) and the calls follow the
+    documented order; identical folds within a replication make every draw's statistic a
+    value attained by some replication."""
+    import pandas as pd
+    from grrexp.bootstrap import FamilyBootstrap
+    from grrexp.seeds import PILOT_ENTROPY, Seeds
+
+    rows = []
+    for d in e18.DESIGNS:
+        for n in e18.N_VALUES:
+            for rep in range(4):
+                for c in e18.CONSTRUCTIONS:
+                    v = [0.1 * (rep + 1)] * e18.K
+                    rows.append({"design": d, "n": n, "rep": rep, "construction": c,
+                                 "risk_sel": json.dumps([2 * x for x in v]),
+                                 "risk_star": json.dumps(v),
+                                 "n_v": json.dumps([100] * e18.K)})  # fmt: skip
+    raw = pd.DataFrame(rows)
+    calls = []
+    real = FamilyBootstrap.replicate
+
+    def spy(self, statistic, R, **kw):
+        calls.append(R)
+        out = real(self, statistic, R, **kw)
+        return out
+
+    monkeypatch.setattr(FamilyBootstrap, "replicate", spy)
+    iv = e18.emp_intervals(raw, Seeds(18, entropy=PILOT_ENTROPY))
+    assert calls == [4] * len(iv)
+    risk = [r for r in iv if r["statistic"] == "e_median_risk"]
+    assert all(r["lower"] in {0.2, 0.4, 0.6, 0.8} or 0.2 <= r["lower"] <= 0.8 for r in risk)
+    ratio = [r for r in iv if r["statistic"] == "c_median_ratio"]
+    assert all(r["lower"] == r["upper"] == 2.0 for r in ratio)
+
+
+def test_failed_replications_stay_in_the_coverage_denominator():
+    import pandas as pd
+
+    base = {"cell": 4, "design": "18B", "n": 1000, "construction": "a",
+            "violation_any": False, "statuses": json.dumps({"ok": 320}),
+            "warnings": "{}", "n_warnings": 0,
+            **{f: json.dumps([1.0] * e18.K) for f in e18.FOLD_FIELDS}}  # fmt: skip
+    rows = []
+    cases = [("ok", 1.0), ("ok", 1.01), ("domain_prediction", np.nan)]
+    for rep, (status, est) in enumerate(cases):
+        rows.append({**base, "rep": rep, "SEL_estimate": est, "SEL_se": 0.1, "SEL_status": status,
+                     "CTRL_estimate": 1.0 + 0.01 * rep, "CTRL_se": 0.1, "CTRL_status": "ok",
+                     "SEL_max_abs_alpha": 3.0})  # fmt: skip
+    S = e18.summarise(pd.DataFrame(rows))
+    r = S.iloc[0]
+    assert r["SEL_coverage"] == pytest.approx(2 / 3)
+    assert r["SEL_failure_rate"] == pytest.approx(1 / 3)
+    assert json.loads(r["SEL_status_counts"]) == {"domain_prediction": 1, "ok": 2}
+    assert r["CTRL_failure_rate"] == 0.0 and "CTRL_failure_rate_cp_upper" in S.columns
