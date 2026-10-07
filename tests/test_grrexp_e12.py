@@ -312,3 +312,40 @@ def test_undefined_tests_stay_in_the_family_and_zero_radicand_still_tests_covera
     assert set(inf.labels) == {f"{key}|{t}" for t in ("coverage", "failure", "bias", "sd_ratio")}
     assert dict(zip(inf.labels, inf.pvalues, strict=True))[f"{key}|sd_ratio"] == e12.UNAVAILABLE_P
     assert unavailable["H12-Inf"] == [f"{key}|sd_ratio (zero_radicand)"]
+
+
+def test_fit_hook_sees_every_nuisance_fit_and_records_warnings() -> None:
+    X, Y, basis = _ate_sample(seed=2)
+    basis.fit(X)
+    folds = np.arange(len(Y)) % 5
+    seen = []
+
+    def hook(stage, fold, fit):
+        seen.append((stage, fold))
+        return fit()
+
+    res = gr.grr_functional(
+        X=X,
+        Y=Y,
+        m=gr.ATEFunctional(0),
+        basis=basis,
+        generator=gr.SquaredGenerator(C=0.0),
+        riesz_penalty=None,
+        riesz_lam=0.0,
+        riesz_tol=1e-8,
+        outcome_models="shared",
+        outcome_link="identity",
+        outcome_penalty="l2",
+        outcome_lam=0.0,
+        fold_ids=folds,
+        estimators=("arw",),
+        fit_hook=hook,
+    )
+    assert res.success
+    assert seen == [(s, k) for k in range(5) for s in ("riesz", "outcome (shared)")]
+    fw = e12._FitWarnings()
+    assert fw.hook("riesz", 3, lambda: warnings.warn("w", UserWarning, stacklevel=1)) is None
+    assert fw.fits == [[3, "riesz", {"UserWarning: w": 1}]] and fw.converged
+    rec = e12._warning_record(fw.fits, {"UserWarning: x": 2}, {"UserWarning: d": 1})
+    assert rec["n_warnings"] == 4
+    assert json.loads(rec["warnings"])["diagnostic"] == {"UserWarning: d": 1}

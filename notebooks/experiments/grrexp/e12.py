@@ -302,6 +302,30 @@ def _warning_fields(counts):
     return {"n_warnings": int(sum(counts.values())), "warnings": json.dumps(counts)}
 
 
+def _warning_record(fits, other=None, diagnostic=None):
+    """Warnings of one estimator record (§1.1): per individual fit ``[fold, model,
+    counts]``, the rest of the computation (``other``), and the H12-BP weight-program
+    diagnostic, kept apart."""
+    other, diagnostic = other or {}, diagnostic or {}
+    n = sum(sum(c.values()) for _, _, c in fits) + sum(other.values()) + sum(diagnostic.values())
+    record = {"fits": fits, "other": other, "diagnostic": diagnostic}
+    return {"n_warnings": int(n), "warnings": json.dumps(record)}
+
+
+class _FitWarnings:
+    """``fit_hook`` of ``grr_functional``: records the warnings of each individual fit."""
+
+    def __init__(self):
+        self.fits, self.converged = [], True
+
+    def hook(self, stage, fold, fit):
+        result, counts, converged = baselines.run_recording_warnings(fit)
+        if counts:
+            self.fits.append([int(fold), stage, counts])
+        self.converged = self.converged and converged
+        return result
+
+
 def _bp_diagnostic(arm, rs, X_fit):
     """§1.3 A-6: the lambda = 0 weight program on the rows of the failed fit (default
     Clarabel settings). A diagnostic only: never a claim of non-existence."""
@@ -328,20 +352,23 @@ def _grr_cf(X, Y, arm, rs, folds):
     g = gr()
     gen = generator(arm)
 
-    def fit():
-        res = g.grr_functional(
+    fw = _FitWarnings()
+    res, other, converged = baselines.run_recording_warnings(
+        lambda: g.grr_functional(
             X=X, Y=Y, m=g.ATEFunctional(0), basis=basis(rs), generator=gen,
             riesz_penalty=None, riesz_lam=0.0, riesz_alpha_ref=alpha_ref, riesz_tol=SAMPLE_TOL,
             outcome_models="shared", outcome_link="identity", outcome_penalty="l2", outcome_lam=0.0,
             fold_ids=folds, estimators=("arw", "tmle"), expose_alpha_values=True,
-        )  # fmt: skip
-        diag = {}
-        failed_fit = [f for f in res.fold_status if f[1] == "riesz" and f[2] != "ok"]
-        if not res.success and arm in BP_ARMS and failed_fit:
-            diag = _bp_diagnostic(arm, rs, X[folds != failed_fit[0][0]])
-        return res, diag
-
-    (res, diag), counts, converged = baselines.run_recording_warnings(fit)
+            fit_hook=fw.hook,
+        )
+    )  # fmt: skip
+    converged = converged and fw.converged
+    diag, diag_counts = {}, {}
+    failed_fit = [f for f in res.fold_status if f[1] == "riesz" and f[2] != "ok"]
+    if not res.success and arm in BP_ARMS and failed_fit:
+        diag, diag_counts, _ = baselines.run_recording_warnings(
+            lambda: _bp_diagnostic(arm, rs, X[folds != failed_fit[0][0]])
+        )
     tb = res.diagnostics.get("train_imbalance", {"max": [], "scale": []})
     common = {
         "fold_status": json.dumps([[str(v) for v in f] for f in res.fold_status]),
@@ -351,7 +378,7 @@ def _grr_cf(X, Y, arm, rs, folds):
     # One grr_functional call fits the folds shared by ARW_cf and TMLE_cf: its
     # warnings are counted once, on the ARW_cf record.
     warn = {
-        "ARW_cf": _warning_fields(counts),
+        "ARW_cf": _warning_record(fw.fits, other, diag_counts),
         "TMLE_cf": {"n_warnings": 0, "warnings": json.dumps({"counted_in": "ARW_cf"})},
     }
     if not res.success or not converged:
@@ -413,23 +440,26 @@ def _rw_full(X, Y, arm, rs):
     """RW_full: in-sample fit on the whole sample (registration §1.4). Returns the
     record and the fitted weights (for the H12-Bal identities), or ``None``."""
 
-    def fit():
-        model = _grr_model(arm, rs)
-        fr = model.fit(X, tol=SAMPLE_TOL)
-        if fr.status != "ok":
-            diag = _bp_diagnostic(arm, rs, X) if arm in BP_ARMS else {}
-            return model, fr, None, diag
-        return model, fr, gr().rw_full_inference(grr=model, X=X, Y=Y), {}
-
-    (model, fr, inf, diag), counts, converged = baselines.run_recording_warnings(fit)
-    common = {
-        **_warning_fields(counts),
-        "fold_status": json.dumps([["full", "riesz", str(fr.status), str(fr.message)]]),
-        **diag,
-    }
-    if fr.status != "ok" or not converged:
+    model = _grr_model(arm, rs)
+    fw = _FitWarnings()
+    fr = fw.hook("riesz", -1, lambda: model.fit(X, tol=SAMPLE_TOL))  # fold -1: the full sample
+    detail = json.dumps([["full", "riesz", str(fr.status), str(fr.message)]])
+    if fr.status != "ok" or not fw.converged:
+        diag, diag_counts = {}, {}
+        if fr.status != "ok" and arm in BP_ARMS:
+            diag, diag_counts, _ = baselines.run_recording_warnings(
+                lambda: _bp_diagnostic(arm, rs, X)
+            )
         status = fr.status if fr.status != "ok" else "convergence_warning"
-        return _failed(status, **common), None
+        return _failed(
+            status, fold_status=detail, **_warning_record(fw.fits, None, diag_counts), **diag
+        ), None
+    inf, other, converged = baselines.run_recording_warnings(
+        lambda: gr().rw_full_inference(grr=model, X=X, Y=Y)
+    )
+    common = {"fold_status": detail, **_warning_record(fw.fits, other)}
+    if not converged:
+        return _failed("convergence_warning", **common), None
     a = np.asarray(model.predict_alpha(X), dtype=float)
     imb, scale = _balance(model, X)
     rec = {
@@ -452,34 +482,33 @@ def _arw_ef(X, Y, folds):
 
     psi, alpha = np.empty(n), np.empty(n)
     detail, imbs, scales = [], [], []
-    fold_warnings = collections.Counter()
+    fw = _FitWarnings()
 
     def fit():
         for k in np.unique(folds):
             tr, te = folds != k, folds == k
             model = _grr_model("UKL1", "Include")
-            fr, wk, converged = baselines.run_recording_warnings(
-                lambda m=model, rows=te: m.fit(X[rows], tol=SAMPLE_TOL)
-            )
-            fold_warnings.update(wk)
-            status = str(fr.status) if converged else "convergence_warning"
-            detail.append([str(int(k)), "riesz", status, str(fr.message), json.dumps(wk)])
+            fr = fw.hook("riesz", k, lambda m=model, rows=te: m.fit(X[rows], tol=SAMPLE_TOL))
+            status = str(fr.status) if fw.converged else "convergence_warning"
+            detail.append([str(int(k)), "riesz", status, str(fr.message)])
             if status != "ok":
                 return status
             Xt = X[te]
-            imb, scale = _balance(
-                model, Xt
-            )  # the fold's own fit: checked even if a later fold fails
+            # the fold's own fit: its balance is checked even if a later fold fails
+            imb, scale = _balance(model, Xt)
             imbs.append(imb)
             scales.append(scale)
             a, outside, nonfinite = model.classify(Xt)
             if np.any(outside):
-                detail.append([str(int(k)), "prediction", "domain_prediction", "", "{}"])
+                detail.append([str(int(k)), "prediction", "domain_prediction", ""])
                 return "domain_prediction"
             if np.any(nonfinite):
-                detail.append([str(int(k)), "prediction", "nonfinite", "", "{}"])
+                detail.append([str(int(k)), "prediction", "nonfinite", ""])
                 return "nonfinite"
-            pred = _ols(X, Y, "Include", X[tr], Y[tr])
+            pred = fw.hook("outcome", k, lambda tr=tr: _ols(X, Y, "Include", X[tr], Y[tr]))
+            if not fw.converged:
+                detail.append([str(int(k)), "outcome", "convergence_warning", ""])
+                return "convergence_warning"
             m_g = pred(np.column_stack([np.ones(te.sum()), Xt[:, 1:]])) - pred(
                 np.column_stack([np.zeros(te.sum()), Xt[:, 1:]])
             )
@@ -487,10 +516,9 @@ def _arw_ef(X, Y, folds):
             alpha[te] = a
         return "ok" if np.all(np.isfinite(psi)) else "nonfinite"
 
-    status, counts, converged = baselines.run_recording_warnings(fit)
-    counts = dict(sorted((collections.Counter(counts) + fold_warnings).items()))
+    status, other, converged = baselines.run_recording_warnings(fit)
     common = {
-        **_warning_fields(counts),
+        **_warning_record(fw.fits, other),
         "fold_status": json.dumps(detail),
         **_train_balance_fields(imbs, scales),
     }
@@ -724,7 +752,8 @@ def balance_checks(raw):
         else None
     )
     bal = {
-        "fits_checked": int(raw.loc[has, "train_fits"].sum()),
+        # ARW_cf and TMLE_cf share their fits: count them once (on ARW_cf)
+        "fits_checked": int(raw.loc[has & ~raw["arm"].str.endswith("TMLE_cf"), "train_fits"].sum()),
         "train_balance_ratio_max": float(ratio.max()) if len(ratio) else None,
         "train_balance_tolerance": BALANCE_TOL,
         "identities_max": identities,

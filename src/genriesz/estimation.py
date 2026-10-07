@@ -393,6 +393,10 @@ def _failed_estimate(
     )
 
 
+def _run_fit(fit_hook: Callable | None, stage: str, fold: int, fit: Callable):
+    return fit() if fit_hook is None else fit_hook(stage, int(fold), fit)
+
+
 def grr_functional(
     *,
     X: ArrayLike,
@@ -451,6 +455,7 @@ def grr_functional(
     max_iter: int = 500,
     tol: float = 1e-8,
     verbose: bool = False,
+    fit_hook: Callable | None = None,
 ) -> FunctionalEstimate:
     """Estimate a linear functional using generalized Riesz regression.
 
@@ -580,6 +585,12 @@ def grr_functional(
 
         ``fold_status`` lists ``(fold, stage, status, message)`` for each fold
         processed. Invalid arguments still raise.
+
+    fit_hook:
+        Optional ``fit_hook(stage, fold, fit)`` that runs each nuisance fit
+        ``fit()`` (stage ``"riesz"`` or ``"outcome (<tag>)"``) and returns its
+        result, e.g. to record the warnings of each fit separately. ``None``
+        calls ``fit()`` directly.
     """
 
     X_ = as_2d(X)
@@ -958,7 +969,12 @@ def grr_functional(
             if grr.solver == "lbfgs":
                 fit_result = grr.fit(X_tr, max_iter=max_iter, tol=tol, verbose=verbose)
             else:
-                fit_result = grr.fit(X_tr, max_iter=riesz_max_iter, tol=riesz_tol)
+                fit_result = _run_fit(
+                    fit_hook, "riesz", fold_id,
+                    lambda grr=grr, X_tr=X_tr: grr.fit(
+                        X_tr, max_iter=riesz_max_iter, tol=riesz_tol
+                    ),
+                )  # fmt: skip
             riesz_fit_stats["success"].append(bool(fit_result.success))
             riesz_fit_stats["status"].append(str(getattr(fit_result, "status", "")))
             riesz_fit_stats["gradient_norm"].append(
@@ -1148,7 +1164,12 @@ def grr_functional(
                 lam=outcome_lam,
                 p_norm=outcome_p_norm,
             )
-            fit_result = out.fit(X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose)
+            fit_result = _run_fit(
+                fit_hook, f"outcome ({tag})", fold_id,
+                lambda out=out, X_tr=X_tr, y_tr=y_tr: out.fit(
+                    X_tr, y_tr, max_iter=max_iter, tol=tol, verbose=verbose
+                ),
+            )  # fmt: skip
             if not fit_result.success:
                 failure = f"outcome_{fit_result.status or 'optimizer_failure'}"
                 fold_status.append(
