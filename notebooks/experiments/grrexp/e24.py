@@ -644,9 +644,42 @@ def tune(cell, entropy):
         raise RuntimeError(f"E-24 tuning: no eligible outcome lambda at n = {n}: {sc}")
     out["outcome_lambda"] = lam
 
-    (prop, outc), counts = rec(lambda: baselines.tune_gbm(D, Z, Y, cv, gbm_seed))
-    if counts:
-        raise RuntimeError(f"E-24 tuning: warnings in the GBM tuning: {counts}")
+    # GBM (the E-12 grid, ties to the earlier grid point), each model, candidate and fold
+    # under the same rule as above: a warned or failed CV fit makes the candidate ineligible
+    DZ = np.column_stack([D, Z])
+    order = {params: i for i, params in enumerate(baselines.GBM_GRID)}
+
+    def gbm_prop_loss(params):
+        def fold_loss(tr, te):
+            clf = baselines._gbm_classifier(params, gbm_seed).fit(Z[tr], D[tr])
+            p = clf.predict_proba(Z[te])[:, 1]
+            return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
+
+        return cv_score(fold_loss)
+
+    def gbm_out_loss(params):
+        def fold_loss(tr, te):
+            pred = baselines._gbm_regressor(params, gbm_seed).fit(DZ[tr], Y[tr]).predict(DZ[te])
+            return "ok", float(np.sum((pred - Y[te]) ** 2))
+
+        return cv_score(fold_loss)
+
+    def earliest(grid, loss):
+        choice, record = _cv_select(grid, loss, "smaller")
+        if choice is None:
+            return None, record
+        best = record[repr(choice)]["score"]
+        tied = [
+            v for v in grid if not record[repr(v)]["failures"] and record[repr(v)]["score"] == best
+        ]
+        return min(tied, key=order.get), record
+
+    prop, sc = earliest(baselines.GBM_GRID, gbm_prop_loss)
+    out["scores"]["GBM-propensity"] = sc
+    outc, sc2 = earliest(baselines.GBM_GRID, gbm_out_loss)
+    out["scores"]["GBM-outcome"] = sc2
+    if prop is None or outc is None:
+        raise RuntimeError(f"E-24 tuning: no eligible GBM candidate at n = {n}")
     out["gbm"] = {"propensity": list(prop), "outcome": list(outc), "seed": gbm_seed}
     out["nn_seed"] = nn_seed
     out["warnings"] = dict(warn)
