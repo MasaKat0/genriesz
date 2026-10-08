@@ -2,19 +2,19 @@
   "experiment": "E-21",
   "stage": "stage1",
   "parent_repository": {
-    "sha": "1097ccc8c4d4724c8012515ae8efd855403422ad",
+    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
     "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e21"
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-21"
   },
   "genriesz": {
-    "sha": "77d9407f02fe638d20d0c7187a7fdae834fa5657",
+    "sha": "d9038615f733b2b43425b1b83cb71496b19c6267",
     "notebook": "notebooks/experiments/18_E21_ihdp.ipynb",
     "notebook_blob": "d91f0effd30b6777667455b2dc10a317766ba6af",
     "notebook_code_cells_sha256": "923b7001cd91895b18f631693fc393378e9516c53cfb8ca3c872479d987a3643",
     "computation": {
       "notebooks/experiments/18_E21_ihdp.ipynb": "d91f0effd30b6777667455b2dc10a317766ba6af",
-      "notebooks/experiments/grrexp": "2bc65d2c00177049f328423d091735f9ad2fd28f",
+      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -22,10 +22,10 @@
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/e15.py": "cc638e92a9b172858595bd60e57e80e838c6deb3",
-      "notebooks/experiments/grrexp/e21.py": "c324892078628bd7c923ad23f7519c1a768aed74",
+      "notebooks/experiments/grrexp/e21.py": "532941a2e5493ec219352d6bf66eb758db5491a9",
       "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "c2774873cf04984232c8f3cfcc40e6553e96be37",
+      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -97,22 +97,22 @@
   ],
   "prerequisites": {
     "stage0.5": {
-      "manifest_sha256": "5846118c77f2b54e6a489a1764d4f770595d8d0076cc4f763e94b0c24dd5a2fa",
-      "commit": "77d9407f02fe638d20d0c7187a7fdae834fa5657"
+      "manifest_sha256": "36fe9f1b2af9b4a5b1468bef2e41a9ae7104525fd37a9fcdf9336bb3592e11b0",
+      "commit": "d9038615f733b2b43425b1b83cb71496b19c6267"
     }
   },
-  "started_utc": "2026-10-07T22:18:17.634127+00:00",
-  "finished_utc": "2026-10-07T22:27:24.135688+00:00",
-  "wall_seconds": 546.4980562499986,
+  "started_utc": "2026-10-08T00:03:22.409954+00:00",
+  "finished_utc": "2026-10-08T00:20:09.300358+00:00",
+  "wall_seconds": 1006.9210197909997,
   "warnings": 0,
   "failures": 822,
   "outputs_sha256": {
-    "macros_E-21.tex": "8326907f530e664a93049e3da8c37f0d8e61d3660fd7674d3a8e49c1006a27bd",
+    "macros_E-21.tex": "f901ab5440107927819c49e095867324b969df43ac23a6d0ee599cf1af508b42",
     "raw.parquet": "c9844f0987a0d01ca99bb9fe73c81e5dec691cd51d7d424d7fb31f7da91ab4c8",
-    "summary.csv": "1df1df3837b1d9fe20cbbd99375f1fad199c592619d8b8d0d61fbbc634ce2bac",
-    "tables/tab_E21_ate.tex": "bc4a7d5fb637cebe062dde544c4078dcea2c869b9df1055a95372d65701d1e36",
+    "summary.csv": "e1b8a302d8d12d7c504f46b4c123b67271be8e30810cec4af471ca3f5e7996c0",
+    "tables/tab_E21_ate.tex": "ee28a6ad626fb5aeb8205a979eac9bf28ea894880c381e393bd6cbf60d04ac5b",
     "tables/tab_E21_att.tex": "d517d2d38ab21608a5ffa62a9d4988439b8750132a8b1027e43279f54e9328b8",
     "tables/tab_E21_status.tex": "59e10a0cb0d10a97230c07238d93e5f5a17068a1a2e5415949e7c38b91afdbe4"
   },
-  "executed_notebook_sha256": "8dc0661f9316a4b8203a85c75811b3b7cf5a4acf2434a1d1f518f514b9705fa9"
+  "executed_notebook_sha256": "f8ca1d3487b817c0582db78e2532c4075291499a703fc4da8fc873a7a9588921"
 }
