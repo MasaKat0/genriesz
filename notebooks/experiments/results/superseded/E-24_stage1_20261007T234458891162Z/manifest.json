@@ -1,31 +1,34 @@
 {
   "experiment": "E-24",
-  "stage": "stage0",
+  "stage": "stage1",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "sha": "68a6f920c37e9cf97358d5baf5d5e3c42276b33a",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-24"
+    "dirty_tracked": true
   },
   "genriesz": {
-    "sha": "6b767337fbbb7aa5e9b9dc05c3f7e96d87c6c821",
+    "sha": "7c0701a1cd9811aa687441a804235a031400e62d",
     "notebook": "notebooks/experiments/22_E24_controlled_nonlinear_benchmark.ipynb",
     "notebook_blob": "80dfe542b36be5307f52eeca87a0726a10e9e7c5",
     "notebook_code_cells_sha256": "7db5691c2837e124427fd9d76902a9f914245b53d691bf859b5db68509df7cbf",
     "computation": {
       "notebooks/experiments/22_E24_controlled_nonlinear_benchmark.ipynb": "80dfe542b36be5307f52eeca87a0726a10e9e7c5",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "0c67fa60d694551504c3ce6b8f9dad73a91a2f97",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
     "loaded_modules": {
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
-      "notebooks/experiments/grrexp/e24.py": "e51efced75e049bd8a04f2f627b57b1fbef56c92",
-      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
+      "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
+      "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
+      "notebooks/experiments/grrexp/e24.py": "bd5ba693e3d01653f3715468bd5cd40225d0b4ae",
+      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
+      "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
+      "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
       "src/genriesz/basis.py": "2052936d30af52aab47b3e4701f1f11b7c546be4",
@@ -76,18 +79,55 @@
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
   "data_sha256": {},
-  "entropy": null,
-  "R": null,
-  "n": null,
-  "cells": null,
-  "prerequisites": {},
-  "started_utc": "2026-10-07T23:44:59.740634+00:00",
-  "finished_utc": "2026-10-07T23:46:37.289444+00:00",
-  "wall_seconds": 97.5516687079944,
-  "warnings": 0,
-  "failures": 52,
-  "outputs_sha256": {
-    "stage0_e24_design.json": "ab8bd58c6aa9ac00fa1b76674b62ce240d09a4d6dd5b0114eec2ae97b3ab7463"
+  "entropy": 20261007,
+  "R": {
+    "main": 1000
   },
-  "executed_notebook_sha256": "b30ccb9699158d67e15b03d8d9434503716c4c34d4ad7117fe4c2c2800ad8741"
+  "n": {
+    "main": [
+      1000,
+      2000,
+      4000,
+      8000
+    ]
+  },
+  "cells": [
+    [
+      1000
+    ],
+    [
+      2000
+    ],
+    [
+      4000
+    ],
+    [
+      8000
+    ]
+  ],
+  "prerequisites": {
+    "stage0": {
+      "manifest_sha256": "d2a8d8d2916c57418b4a475fac8c1875a12f67c6ee18d5c8bab18dc79f655991",
+      "commit": "7c0701a1cd9811aa687441a804235a031400e62d"
+    },
+    "stage0.5": {
+      "manifest_sha256": "cd8e94a5fdd41c6780d69730d2dad3a5908227897d8a0dd72c361accdfabb85c",
+      "commit": "7c0701a1cd9811aa687441a804235a031400e62d"
+    }
+  },
+  "started_utc": "2026-10-07T20:47:56.094366+00:00",
+  "finished_utc": "2026-10-07T22:27:29.005907+00:00",
+  "wall_seconds": 5972.870045499993,
+  "warnings": 0,
+  "failures": 1720,
+  "outputs_sha256": {
+    "figures/fig_E24_rmse.pdf": "441f523c246f8c5d83b90eab064cf8caa1e6a744c4a98d139f8ddc0ad22110a1",
+    "macros_E-24.tex": "360fa574d91dcdb1206ec6739e9513ff231de06a7d17c94939d0bd475507a441",
+    "raw.parquet": "2844df7fee95d75f7df9e9fae57b1af639071a070b0f4d8f655b5a4ef2c1ebc3",
+    "summary.csv": "2e793490fb5524f7063bfd3fbd2810937411da60577a5505a9b2d3a91d51f7da",
+    "tables/tab_E24.tex": "23dadb71b29890465537dbcf8138aa9bfc2efab45c43fc14210240942a283144",
+    "tables/tab_E24_comparisons.tex": "b4f92a84fce6c0805619dfdac605344d72dc3d01ba480e9471b9b63b79d50c52",
+    "tables/tab_E24_tuning.tex": "c39a0e88183af754a730c8a234cefd491de25695fc5bbf7bfc1cedd5a72d5ce2"
+  },
+  "executed_notebook_sha256": "86a86b53dd69217582f4c18f2c09b3cb1d8c1ec97f68efdfe7988e4b8270c902"
 }
