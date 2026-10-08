@@ -1,8 +1,8 @@
 {
   "R": {
-    "inference": 10,
-    "counterexamples": 10,
-    "illustration": 10
+    "inference": 2000,
+    "counterexamples": 5000,
+    "illustration": 2000
   },
   "n": {
     "inference": [
@@ -57,19 +57,21 @@
   "warnings": 0,
   "failures": 0,
   "outputs": [
-    "status_counts.csv",
-    "timing.csv"
+    "figures/fig_E19_counterexamples.pdf",
+    "raw.parquet",
+    "summary.csv",
+    "tables/tab_E19.tex"
   ],
   "loaded_modules": {
     "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
     "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
     "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-    "notebooks/experiments/grrexp/e12.py": "9c9d5a06d908e1a8bfb69301df1a5ffcdc87d2e1",
-    "notebooks/experiments/grrexp/e19.py": "7d526bd1d834187dddb3f95b6311d83f44af643b",
+    "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
+    "notebooks/experiments/grrexp/e19.py": "e40db3c1d18fed4b8bf6773c4f949386f9ff50bf",
     "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
     "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
     "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-    "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+    "notebooks/experiments/grrexp/outputs.py": "990cd5033b01ec75c7ebbcb60b6235f9afc90f37",
     "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
     "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
     "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -99,10 +101,6 @@
       {
         "internal_api": "openmp",
         "num_threads": 1
-      },
-      {
-        "internal_api": "openmp",
-        "num_threads": 1
       }
     ],
     "torch": {
@@ -125,47 +123,5 @@
   "pip_freeze_sha256": "f771f299d454cc037e9666d2fa3539d9996ef635d0cf4c502832925d487c5f9f",
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
-  "extra": {
-    "whole_pilot_aggregation_table_and_figure_seconds": 0.12808962499548215
-  },
-  "parallel_identity": {
-    "cells": [
-      [
-        "inference",
-        1000
-      ],
-      [
-        "inference",
-        2000
-      ],
-      [
-        "inference",
-        4000
-      ],
-      [
-        "counterexamples",
-        1000
-      ],
-      [
-        "counterexamples",
-        4000
-      ],
-      [
-        "illustration",
-        1000
-      ],
-      [
-        "illustration",
-        2000
-      ],
-      [
-        "illustration",
-        4000
-      ]
-    ],
-    "reps": 10,
-    "n_jobs": 12,
-    "tasks": 80,
-    "digest": "77e8c13ac9184dd086a00a331d9ed31c14120e20a6be225998a56b0266d3e19d"
-  }
+  "extra": {}
 }
