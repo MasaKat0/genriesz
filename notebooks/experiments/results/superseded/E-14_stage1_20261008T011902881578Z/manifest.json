@@ -1,32 +1,31 @@
 {
   "experiment": "E-14",
-  "stage": "stage0.5",
+  "stage": "stage1",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "sha": "96aa91e2af2cdbb7b240c15f3728b7e313a55948",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-14"
+    "dirty_tracked": false,
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e14"
   },
   "genriesz": {
-    "sha": "51ca47f970cb39ac92b715a29ec407daa14dc66e",
+    "sha": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1",
     "notebook": "notebooks/experiments/12_E14_sparse_offset_rate.ipynb",
     "notebook_blob": "474d0f392771b810c3bf833406b27252fe15c05b",
     "notebook_code_cells_sha256": "391f67b0cd79794d82eb8181a793740261ba0d651489b928d7d5da5f76d03b55",
     "computation": {
       "notebooks/experiments/12_E14_sparse_offset_rate.ipynb": "474d0f392771b810c3bf833406b27252fe15c05b",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "6df531b5c9f56ef635ea7db6dd113eb86576e37e",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
     "loaded_modules": {
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
-      "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e14.py": "02c445b641dba55fe0eda986007a8f2a5f24cbf1",
+      "notebooks/experiments/grrexp/e14.py": "073cdd0df7e6161e0fc6db5c609a9a1ff6060021",
       "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -78,9 +77,9 @@
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
   "data_sha256": {},
-  "entropy": 20261008,
+  "entropy": 20261007,
   "R": {
-    "main": 10
+    "main": 200
   },
   "n": {
     "main": [
@@ -393,324 +392,26 @@
       64000
     ]
   ],
-  "prerequisites": {},
-  "started_utc": "2026-10-08T01:19:04.470437+00:00",
-  "finished_utc": "2026-10-08T01:35:10.883787+00:00",
-  "wall_seconds": 966.4179704999988,
+  "prerequisites": {
+    "stage0": {
+      "manifest_sha256": "2b40ac0307d4508d4ebe8b94249546152939a512161bea2822170f1a4eb8960c",
+      "commit": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1"
+    },
+    "stage0.5": {
+      "manifest_sha256": "cfd52f46aaf90ae7e2fe1b16f325e67d0cf8b242d47308010190e6b030c591c7",
+      "commit": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1"
+    }
+  },
+  "started_utc": "2026-10-07T20:17:55.542616+00:00",
+  "finished_utc": "2026-10-07T21:06:41.419982+00:00",
+  "wall_seconds": 2925.8850847909926,
   "warnings": 0,
   "failures": 0,
   "outputs_sha256": {
-    "status_counts.csv": "a92484e125099b211dd027d1e7c352db88abf4d59f4d5d2c9d56efc080bdc82e",
-    "timing.csv": "1f074918cdf73b601035316a1e463b2faa3e1b9510aee49bc3e7934cf0239621"
+    "figures/fig_E14_rate.pdf": "aede5f0dd9239358bacdd935600816d0234671d2dbd64d504b41dacb6aef9d75",
+    "raw.parquet": "11c82984499b548c198f3a5880e4153ee2ce3334763036c3dd7c5ebe9de440a2",
+    "summary.csv": "efa3081300794039796d64e32e17de10f4d4cd5498cdb46bb55868420c352570",
+    "tables/tab_E14.tex": "1edd12481383ee11fad996016224988712b362efd5afeba262a65c4c1e729279"
   },
-  "executed_notebook_sha256": "fc0fd8dc917228088859eeb919f722a78e611e58274d3b18761fdc4bcaa81b55",
-  "parallel_identity": {
-    "cells": [
-      [
-        "SQ",
-        50,
-        4000
-      ],
-      [
-        "SQ",
-        50,
-        8000
-      ],
-      [
-        "SQ",
-        50,
-        16000
-      ],
-      [
-        "SQ",
-        50,
-        32000
-      ],
-      [
-        "SQ",
-        50,
-        64000
-      ],
-      [
-        "SQ",
-        200,
-        4000
-      ],
-      [
-        "SQ",
-        200,
-        8000
-      ],
-      [
-        "SQ",
-        200,
-        16000
-      ],
-      [
-        "SQ",
-        200,
-        32000
-      ],
-      [
-        "SQ",
-        200,
-        64000
-      ],
-      [
-        "SQ",
-        800,
-        4000
-      ],
-      [
-        "SQ",
-        800,
-        8000
-      ],
-      [
-        "SQ",
-        800,
-        16000
-      ],
-      [
-        "SQ",
-        800,
-        32000
-      ],
-      [
-        "SQ",
-        800,
-        64000
-      ],
-      [
-        "UKL",
-        50,
-        4000
-      ],
-      [
-        "UKL",
-        50,
-        8000
-      ],
-      [
-        "UKL",
-        50,
-        16000
-      ],
-      [
-        "UKL",
-        50,
-        32000
-      ],
-      [
-        "UKL",
-        50,
-        64000
-      ],
-      [
-        "UKL",
-        200,
-        4000
-      ],
-      [
-        "UKL",
-        200,
-        8000
-      ],
-      [
-        "UKL",
-        200,
-        16000
-      ],
-      [
-        "UKL",
-        200,
-        32000
-      ],
-      [
-        "UKL",
-        200,
-        64000
-      ],
-      [
-        "UKL",
-        800,
-        4000
-      ],
-      [
-        "UKL",
-        800,
-        8000
-      ],
-      [
-        "UKL",
-        800,
-        16000
-      ],
-      [
-        "UKL",
-        800,
-        32000
-      ],
-      [
-        "UKL",
-        800,
-        64000
-      ],
-      [
-        "BP",
-        50,
-        4000
-      ],
-      [
-        "BP",
-        50,
-        8000
-      ],
-      [
-        "BP",
-        50,
-        16000
-      ],
-      [
-        "BP",
-        50,
-        32000
-      ],
-      [
-        "BP",
-        50,
-        64000
-      ],
-      [
-        "BP",
-        200,
-        4000
-      ],
-      [
-        "BP",
-        200,
-        8000
-      ],
-      [
-        "BP",
-        200,
-        16000
-      ],
-      [
-        "BP",
-        200,
-        32000
-      ],
-      [
-        "BP",
-        200,
-        64000
-      ],
-      [
-        "BP",
-        800,
-        4000
-      ],
-      [
-        "BP",
-        800,
-        8000
-      ],
-      [
-        "BP",
-        800,
-        16000
-      ],
-      [
-        "BP",
-        800,
-        32000
-      ],
-      [
-        "BP",
-        800,
-        64000
-      ],
-      [
-        "BKL",
-        50,
-        4000
-      ],
-      [
-        "BKL",
-        50,
-        8000
-      ],
-      [
-        "BKL",
-        50,
-        16000
-      ],
-      [
-        "BKL",
-        50,
-        32000
-      ],
-      [
-        "BKL",
-        50,
-        64000
-      ],
-      [
-        "BKL",
-        200,
-        4000
-      ],
-      [
-        "BKL",
-        200,
-        8000
-      ],
-      [
-        "BKL",
-        200,
-        16000
-      ],
-      [
-        "BKL",
-        200,
-        32000
-      ],
-      [
-        "BKL",
-        200,
-        64000
-      ],
-      [
-        "BKL",
-        800,
-        4000
-      ],
-      [
-        "BKL",
-        800,
-        8000
-      ],
-      [
-        "BKL",
-        800,
-        16000
-      ],
-      [
-        "BKL",
-        800,
-        32000
-      ],
-      [
-        "BKL",
-        800,
-        64000
-      ]
-    ],
-    "reps": 10,
-    "n_jobs": 12,
-    "tasks": 600,
-    "digest": "c1f27099eae9bbc313bbd0a249c9f4e3a84a83a2ebdde9cb9cac2651b5c973b5"
-  },
-  "whole_pilot_aggregation_table_and_figure_seconds": 0.5610665829881327
+  "executed_notebook_sha256": "ecbc9d5d293c57f00f6fc03eacc2e54d394bd11e82fe1bd9d9692037b5bcf740"
 }

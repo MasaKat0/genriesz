@@ -2,30 +2,30 @@
   "experiment": "E-14",
   "stage": "stage1",
   "parent_repository": {
-    "sha": "96aa91e2af2cdbb7b240c15f3728b7e313a55948",
+    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": false,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e14"
+    "dirty_tracked": true,
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-14"
   },
   "genriesz": {
-    "sha": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1",
+    "sha": "bf0b658fee2d1449a008619e16c2c37a8460f7e5",
     "notebook": "notebooks/experiments/12_E14_sparse_offset_rate.ipynb",
     "notebook_blob": "474d0f392771b810c3bf833406b27252fe15c05b",
     "notebook_code_cells_sha256": "391f67b0cd79794d82eb8181a793740261ba0d651489b928d7d5da5f76d03b55",
     "computation": {
       "notebooks/experiments/12_E14_sparse_offset_rate.ipynb": "474d0f392771b810c3bf833406b27252fe15c05b",
-      "notebooks/experiments/grrexp": "6df531b5c9f56ef635ea7db6dd113eb86576e37e",
+      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
     "loaded_modules": {
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e14.py": "073cdd0df7e6161e0fc6db5c609a9a1ff6060021",
+      "notebooks/experiments/grrexp/e14.py": "02c445b641dba55fe0eda986007a8f2a5f24cbf1",
       "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
+      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -395,23 +395,24 @@
   "prerequisites": {
     "stage0": {
       "manifest_sha256": "2b40ac0307d4508d4ebe8b94249546152939a512161bea2822170f1a4eb8960c",
-      "commit": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1"
+      "commit": "bf0b658fee2d1449a008619e16c2c37a8460f7e5"
     },
     "stage0.5": {
-      "manifest_sha256": "cfd52f46aaf90ae7e2fe1b16f325e67d0cf8b242d47308010190e6b030c591c7",
-      "commit": "7e099c00de93bd7b6aa38309412ff17ae0c1ccf1"
+      "manifest_sha256": "c282f02d47d9018e87b72bb01d3ada0c5a76a5e94bf4aa060533a40cf9492f59",
+      "commit": "bf0b658fee2d1449a008619e16c2c37a8460f7e5"
     }
   },
-  "started_utc": "2026-10-07T20:17:55.542616+00:00",
-  "finished_utc": "2026-10-07T21:06:41.419982+00:00",
-  "wall_seconds": 2925.8850847909926,
+  "started_utc": "2026-10-08T01:35:12.129624+00:00",
+  "finished_utc": "2026-10-08T02:18:50.326475+00:00",
+  "wall_seconds": 2618.166452874997,
   "warnings": 0,
   "failures": 0,
   "outputs_sha256": {
     "figures/fig_E14_rate.pdf": "aede5f0dd9239358bacdd935600816d0234671d2dbd64d504b41dacb6aef9d75",
     "raw.parquet": "11c82984499b548c198f3a5880e4153ee2ce3334763036c3dd7c5ebe9de440a2",
     "summary.csv": "efa3081300794039796d64e32e17de10f4d4cd5498cdb46bb55868420c352570",
-    "tables/tab_E14.tex": "1edd12481383ee11fad996016224988712b362efd5afeba262a65c4c1e729279"
+    "tables/tab_E14.tex": "3142a74ba48757a53e6d8fb28644fe0534adfaee93c7ff10c57709b02e08f1e5",
+    "tables/tab_E14_rate.tex": "576e26b6b56105502cd0a364176482f11ce12cec62eee38a7ddb261f5f7e55cf"
   },
-  "executed_notebook_sha256": "ecbc9d5d293c57f00f6fc03eacc2e54d394bd11e82fe1bd9d9692037b5bcf740"
+  "executed_notebook_sha256": "480d82e16f18fba773803a91b05118a3389c8ba4f329bf17ca5a63731ee5c320"
 }

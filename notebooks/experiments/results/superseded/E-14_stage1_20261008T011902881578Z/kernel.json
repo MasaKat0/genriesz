@@ -319,17 +319,16 @@
     "figures/fig_E14_rate.pdf",
     "raw.parquet",
     "summary.csv",
-    "tables/tab_E14.tex",
-    "tables/tab_E14_rate.tex"
+    "tables/tab_E14.tex"
   ],
   "loaded_modules": {
     "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
     "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-    "notebooks/experiments/grrexp/e14.py": "02c445b641dba55fe0eda986007a8f2a5f24cbf1",
+    "notebooks/experiments/grrexp/e14.py": "073cdd0df7e6161e0fc6db5c609a9a1ff6060021",
     "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
     "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
     "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-    "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+    "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
     "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
     "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
     "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
