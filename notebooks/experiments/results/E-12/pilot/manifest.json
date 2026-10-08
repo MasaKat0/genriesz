@@ -2,18 +2,19 @@
   "experiment": "E-12",
   "stage": "stage0.5",
   "parent_repository": {
-    "sha": "3dd98aec21589f3423de36f28ad83a5a0701b7ab",
-    "gitlink": "dcbd8995534f8e3e0f72135126c9f7704552efb5",
-    "dirty_tracked": true
+    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
+    "dirty_tracked": true,
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-12"
   },
   "genriesz": {
-    "sha": "8c7d3f132aa53965d96fb8b49922bdd597c7e3da",
+    "sha": "d2477f79e40f30d867c7fc0ae665afb7a03eeec3",
     "notebook": "notebooks/experiments/10_E12_omitted_direction_balance.ipynb",
     "notebook_blob": "5cbf1f7091a5fb36054f0c88f9d282a8728c39d2",
     "notebook_code_cells_sha256": "d66e7a81795affa86818d54639e04c2bfb1f7d03ea90a303a83be0dc4c093164",
     "computation": {
       "notebooks/experiments/10_E12_omitted_direction_balance.ipynb": "5cbf1f7091a5fb36054f0c88f9d282a8728c39d2",
-      "notebooks/experiments/grrexp": "cecc8e23915f4ab1bd5559602d4fc0e600b60c90",
+      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -21,11 +22,11 @@
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
-      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
+      "notebooks/experiments/grrexp/e12.py": "9c9d5a06d908e1a8bfb69301df1a5ffcdc87d2e1",
+      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
+      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -177,16 +178,16 @@
     ]
   ],
   "prerequisites": {},
-  "started_utc": "2026-10-07T18:52:25.718572+00:00",
-  "finished_utc": "2026-10-07T18:56:21.681567+00:00",
-  "wall_seconds": 235.96099074999802,
+  "started_utc": "2026-10-08T02:03:25.057878+00:00",
+  "finished_utc": "2026-10-08T02:18:54.994317+00:00",
+  "wall_seconds": 929.9283256250055,
   "warnings": 33,
   "failures": 622,
   "outputs_sha256": {
     "status_counts.csv": "b32ea4ad585eafb1870f50c9c1e1032d5681b181132b3decf722a676ac513dd5",
-    "timing.csv": "dabc2a95d5f96ded4f8db5817185ef717be720f31d069a435f5f0ebd47b375d0"
+    "timing.csv": "366663476fa8da187c42b38a7515f3ece801b9fe04ac3bd2c718df91baf53554"
   },
-  "executed_notebook_sha256": "e02b525aa973b79a007ac7d7e743ddf614a9fc2814e442ca1107889df4378b82",
+  "executed_notebook_sha256": "05b985b7951e71cf4b66418d2dcd02406438caaf84021c4cbe73bf6fdbd5faa1",
   "parallel_identity": {
     "cells": [
       [
@@ -275,6 +276,6 @@
     "tasks": 160,
     "digest": "95e0a58906bac4465e27b9338aa3fb77d34a1862547776850249db080963bae5"
   },
-  "whole_pilot_aggregation_and_tables_seconds": 0.5963774170086253,
+  "whole_pilot_aggregation_and_tables_seconds": 0.8630611670087092,
   "timing_note": "the GBM tuning of (s, n) is timed with its Include cell"
 }

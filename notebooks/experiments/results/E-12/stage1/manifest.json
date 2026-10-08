@@ -2,18 +2,19 @@
   "experiment": "E-12",
   "stage": "stage1",
   "parent_repository": {
-    "sha": "3dd98aec21589f3423de36f28ad83a5a0701b7ab",
-    "gitlink": "dcbd8995534f8e3e0f72135126c9f7704552efb5",
-    "dirty_tracked": true
+    "sha": "8632f56962b649537f4ecabaf492c5edfe94cde4",
+    "gitlink": "6125d60e4a045a114c134745522ddadaf66ea0a5",
+    "dirty_tracked": false,
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-12"
   },
   "genriesz": {
-    "sha": "f1b2391147680a4746236825ff3c6f8fd4f53b63",
+    "sha": "a40ea48ae4bdffe0e2638b9324ac813b8ffe9598",
     "notebook": "notebooks/experiments/10_E12_omitted_direction_balance.ipynb",
     "notebook_blob": "5cbf1f7091a5fb36054f0c88f9d282a8728c39d2",
     "notebook_code_cells_sha256": "d66e7a81795affa86818d54639e04c2bfb1f7d03ea90a303a83be0dc4c093164",
     "computation": {
       "notebooks/experiments/10_E12_omitted_direction_balance.ipynb": "5cbf1f7091a5fb36054f0c88f9d282a8728c39d2",
-      "notebooks/experiments/grrexp": "cecc8e23915f4ab1bd5559602d4fc0e600b60c90",
+      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -21,11 +22,11 @@
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
-      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
+      "notebooks/experiments/grrexp/e12.py": "9c9d5a06d908e1a8bfb69301df1a5ffcdc87d2e1",
+      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
+      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -179,16 +180,16 @@
   "prerequisites": {
     "stage0": {
       "manifest_sha256": "8bda450536c6be0f76ea87b880c52c9da46529d2ad690b3a7ba019a2a3a930c3",
-      "commit": "f1b2391147680a4746236825ff3c6f8fd4f53b63"
+      "commit": "a40ea48ae4bdffe0e2638b9324ac813b8ffe9598"
     },
     "stage0.5": {
-      "manifest_sha256": "8e76cdacb89fe2ebd311ed4dd1f3b3f052fa319d8f8da3f9890ab8b3844a7e91",
-      "commit": "f1b2391147680a4746236825ff3c6f8fd4f53b63"
+      "manifest_sha256": "17caa8baace9b554e119a4206928e6ddcfa3efd58b731ba2191db56497b38cc6",
+      "commit": "a40ea48ae4bdffe0e2638b9324ac813b8ffe9598"
     }
   },
-  "started_utc": "2026-10-07T18:56:22.033329+00:00",
-  "finished_utc": "2026-10-07T19:27:11.812328+00:00",
-  "wall_seconds": 1851.8212325420027,
+  "started_utc": "2026-10-08T02:18:56.028357+00:00",
+  "finished_utc": "2026-10-08T03:09:29.375094+00:00",
+  "wall_seconds": 3033.3304775419965,
   "warnings": 6517,
   "failures": 123802,
   "outputs_sha256": {
@@ -196,9 +197,9 @@
     "raw.parquet": "fe0ecb863f8a8aa5f4cc46b7f6de471b2ee14152bdb64ffe8bbeebf62ffd1818",
     "summary.csv": "a8c4de8459c8bdbe2f4123730a6e3749b2cbb283dad22379ce35fc2038f4e6a8",
     "tables/tab_E12_bp.tex": "3643569b533c3491c6ed6923680e143173245c2818b86202237f866f7ee09228",
-    "tables/tab_E12_full.tex": "7040184e578ce846a18e3093c0fac6e08eccaf6f2bb7d6787f7caaf4535f04b6",
-    "tables/tab_E12_main.tex": "74fa211a2be2088c005341051442a189bb01d3e1225c8b047a3d30d9009b8d3d",
+    "tables/tab_E12_full.tex": "087c90bbad8abb552aa8667e6b64657b82051c4be8797a32f33203120d394910",
+    "tables/tab_E12_main.tex": "6ec2917f6271974be2bc1471b25737553bacf5df4093da6232bb5727971485cd",
     "tables/tab_E12_ord.tex": "b110e0d9918a5f1684051c97c3232eb291a5761b43c6cec04ba66a29eabf1323"
   },
-  "executed_notebook_sha256": "c1fb747c70c17aa57d7a5892f761f84ccc7f8619cc7e467be09235842ad9cb08"
+  "executed_notebook_sha256": "9d3205dbfd149200afbf8c89c33304d1a8a559bb52234a2a74858c958fe02c43"
 }
