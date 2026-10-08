@@ -2,26 +2,25 @@
   "experiment": "E-17",
   "stage": "stage0",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
-    "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-17"
+    "sha": "dbd8513df06261fb2cd7383d17e39d2e1886d5ee",
+    "gitlink": "b41308f6dc5a033b004bd908a0d76435b795550e",
+    "dirty_tracked": true
   },
   "genriesz": {
-    "sha": "cb67fbc96a1e498f463fdffb25f68ba848ccd71d",
+    "sha": "ed6c7b6fb34a807918ab8329028946f4f38f7beb",
     "notebook": "notebooks/experiments/15_E17_misspecification_bounds.ipynb",
     "notebook_blob": "c988a208c0480d00ae841c798680a852343c942b",
     "notebook_code_cells_sha256": "0640fee5684a08c6381897e649369ed70097c3f801f0dfe8df8d832844e920e9",
     "computation": {
       "notebooks/experiments/15_E17_misspecification_bounds.ipynb": "c988a208c0480d00ae841c798680a852343c942b",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "cecc8e23915f4ab1bd5559602d4fc0e600b60c90",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
     "loaded_modules": {
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
-      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
+      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -79,9 +78,9 @@
   "n": null,
   "cells": null,
   "prerequisites": {},
-  "started_utc": "2026-10-07T23:45:06.485308+00:00",
-  "finished_utc": "2026-10-07T23:45:41.015850+00:00",
-  "wall_seconds": 34.53141699999105,
+  "started_utc": "2026-10-07T19:33:32.927028+00:00",
+  "finished_utc": "2026-10-07T19:34:00.718168+00:00",
+  "wall_seconds": 27.790811209008098,
   "warnings": 6750570,
   "failures": 0,
   "outputs_sha256": {
@@ -90,5 +89,5 @@
     "summary.csv": "d3c802cd8662c2f6d87b6b2aefdffffb78bde83729040daf85525d639126e6f1",
     "tables/tab_E17.tex": "ce34f5ab540a7ed9c22edd558a6ecfaaf47f7e2cfb7233aabfc8eb432e6773fb"
   },
-  "executed_notebook_sha256": "fa3751d5d305fe62f34f8a668070ce25e8b6a8279f3bc643e8c2bc452cd3ec5e"
+  "executed_notebook_sha256": "042ccaafb1e45da470983808bb23866c360169111f204b7143d9a8a89d78388d"
 }
