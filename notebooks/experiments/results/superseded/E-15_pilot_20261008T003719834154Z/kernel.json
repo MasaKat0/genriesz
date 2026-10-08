@@ -1,6 +1,6 @@
 {
   "R": {
-    "partB": 2000
+    "partB": 10
   },
   "n": {
     "partB": [
@@ -29,25 +29,21 @@
     ]
   ],
   "warnings": 0,
-  "failures": 1,
+  "failures": 0,
   "outputs": [
-    "figures/fig_E15_coverage.pdf",
-    "raw.parquet",
-    "summary.csv",
-    "tables/tab_E15_exact.tex",
-    "tables/tab_E15_mc.tex",
-    "tables/tab_E15_status.tex"
+    "status_counts.csv",
+    "timing.csv"
   ],
   "loaded_modules": {
     "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
     "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
     "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-    "notebooks/experiments/grrexp/e12.py": "9c9d5a06d908e1a8bfb69301df1a5ffcdc87d2e1",
+    "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
     "notebooks/experiments/grrexp/e15.py": "cc638e92a9b172858595bd60e57e80e838c6deb3",
-    "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
+    "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
     "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
     "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-    "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+    "notebooks/experiments/grrexp/outputs.py": "c1ea19cad46dc2da52858ef69ce8480584e698d4",
     "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
     "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
     "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -77,6 +73,10 @@
       {
         "internal_api": "openmp",
         "num_threads": 1
+      },
+      {
+        "internal_api": "openmp",
+        "num_threads": 1
       }
     ],
     "torch": {
@@ -99,5 +99,30 @@
   "pip_freeze_sha256": "f771f299d454cc037e9666d2fa3539d9996ef635d0cf4c502832925d487c5f9f",
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
-  "extra": {}
+  "extra": {
+    "whole_pilot_aggregation_table_and_figure_seconds": 0.5039431249897461
+  },
+  "parallel_identity": {
+    "cells": [
+      [
+        500
+      ],
+      [
+        1000
+      ],
+      [
+        2000
+      ],
+      [
+        4000
+      ],
+      [
+        8000
+      ]
+    ],
+    "reps": 10,
+    "n_jobs": 12,
+    "tasks": 50,
+    "digest": "185c81b940bee96dde39e3d3dfc8b331c183a37839ea1dcc25ff4d03efbd9618"
+  }
 }

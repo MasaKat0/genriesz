@@ -1,20 +1,19 @@
 {
   "experiment": "E-15",
-  "stage": "stage1",
+  "stage": "stage0.5",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "sha": "5cab1fd229f190cfff7bc59d129d0415da16b07f",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-15"
+    "dirty_tracked": true
   },
   "genriesz": {
-    "sha": "1eb53ad6bb775f89ad8cc95fae92dbc901e958ef",
+    "sha": "1d8c9bee7e6180ae81fc57a1999d6624d1cf2c46",
     "notebook": "notebooks/experiments/13_E15_rw_undersmoothing.ipynb",
     "notebook_blob": "85a047828210e1d805cc2f700e94d517c7729144",
     "notebook_code_cells_sha256": "7f41263d107b5710b8f22491a4e4c1fb7bca24d18da24c6a25423b658461aadf",
     "computation": {
       "notebooks/experiments/13_E15_rw_undersmoothing.ipynb": "85a047828210e1d805cc2f700e94d517c7729144",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "3abc37c2ec259d7e4a33f29842fda8de330af515",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -22,12 +21,12 @@
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e12.py": "9c9d5a06d908e1a8bfb69301df1a5ffcdc87d2e1",
+      "notebooks/experiments/grrexp/e12.py": "21d7e5fe6455ff4efb70bc4e42dbccb05ef2ddde",
       "notebooks/experiments/grrexp/e15.py": "cc638e92a9b172858595bd60e57e80e838c6deb3",
-      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
+      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/outputs.py": "c1ea19cad46dc2da52858ef69ce8480584e698d4",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/population.py": "3874c2f2f8feeda77c6b22752c261d1a31cd235b",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
@@ -68,6 +67,10 @@
       {
         "internal_api": "openmp",
         "num_threads": 1
+      },
+      {
+        "internal_api": "openmp",
+        "num_threads": 1
       }
     ],
     "torch": {
@@ -80,9 +83,9 @@
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
   "data_sha256": {},
-  "entropy": 20261007,
+  "entropy": 20261008,
   "R": {
-    "partB": 2000
+    "partB": 10
   },
   "n": {
     "partB": [
@@ -110,28 +113,39 @@
       8000
     ]
   ],
-  "prerequisites": {
-    "stage0": {
-      "manifest_sha256": "1004803c05220e479ccb574c9f8e20f74bc2844b34d8ad9e9b1cfda6792cac8a",
-      "commit": "1eb53ad6bb775f89ad8cc95fae92dbc901e958ef"
-    },
-    "stage0.5": {
-      "manifest_sha256": "b1311a52bf1f684befd3dd68f81c7666cc9ed8349ea3b365020e9d26bf0104f4",
-      "commit": "1eb53ad6bb775f89ad8cc95fae92dbc901e958ef"
-    }
-  },
-  "started_utc": "2026-10-08T00:39:10.442920+00:00",
-  "finished_utc": "2026-10-08T01:18:59.657367+00:00",
-  "wall_seconds": 2389.0068845829956,
+  "prerequisites": {},
+  "started_utc": "2026-10-07T20:36:41.966649+00:00",
+  "finished_utc": "2026-10-07T20:38:42.603137+00:00",
+  "wall_seconds": 120.6340525830019,
   "warnings": 0,
-  "failures": 1,
+  "failures": 0,
   "outputs_sha256": {
-    "figures/fig_E15_coverage.pdf": "0ed4e3983615df2ebcb397c9744bbe2f6f6ab1d298169411230fd4ef3a86fb82",
-    "raw.parquet": "560dc956bf2fd5b9696baa36cd5c912fa609c8911919939611fe1dca6f33709b",
-    "summary.csv": "a5ce58c2d257535cebb99ca58e53323f7231b718cfb62a33673173a4c35bdc3b",
-    "tables/tab_E15_exact.tex": "492918d47771244ff2aadf9582dc2b2331cfe3fd056691a2320bc39c4a220de7",
-    "tables/tab_E15_mc.tex": "cf22d23c42fbdd80a26b697b0ef8f233560bd42b68c4faf5bbd06f528a895ab4",
-    "tables/tab_E15_status.tex": "ccd1522b3aead533a868f2a3dd226af50b0cd6d3334fc4f5b1b8ac76c3318bf5"
+    "status_counts.csv": "1606bbfa7aef963c0ad42dd5b222c05f3b58f748bd7ed981281327f07c5d4475",
+    "timing.csv": "3c89ae3ead736f3d35e190e0724a99486c9f04ff95ea8244a3eeb8a3305df65f"
   },
-  "executed_notebook_sha256": "3b0151b355cfa2a5d10391547fb9453a6a2edc73848df299ccec67d3fc4a52c8"
+  "executed_notebook_sha256": "cd30cacdf77a9f6fdd9b11c8d87e85b11c1b2badb218e571c10c03f33ec686fa",
+  "parallel_identity": {
+    "cells": [
+      [
+        500
+      ],
+      [
+        1000
+      ],
+      [
+        2000
+      ],
+      [
+        4000
+      ],
+      [
+        8000
+      ]
+    ],
+    "reps": 10,
+    "n_jobs": 12,
+    "tasks": 50,
+    "digest": "185c81b940bee96dde39e3d3dfc8b331c183a37839ea1dcc25ff4d03efbd9618"
+  },
+  "whole_pilot_aggregation_table_and_figure_seconds": 0.5039431249897461
 }
