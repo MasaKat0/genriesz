@@ -1,0 +1,27 @@
+\begin{tabular}{lrl}
+\hline
+Method & Successful splits & Failures by status \\
+\hline
+UKL ($C=0$), D2 & 53/100 & uncertified\_numerical\_boundary: 47 \\
+UKL ($C=0$), D2, TMLE & 53/100 & uncertified\_numerical\_boundary: 47 \\
+BP ($\omega=0.5$, $C=0$), D1 & 0/100 & uncertified\_numerical\_boundary: 100 \\
+BP ($\omega=0.5$, $C=0$), D1, TMLE & 0/100 & uncertified\_numerical\_boundary: 100 \\
+BP ($\omega=0.5$, $C=0$), D2 & 0/100 & uncertified\_numerical\_boundary: 100 \\
+BP ($\omega=0.5$, $C=0$), D2, TMLE & 0/100 & uncertified\_numerical\_boundary: 100 \\
+BP ($\omega=0.5$, $C=0$), D3 & 99/100 & uncertified\_numerical\_boundary: 1 \\
+BP ($\omega=0.5$, $C=0$), D3, TMLE & 99/100 & uncertified\_numerical\_boundary: 1 \\
+BKL ($C=0.05$), D1 & 0/100 & domain\_prediction: 100 \\
+BKL ($C=0.05$), D1, TMLE & 0/100 & domain\_prediction: 100 \\
+BKL ($C=0.05$), D2 & 0/100 & domain\_prediction: 100 \\
+BKL ($C=0.05$), D2, TMLE & 0/100 & domain\_prediction: 100 \\
+BKL ($C=0.05$), D3 & 0/100 & cv\_failed: 96, domain\_prediction: 4 \\
+BKL ($C=0.05$), D3, TMLE & 0/100 & cv\_failed: 96, domain\_prediction: 4 \\
+\hline
+\multicolumn{3}{l}{Full-sample fits (weights for the SMD and ESS):} \\
+BP ($\omega=0.5$, $C=0$), D1 & -- & uncertified\_numerical\_boundary \\
+BP ($\omega=0.5$, $C=0$), D2 & -- & uncertified\_numerical\_boundary \\
+BKL ($C=0.05$), D1 & -- & domain\_prediction \\
+BKL ($C=0.05$), D2 & -- & domain\_prediction \\
+BKL ($C=0.05$), D3 & -- & cv\_failed \\
+\hline
+\end{tabular}
