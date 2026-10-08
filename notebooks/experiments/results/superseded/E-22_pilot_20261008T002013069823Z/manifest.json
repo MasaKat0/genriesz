@@ -1,20 +1,20 @@
 {
   "experiment": "E-22",
-  "stage": "stage1",
+  "stage": "stage0.5",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "sha": "7ff0170b6147cf120b543977238b00af7fcf25b6",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
     "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-22"
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e22"
   },
   "genriesz": {
-    "sha": "a1d05e6016beac88af973f769dbb264fd5e3c42a",
+    "sha": "293ebd7c4946e6b23f58fcd1ac99a4ddf7bda1b6",
     "notebook": "notebooks/experiments/19_E22_lalonde.ipynb",
     "notebook_blob": "351404d6a6149ed9e7930b701510458a0f251b87",
     "notebook_code_cells_sha256": "f178c89d8d162ac4398c914df3bcfeebb11e65019578eed7c457c093fdf057a9",
     "computation": {
       "notebooks/experiments/19_E22_lalonde.ipynb": "351404d6a6149ed9e7930b701510458a0f251b87",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "1ca0ec8f0481fc8faebf43caf247c28e00cdadfd",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -23,7 +23,7 @@
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/e22.py": "7438e0203a72892a8a7ecf4bfdfcb1565ec83725",
       "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/outputs.py": "4da96a10e2af67e2b053f7aebf2c325e2d6f196b",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -81,9 +81,9 @@
   "data_sha256": {
     "lalonde/lalonde.csv": "0e07558a87643b1a44bd3fc1d634890f0e9175e9c2bc02d7aeed5139ad771557"
   },
-  "entropy": 20261007,
+  "entropy": 20261008,
   "R": {
-    "main": 100
+    "main": 10
   },
   "n": {
     "main": [
@@ -95,26 +95,27 @@
       614
     ]
   ],
-  "prerequisites": {
-    "stage0.5": {
-      "manifest_sha256": "6476b969309105703da7980b855dfbb222a040e6464d71b63f4f8dba311a06d5",
-      "commit": "a1d05e6016beac88af973f769dbb264fd5e3c42a"
-    }
-  },
-  "started_utc": "2026-10-08T00:24:54.778315+00:00",
-  "finished_utc": "2026-10-08T00:37:15.870875+00:00",
-  "wall_seconds": 741.1151055829978,
-  "warnings": 300,
-  "failures": 548,
+  "prerequisites": {},
+  "started_utc": "2026-10-07T22:31:21.581759+00:00",
+  "finished_utc": "2026-10-07T22:33:58.655286+00:00",
+  "wall_seconds": 157.07257800000662,
+  "warnings": 30,
+  "failures": 56,
   "outputs_sha256": {
-    "figures/fig_E22_love.pdf": "d18e17e90c18d7b796b6f41d4eded10668027117b6eb19448983e44751f5dac3",
-    "raw.parquet": "11a1ff6d35630e548fe7db1b2ce7f8eab97cd62e1a514a5775f64af985e078a8",
-    "summary.csv": "d07e0397ae4d54272c2e1787945bab41d753ba25bc52a0034ea335c21828ef22",
-    "tables/tab_E22_diag.tex": "987292dfc62bd09f04eb385a92582b2b506577e15bea4261bef85ac3e199f2bd",
-    "tables/tab_E22_full.tex": "39e76e95739bdeec2cef733933d2ca7604caaa726cb731f6826ae5d567ad067b",
-    "tables/tab_E22_main.tex": "c818df5d9c4c13888fc74c0dd8f15502cd2e119e3f21540bbd62d4b9ff1a2c40",
-    "tables/tab_E22_smd.tex": "7c92c3ba3f8408270b7c3ab0aebf020fbf2d105f0422ae0d7b82002fce1ab4c9",
-    "tables/tab_E22_status.tex": "bcdd023577abffb884fd3bce89778f124c7c0094a8e7c1da27ee01681b1b15ed"
+    "status_counts.csv": "26a4eede62b745485d58b5596e30900cc7bead893bc1d0e7eb30689e7ffc3145",
+    "timing.csv": "46d7a1ffbf3ddf2cab9e876a9b85275344aaa8b3fd8a4d34c1213860679927d1"
   },
-  "executed_notebook_sha256": "2a3183460a243c85128c316af160a1400573020efa1c433435bbc980104b8e0a"
+  "executed_notebook_sha256": "ad106e68f5c15e68d4084748fd3c8afb9ea19c83672dfcd92b0b89dc8a19cf46",
+  "parallel_identity": {
+    "cells": [
+      [
+        614
+      ]
+    ],
+    "reps": 10,
+    "n_jobs": 12,
+    "tasks": 10,
+    "digest": "761b1db0b828bd9d5da5c14bec0b6ba0361493dc044244411c1cb3de82efce63"
+  },
+  "whole_pilot_aggregation_and_table_seconds": 0.7145180829975288
 }

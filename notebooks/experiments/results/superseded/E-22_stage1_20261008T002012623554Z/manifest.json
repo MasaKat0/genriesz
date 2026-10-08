@@ -2,19 +2,19 @@
   "experiment": "E-22",
   "stage": "stage1",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
+    "sha": "7ff0170b6147cf120b543977238b00af7fcf25b6",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
     "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-22"
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e22"
   },
   "genriesz": {
-    "sha": "a1d05e6016beac88af973f769dbb264fd5e3c42a",
+    "sha": "26745dce87d32ddacb51a2859ebefa8a7d37f787",
     "notebook": "notebooks/experiments/19_E22_lalonde.ipynb",
     "notebook_blob": "351404d6a6149ed9e7930b701510458a0f251b87",
     "notebook_code_cells_sha256": "f178c89d8d162ac4398c914df3bcfeebb11e65019578eed7c457c093fdf057a9",
     "computation": {
       "notebooks/experiments/19_E22_lalonde.ipynb": "351404d6a6149ed9e7930b701510458a0f251b87",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "1ca0ec8f0481fc8faebf43caf247c28e00cdadfd",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -23,7 +23,7 @@
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/e22.py": "7438e0203a72892a8a7ecf4bfdfcb1565ec83725",
       "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/outputs.py": "4da96a10e2af67e2b053f7aebf2c325e2d6f196b",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -97,13 +97,13 @@
   ],
   "prerequisites": {
     "stage0.5": {
-      "manifest_sha256": "6476b969309105703da7980b855dfbb222a040e6464d71b63f4f8dba311a06d5",
-      "commit": "a1d05e6016beac88af973f769dbb264fd5e3c42a"
+      "manifest_sha256": "2ebd6843a8ba01846a25e6b6911e2a7204cebcc88ab61dd0443a9b84be645426",
+      "commit": "26745dce87d32ddacb51a2859ebefa8a7d37f787"
     }
   },
-  "started_utc": "2026-10-08T00:24:54.778315+00:00",
-  "finished_utc": "2026-10-08T00:37:15.870875+00:00",
-  "wall_seconds": 741.1151055829978,
+  "started_utc": "2026-10-07T22:34:47.019819+00:00",
+  "finished_utc": "2026-10-07T22:39:06.386232+00:00",
+  "wall_seconds": 259.3649828339985,
   "warnings": 300,
   "failures": 548,
   "outputs_sha256": {
@@ -116,5 +116,5 @@
     "tables/tab_E22_smd.tex": "7c92c3ba3f8408270b7c3ab0aebf020fbf2d105f0422ae0d7b82002fce1ab4c9",
     "tables/tab_E22_status.tex": "bcdd023577abffb884fd3bce89778f124c7c0094a8e7c1da27ee01681b1b15ed"
   },
-  "executed_notebook_sha256": "2a3183460a243c85128c316af160a1400573020efa1c433435bbc980104b8e0a"
+  "executed_notebook_sha256": "ab16df0eeda5f76e29d1e1504aa97ba4afe0bfa69d7251858e7cfa89e3789d18"
 }
