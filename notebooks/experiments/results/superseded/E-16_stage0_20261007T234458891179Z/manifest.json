@@ -2,26 +2,25 @@
   "experiment": "E-16",
   "stage": "stage0",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
-    "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-16"
+    "sha": "70a5597ba3fb1cd55f5677580c523552b5693f6b",
+    "gitlink": "18c39989388ffaa348583c2d8af01233f958177f",
+    "dirty_tracked": true
   },
   "genriesz": {
-    "sha": "34126bc12abf51a0fe693e29f6b40b6b65968ac7",
+    "sha": "f9ba4031f05201f67b87269370be103263f7f0b7",
     "notebook": "notebooks/experiments/14_E16_exact_examples.ipynb",
     "notebook_blob": "46019f68070f193772d18c3ee4dd64b23314bb9b",
     "notebook_code_cells_sha256": "ea812f423f8938fb02c3b83ec81963e57e7de6c94b49e9e5733e08c370780626",
     "computation": {
       "notebooks/experiments/14_E16_exact_examples.ipynb": "46019f68070f193772d18c3ee4dd64b23314bb9b",
-      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
+      "notebooks/experiments/grrexp": "e2b0cb0090f9697fe3d18d3d22ca3d48bb0b21a2",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
     "loaded_modules": {
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
-      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
-      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
+      "notebooks/experiments/grrexp/env.py": "447dffc9223ae3cbc4e3d0b8262520902d79b6e6",
+      "notebooks/experiments/grrexp/outputs.py": "990cd5033b01ec75c7ebbcb60b6235f9afc90f37",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -78,9 +77,9 @@
   "n": null,
   "cells": null,
   "prerequisites": {},
-  "started_utc": "2026-10-07T23:44:59.425119+00:00",
-  "finished_utc": "2026-10-07T23:45:03.904408+00:00",
-  "wall_seconds": 4.479266832990106,
+  "started_utc": "2026-10-07T20:03:04.225398+00:00",
+  "finished_utc": "2026-10-07T20:03:08.305705+00:00",
+  "wall_seconds": 4.077518417005194,
   "warnings": 393,
   "failures": 0,
   "outputs_sha256": {
@@ -89,5 +88,5 @@
     "summary.csv": "ac292ce51587ddabf32ffc626ba011f3a266194f6d87f0a9831cfd5f97c85f11",
     "tables/tab_E16.tex": "53bbe4f0c8e4f3e104c7d97dd44533c5ecf341d3365e52ceb75f027326967949"
   },
-  "executed_notebook_sha256": "e6f2240eb233fabe5f10720d48dc148082390c1a583ee29bf53d8814cc876b23"
+  "executed_notebook_sha256": "5bbc0b6e3633396b55b96e45c704bf6bfd84f949149808a7eabc4e89d44400b7"
 }
