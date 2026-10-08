@@ -2,19 +2,19 @@
   "experiment": "E-18",
   "stage": "stage0.5",
   "parent_repository": {
-    "sha": "6d60495722df27ef44e687e2e7298dbe8ed3a270",
+    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
     "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
     "dirty_tracked": true,
-    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wt-e18"
+    "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-18"
   },
   "genriesz": {
-    "sha": "57a68af0b196d1b27064db7143a1a85e87a1d845",
-    "notebook": "notebooks/experiments/12_E18_heldout_riesz_selection.ipynb",
-    "notebook_blob": "ce60ab80755d5bd1c211898f672296eab7c1edf0",
+    "sha": "dba7fd99c06f923592edd1576b67dd490ef46b79",
+    "notebook": "notebooks/experiments/20_E18_heldout_riesz_selection.ipynb",
+    "notebook_blob": "af1f5db0aa9b06ffa853f04bf1766d4dbe660ddc",
     "notebook_code_cells_sha256": "20403b0a293d544fd1a9d41dc3bd35fe6a7b98c710667cb2323f5feea452346c",
     "computation": {
-      "notebooks/experiments/12_E18_heldout_riesz_selection.ipynb": "ce60ab80755d5bd1c211898f672296eab7c1edf0",
-      "notebooks/experiments/grrexp": "3eb482f95fdb201a7b46040e829dd5df0006f32e",
+      "notebooks/experiments/20_E18_heldout_riesz_selection.ipynb": "af1f5db0aa9b06ffa853f04bf1766d4dbe660ddc",
+      "notebooks/experiments/grrexp": "981afbe8fe0c576bd593e9117c12eca94ea95071",
       "notebooks/experiments/requirements-lock.txt": "6a4e385bed205377cf0c5b8c3cd4fe090b391c59",
       "src/genriesz": "938e5d20febbc03ae28d41c0f5d39508be7b042f"
     },
@@ -22,11 +22,11 @@
       "notebooks/experiments/grrexp/__init__.py": "2a69b09cd53824b733b41d2c6908765b7abe88b3",
       "notebooks/experiments/grrexp/baselines.py": "962554e236d82b097416e258a8c977e5bf82885a",
       "notebooks/experiments/grrexp/bootstrap.py": "903b38c1b537d746ea87f076ec014b2fac035f84",
-      "notebooks/experiments/grrexp/e18.py": "99c6d3fbaca52560889b8890ed4d5667183a3557",
-      "notebooks/experiments/grrexp/env.py": "1853cf84fe3f22b630961c5f4dadc54a85b8d2b6",
+      "notebooks/experiments/grrexp/e18.py": "1c8e7c53e768922317aa7bb32505d6f992627f3d",
+      "notebooks/experiments/grrexp/env.py": "734f972f0834dbaef88f3719e5e866d19fc61190",
       "notebooks/experiments/grrexp/inference.py": "fd135e9f2020702118b494cb41fd8369f6252bb0",
       "notebooks/experiments/grrexp/metrics.py": "72c909cbe40386fa1a1ef71db534a9edb40b27f5",
-      "notebooks/experiments/grrexp/outputs.py": "6b9373822616a523532b4316bc843aa993dea122",
+      "notebooks/experiments/grrexp/outputs.py": "718804a0927a1d12dc21bd6d43d57a4651ab72ff",
       "notebooks/experiments/grrexp/parallel.py": "df6368c4ba990c32168507d31d2576c0086ff011",
       "notebooks/experiments/grrexp/seeds.py": "43c5f6fe4125aa9069cf3cdbea92e08a78ea28dd",
       "src/genriesz/__init__.py": "d6547b4cc69f10514785aabf35fe912b64c6324d",
@@ -136,16 +136,16 @@
     ]
   ],
   "prerequisites": {},
-  "started_utc": "2026-10-07T21:23:31.756735+00:00",
-  "finished_utc": "2026-10-07T22:12:22.213287+00:00",
-  "wall_seconds": 2930.4384367919993,
+  "started_utc": "2026-10-07T23:45:03.954202+00:00",
+  "finished_utc": "2026-10-08T00:35:16.522951+00:00",
+  "wall_seconds": 3012.661040542007,
   "warnings": 0,
   "failures": 39,
   "outputs_sha256": {
     "status_counts.csv": "189bc72e74ced90ebce9d5a2e2b99467aa1160588e3832f9f265742babc8d5d9",
-    "timing.csv": "06b384ed7b7d3e25df6c60ad33379825a8acacfe06b0f21bed154980683ae07a"
+    "timing.csv": "3a611ee63b0306f139f8ccb28e4d6db3d7969739c0079bfef057aff093b55581"
   },
-  "executed_notebook_sha256": "eb3160cc61f9f7f18f9c0d45f252e8ce37a41db78ba5b5af7db2455e68e99655",
+  "executed_notebook_sha256": "f91a5fb34bde65683192d77167426d7220ba568bbc44b91df97080ebef5b37ac",
   "parallel_identity": {
     "cells": [
       [
@@ -186,5 +186,5 @@
     "tasks": 80,
     "digest": "99b07fcb4096cd539457fbef38d4360f137b9071b172872f7518f4c12f7a9c4a"
   },
-  "whole_pilot_aggregation_table_and_figure_seconds": 0.34998474999156315
+  "whole_pilot_aggregation_table_and_figure_seconds": 0.45512954199512023
 }

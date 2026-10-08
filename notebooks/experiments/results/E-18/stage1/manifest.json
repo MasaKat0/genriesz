@@ -1,14 +1,14 @@
 {
   "experiment": "E-18",
-  "stage": "stage0",
+  "stage": "stage1",
   "parent_repository": {
-    "sha": "78b7fe0698c25fb415e0a0a280619556882cea12",
-    "gitlink": "90d90f3e9217608e72ce8ea5126540e76e879d92",
-    "dirty_tracked": true,
+    "sha": "818f4bf9d294faa14acbf697996a5f7a4822025b",
+    "gitlink": "a7526d2f54e03ea03a40da168c672c1454975822",
+    "dirty_tracked": false,
     "genriesz_worktree": "/private/tmp/claude-501/-Users-mkato-Dropbox---/a16e4048-2c65-4e8e-98af-cde8f0bdc6bf/scratchpad/wtf-E-18"
   },
   "genriesz": {
-    "sha": "fc2512ef6b60b0140e32460cb2c3c300061e3bec",
+    "sha": "b9c04f8cb508556e511302a0dbe0d754996c02e7",
     "notebook": "notebooks/experiments/20_E18_heldout_riesz_selection.ipynb",
     "notebook_blob": "af1f5db0aa9b06ffa853f04bf1766d4dbe660ddc",
     "notebook_code_cells_sha256": "20403b0a293d544fd1a9d41dc3bd35fe6a7b98c710667cb2323f5feea452346c",
@@ -66,10 +66,6 @@
       {
         "internal_api": "openmp",
         "num_threads": 1
-      },
-      {
-        "internal_api": "openmp",
-        "num_threads": 1
       }
     ],
     "torch": {
@@ -82,18 +78,80 @@
   "blas": "Build Dependencies:\n  blas:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\n  lapack:\n    detection method: system\n    found: true\n    include directory: unknown\n    lib directory: unknown\n    name: accelerate\n    openblas configuration: unknown\n    pc file directory: unknown\n    version: unknown\nCompilers:\n  c:\n    commands: cc\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  c++:\n    commands: c++\n    linker: ld64\n    name: clang\n    version: 15.0.0\n  cython:\n    commands: cython\n    linker: cython\n    name: cython\n    version: 3.2.1\nMachine Information:\n  build:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\n  host:\n    cpu: aarch64\n    endian: little\n    family: aarch64\n    system: darwin\nPython Information:\n  path: /private/var/folders/8s/1jkm89h96qjdtjr7q3bll2vh0000gn/T/build-env-wu_0vrew/bin/python\n  version: '3.13'\nSIMD Extensions:\n  baseline:\n  - NEON\n  - NEON_FP16\n  - NEON_VFPV4\n  - ASIMD\n  found:\n  - ASIMDHP\n  not found:\n  - ASIMDFHM\n\n",
   "cpu": "Apple M4 Pro",
   "data_sha256": {},
-  "entropy": null,
-  "R": null,
-  "n": null,
-  "cells": null,
-  "prerequisites": {},
-  "started_utc": "2026-10-07T23:44:59.583003+00:00",
-  "finished_utc": "2026-10-07T23:45:03.629700+00:00",
-  "wall_seconds": 4.046687166992342,
-  "warnings": 0,
-  "failures": 0,
-  "outputs_sha256": {
-    "stage0_e18_design.json": "b6e76ea2c48e0ac64fbc7991652ede5a4c58ad0a4bb63e48cc971b185672a81a"
+  "entropy": 20261007,
+  "R": {
+    "18A": 500,
+    "18B": 1000
   },
-  "executed_notebook_sha256": "f6a973ef3e6c4ac3b348f84c7d512ee3a677abc11c02683132f69825af6ae30e"
+  "n": {
+    "18A": [
+      1000,
+      2000,
+      4000,
+      8000
+    ],
+    "18B": [
+      1000,
+      2000,
+      4000,
+      8000
+    ]
+  },
+  "cells": [
+    [
+      "18A",
+      1000
+    ],
+    [
+      "18A",
+      2000
+    ],
+    [
+      "18A",
+      4000
+    ],
+    [
+      "18A",
+      8000
+    ],
+    [
+      "18B",
+      1000
+    ],
+    [
+      "18B",
+      2000
+    ],
+    [
+      "18B",
+      4000
+    ],
+    [
+      "18B",
+      8000
+    ]
+  ],
+  "prerequisites": {
+    "stage0": {
+      "manifest_sha256": "2e695f04f64d003bf9cca7a56de3c91ada71402d07938e1cc685e1a4128c5584",
+      "commit": "b9c04f8cb508556e511302a0dbe0d754996c02e7"
+    },
+    "stage0.5": {
+      "manifest_sha256": "cdacb1ebef353cca5db47dcc325c8a5c28d478314f47da705448d8855648d87b",
+      "commit": "b9c04f8cb508556e511302a0dbe0d754996c02e7"
+    }
+  },
+  "started_utc": "2026-10-08T00:35:17.532877+00:00",
+  "finished_utc": "2026-10-08T07:46:18.923500+00:00",
+  "wall_seconds": 23039.739816333997,
+  "warnings": 0,
+  "failures": 3258,
+  "outputs_sha256": {
+    "figures/fig_E18_oracle.pdf": "d794051ee2b52f70485d29a658e7dc48f9019f4f1af9b95fa363f2e5c045c925",
+    "macros_E-18.tex": "8a3abf51b9194c1334a0cb54d3739f790a8c8572e30e2be7570572784ab1614f",
+    "raw.parquet": "8e372436dee86ae48f68e60bb933a101a41068e91e6c32e53c6e8cd0e24708dd",
+    "summary.csv": "2b43007bf62171543d1ce86bb680e2828a487fb6a0bfcf2e5ff6dc0aa08e543a",
+    "tables/tab_E18_inference.tex": "ff056b7d33857009ee2afe7c7a7652934557654d2297746eb8c44cd8d6836abf"
+  },
+  "executed_notebook_sha256": "0c5ef08b99d1bb3cba12f5afdfab3bfdd271249e03a4b82fc75020505e91a97d"
 }

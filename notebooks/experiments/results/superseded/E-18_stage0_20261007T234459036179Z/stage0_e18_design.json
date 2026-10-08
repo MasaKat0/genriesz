@@ -1,0 +1,179 @@
+{
+  "M": 65,
+  "designs": {
+    "18A": {
+      "C_sel": 133069.851416,
+      "Cm2_from_bound": 40.82920542270945,
+      "E_alpha0_sq": {
+        "48": 4.963092376086319,
+        "64": 4.963092376086314
+      },
+      "checks": {
+        "Cm2": true,
+        "E_alpha0_sq": true,
+        "e_range": true,
+        "eta_bound_holds": true,
+        "max_abs_alpha0": true
+      },
+      "e_range_from_bound": [
+        0.04898454376698666,
+        0.9510154562330133
+      ],
+      "eta_bound": 2.9660255,
+      "eta_max_grid": 2.448369751003856,
+      "max_abs_alpha0_from_bound": 20.414602711354725,
+      "t_fold": 9.472704636443673
+    },
+    "18B": {
+      "C_sel": 133943.810168,
+      "Cm2_from_bound": 65.10583771492863,
+      "E_alpha0_sq": {
+        "48": 5.366888249241136,
+        "64": 5.366888249241117
+      },
+      "checks": {
+        "Cm2": true,
+        "E_alpha0_sq": true,
+        "e_range": true,
+        "eta_bound_holds": true,
+        "max_abs_alpha0": true
+      },
+      "e_range_from_bound": [
+        0.030719211520742105,
+        0.9692807884792579
+      ],
+      "eta_bound": 3.4516661,
+      "eta_max_grid": 3.451666049839541,
+      "max_abs_alpha0_from_bound": 32.55291885746429,
+      "t_fold": 9.472704636443673
+    }
+  },
+  "ok": true,
+  "predicted_coverage_18B": 0.95,
+  "radius": {
+    "BKL1": {
+      "max_abs_alpha": 49.999932459105224,
+      "ok": true,
+      "rows": {
+        "d=0,side=-1": {
+          "alpha": -49.999932459105224,
+          "in_domain": true,
+          "u_ref": 1.0986122886681098
+        },
+        "d=0,side=1": {
+          "alpha": -1.261538477524494,
+          "in_domain": true,
+          "u_ref": 1.0986122886681098
+        },
+        "d=1,side=-1": {
+          "alpha": 1.261538477524494,
+          "in_domain": true,
+          "u_ref": -1.0986122886681098
+        },
+        "d=1,side=1": {
+          "alpha": 49.999932459105224,
+          "in_domain": true,
+          "u_ref": -1.0986122886681098
+        }
+      }
+    },
+    "BP0": {
+      "max_abs_alpha": 7.812549140456984,
+      "ok": true,
+      "rows": {
+        "d=0,side=-1": {
+          "alpha": -7.812549140456984,
+          "in_domain": true,
+          "u_ref": -1.2426406871192854
+        },
+        "d=0,side=1": {
+          "alpha": -0.0011111130470960824,
+          "in_domain": true,
+          "u_ref": -1.2426406871192854
+        },
+        "d=1,side=-1": {
+          "alpha": 0.0011111130470960824,
+          "in_domain": true,
+          "u_ref": 1.2426406871192854
+        },
+        "d=1,side=1": {
+          "alpha": 7.812549140456984,
+          "in_domain": true,
+          "u_ref": 1.2426406871192854
+        }
+      }
+    },
+    "SQ": {
+      "max_abs_alpha": 50.0,
+      "ok": true,
+      "rows": {
+        "d=0,side=-1": {
+          "alpha": -50.0,
+          "in_domain": true,
+          "u_ref": -4.0
+        },
+        "d=0,side=1": {
+          "alpha": 46.0,
+          "in_domain": true,
+          "u_ref": -4.0
+        },
+        "d=1,side=-1": {
+          "alpha": -46.0,
+          "in_domain": true,
+          "u_ref": 4.0
+        },
+        "d=1,side=1": {
+          "alpha": 50.0,
+          "in_domain": true,
+          "u_ref": 4.0
+        }
+      }
+    },
+    "UKL1": {
+      "max_abs_alpha": 49.99999519257954,
+      "ok": true,
+      "rows": {
+        "d=0,side=-1": {
+          "alpha": -49.99999519257954,
+          "in_domain": true,
+          "u_ref": -0.0
+        },
+        "d=0,side=1": {
+          "alpha": -1.0204081652675638,
+          "in_domain": true,
+          "u_ref": -0.0
+        },
+        "d=1,side=-1": {
+          "alpha": 1.0204081652675638,
+          "in_domain": true,
+          "u_ref": 0.0
+        },
+        "d=1,side=1": {
+          "alpha": 49.99999519257954,
+          "in_domain": true,
+          "u_ref": 0.0
+        }
+      }
+    }
+  },
+  "ukl_18b": {
+    "checks": {
+      "l1": true,
+      "represents_u0": true
+    },
+    "coefficients": [
+      0.0,
+      0.0,
+      0.8660254037844386,
+      -1.3856406460551018,
+      0.0,
+      0.0,
+      0.0,
+      -1.2,
+      0.0,
+      0.0
+    ],
+    "l1": 3.451666049839541,
+    "max_residual": 4.440892098500626e-16
+  }
+}
