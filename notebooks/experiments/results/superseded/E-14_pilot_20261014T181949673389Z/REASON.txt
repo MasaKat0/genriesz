@@ -1,0 +1,2 @@
+finished
+U35 re-pin: re-run after the PR-8 code changes (U43 convergence, clipped arms, LaLonde reporting, E-24 matched comparison, published RieszNet), 2026-10-14
