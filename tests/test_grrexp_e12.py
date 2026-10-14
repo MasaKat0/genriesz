@@ -68,6 +68,78 @@ def _ate_sample(n=400, seed=0):
     return X, Y, basis
 
 
+@pytest.mark.parametrize("arm", e12.CLIP_ARMS)
+def test_clip_arms_use_only_fitting_branch_ranges_and_preserve_the_objective(arm):
+    rng = np.random.default_rng(31)
+    Z = rng.uniform(-1, 1, size=(400, 3))
+    D = (np.arange(len(Z)) % 2).astype(float)
+    X = np.column_stack([D, Z])
+    clipped = e12._grr_model(arm, "Include")
+    original = e12._grr_model(arm.removesuffix("_clip"), "Include")
+    original.check_counterfactuals = False
+    a, b = clipped.fit(X), original.fit(X)
+    assert a.status == b.status == "ok"
+    np.testing.assert_array_equal(a.beta, b.beta)
+    assert a.objective_value == b.objective_value
+    np.testing.assert_array_equal(clipped.predict_alpha(X), original.predict_alpha(X))
+    v = original.predict_v(X)
+    points = np.array([[1, 1000, -1000, 1000], [0, -1000, 1000, -1000]], dtype=float)
+    # Both treatments at every point use the fitting rows of that treatment only.
+    points = np.vstack([points, gr.ATEFunctional(0).evaluation_points(points, clipped.basis)])
+    dual = original.predict_v(points)
+    expected_v = dual.copy()
+    for d, s in ((0, -1.0), (1, 1.0)):
+        lo, hi = v[D == d].min(), v[D == d].max()
+        assert clipped.dual_bounds_[s] == (lo, hi)
+        expected_v[points[:, 0] == d] = np.clip(dual[points[:, 0] == d], lo, hi)
+    assert np.any(expected_v != dual)
+    expected = clipped.generator.inv_grad(points, expected_v)
+    np.testing.assert_array_equal(clipped.predict_v(points), expected_v)
+    np.testing.assert_array_equal(clipped.predict_alpha(points), expected)
+    assert np.all(clipped.domain_mask(points))
+    for d in (0, 1):
+        original_a = np.abs(original.predict_alpha(X[D == d]))
+        assert np.all(np.abs(expected[points[:, 0] == d]) <= original_a.max())
+    # A batch of held-out points cannot change the stored bounds.
+    bounds = clipped.dual_bounds_.copy()
+    clipped.predict_alpha(points[:1])
+    assert clipped.dual_bounds_ == bounds
+
+
+def test_clip_fit_failure_does_not_leave_prediction_bounds():
+    model = e12._grr_model("BKL1_clip", "Include")
+    D, Z, _ = e12.draw(np.random.default_rng(32), 200, 0.5)
+    X = np.column_stack([D, Z])
+    assert model.fit(X).status == "ok"
+    assert model.fit(X, max_iter=0).status == "maxit"
+    assert model.dual_bounds_ is None and model.beta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict_alpha(X)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_clipping_does_not_hide_nonfinite_dual_coordinates(monkeypatch, value):
+    model = e12._grr_model("BKL1_clip", "Include")
+    D, Z, _ = e12.draw(np.random.default_rng(33), 200, 0.5)
+    X = np.column_stack([D, Z])
+    assert model.fit(X).status == "ok"
+    monkeypatch.setattr(model, "_predict_v_unclipped", lambda rows: np.full(len(rows), value))
+    alpha, outside, nonfinite = model.classify(X[:3])
+    assert np.all(nonfinite) and not np.any(outside) and np.all(np.isnan(alpha))
+
+
+def test_clip_e12_crossfit_uses_the_clipped_model_in_both_estimators():
+    from grrexp.seeds import fold_ids
+
+    D, Z, Y = e12.draw(np.random.default_rng(34), 400, 0.5)
+    X = np.column_stack([D, Z])
+    folds = fold_ids(len(Y), e12.K, np.random.default_rng(35))
+    result = e12._grr_cf(X, Y, "BKL1_clip", "Include", folds)
+    for est in ("ARW_cf", "TMLE_cf"):
+        assert result[f"BKL1_clip|{est}"]["status"] == "ok"
+        assert np.isfinite(result[f"BKL1_clip|{est}"]["estimate"])
+
+
 def test_grr_functional_records_training_balance_per_fold() -> None:
     X, Y, basis = _ate_sample()
     basis.fit(X)

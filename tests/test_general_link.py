@@ -162,6 +162,17 @@ def test_compatible_pair_reproduces_grrglm():
     assert r.tangent_imbalance <= 1e-10 and r.regressor_imbalance <= 1e-9
 
 
+def test_general_link_continues_from_feasible_near_boundary_weights():
+    X = _dgp13(300, seed=61)
+    model = _model("C-UKL")
+    start = np.zeros(8)
+    start[0], start[4] = -25.0, 25.0
+    alpha = model.link(X, _cols(X) @ start)
+    assert np.all(np.abs(alpha) - 1.0 < 1e-8)
+    result = model.fit(X, beta0=start)
+    assert result.status == "ok" and result.kkt_residual <= 1e-10
+
+
 @pytest.mark.parametrize("name", ["I-SQexp", "I-BKLexp", "I-UKLlin"])
 def test_incompatible_pair_balances_tangents_but_not_regressors(name):
     X = _dgp13(1000, seed=7)  # a sample on which all three pairs have interior solutions
@@ -186,7 +197,8 @@ def test_failures_are_statuses_not_exceptions_or_warnings():
         warnings.simplefilter("error")  # no floating-point warning may escape
         r_lin = _model("I-UKLlin").fit(X, beta0=_beta_inside("I-UKLlin"))
         r_sq = _model("I-SQexp").fit(X)
-    assert r_lin.status == "uncertified_numerical_boundary" and r_lin.n_boundary > 0
+    assert r_lin.status == "linesearch" and r_lin.n_boundary > 0
+    assert not r_lin.success and r_lin.kkt_residual > 1e-10
     assert r_sq.status in {"linesearch", "nonfinite", "maxit"}
     assert not r_sq.success
 

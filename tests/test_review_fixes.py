@@ -144,8 +144,9 @@ def test_density_ratio_numerator_rows_stay_in_the_domain():
     # would put it outside, so the fit is blocked and says so.
     X_num2 = np.vstack([X_num, [[1.5]]])
     res = fit_density_ratio(X_num2, X_den, basis=_linear(), generator=gen, penalty=None)
-    assert res.status == "domain_prediction"
-    assert "evaluation point" in res.fit.message
+    # Iterates keep the numerator rows in the domain; with no admissible minimizer the
+    # fit stops at the iteration limit instead of at the boundary (U43). It still fails.
+    assert res.status == "maxit" and not res.success
 
 
 def test_density_ratio_underflow_is_outside_not_valid():

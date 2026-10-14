@@ -321,6 +321,30 @@ def test_sq_is_excluded_from_the_boundary_rule():
     assert r.status == "ok" and r.n_boundary == 0
 
 
+def test_newton_continues_from_a_strictly_feasible_small_weight():
+    gen = UKLGenerator(C=0.0, branch_fn=_pos)
+    X = np.ones((1, 1))
+    problem = DualProblem(generator=gen, X=X, Phi=X, offset=np.zeros(1),
+                          target=np.array([2.0]))
+    result = newton_solve(problem, beta0=np.array([-25.0]))
+    assert result.status == "ok" and result.n_iter > 0
+    assert result.kkt_residual <= 1e-10
+    np.testing.assert_allclose(result.alpha, [2.0], atol=1e-10)
+
+
+@pytest.mark.parametrize("solve", [newton_solve, fista_solve])
+def test_feasible_near_boundary_kkt_point_is_successful(solve):
+    gen = BPGenerator(C=1.0, omega=1.0, branch_fn=_pos)
+    X = np.ones((1, 1))
+    problem = DualProblem(generator=gen, X=X, Phi=X, offset=np.zeros(1),
+                          target=np.array([1.0 + 5e-9]),
+                          check_X=X, check_Phi=X, check_offset=np.zeros(1))
+    result = solve(problem, beta0=np.zeros(1), lam=0.0)
+    assert result.status == "ok" and result.n_boundary == 1
+    assert result.kkt_residual <= 1e-10
+    assert np.all(gen.alpha_domain(X, result.alpha))
+
+
 # ---------------------------------------------------------------------------
 # 4. Basis derivatives (AME) and the representer derivative
 # ---------------------------------------------------------------------------
@@ -416,7 +440,8 @@ def test_bkl_probe_with_counterfactual_rows_outside_the_domain_is_not_ok(n):
     X, _ = _probe_ate(n, 1.25, seed=1)
     model = _bkl_include_model()
     r = model.fit(X)
-    assert r.status == "domain_prediction", r.message
+    assert r.status == "maxit", r.message
+    assert r.kkt_residual > 1e-10 and r.n_iter == 500
     assert model.beta_ is None
     # The last iterate is still feasible at every counterfactual row.
     model.beta_ = r.beta
@@ -507,7 +532,7 @@ def test_ukl_underflow_to_c_is_a_domain_failure_not_a_valid_prediction():
 def test_bp_no_longer_clips_silently_on_the_probe_design():
     """Probe: legacy BP(C=1) 'converged' with 25-31% of rows clipped (weak overlap).
 
-    The strict solver either reaches an interior KKT point or says "uncertified_numerical_boundary";
+    The strict solver reports nonconvergence when the KKT criterion is not met;
     it never reports success with a clipped link.
     """
 
@@ -537,15 +562,15 @@ def test_bp_no_longer_clips_silently_on_the_probe_design():
         functional=ATEFunctional(0),
         penalty=None,
     ).fit(X)
-    assert strict.status == "uncertified_numerical_boundary"
+    assert strict.status == "maxit" and strict.kkt_residual > 1e-10
     assert not strict.success and strict.n_boundary > 0
 
 
-def test_pr4a_bp_example_reports_boundary_not_success():
+def test_pr4a_bp_example_reports_nonconvergence_not_success():
     """PR-4a §8 [S2] remark: BP(omega=1, C=0), n=2, phi=(1,-1), b=3/2, lambda=0.
 
     On B_dom = (-2, 2) the objective beta^2/4 + 1 - 3 beta/2 decreases toward the
-    boundary, so no GRR minimizer exists. The solver must say "uncertified_numerical_boundary".
+    boundary, so no GRR minimizer exists. The solver must report nonconvergence.
     """
 
     gen = BPGenerator(C=0.0, omega=1.0, branch_fn=_pos)
@@ -554,11 +579,11 @@ def test_pr4a_bp_example_reports_boundary_not_success():
         generator=gen, X=X, Phi=X.copy(), offset=np.zeros(2), target=np.array([1.5])
     )
     r = newton_solve(problem, beta0=np.zeros(1))
-    assert r.status == "uncertified_numerical_boundary"
+    assert r.status == "maxit" and r.kkt_residual > 1e-10
     assert 2.0 - r.beta[0] < 1e-7
     assert np.min(np.abs(r.alpha)) <= 1e-8
     r = fista_solve(problem, beta0=np.zeros(1), lam=0.0)
-    assert r.status == "uncertified_numerical_boundary"
+    assert r.status == "maxit" and r.kkt_residual > 1e-10
 
 
 def test_offset_must_be_a_function_not_an_array():

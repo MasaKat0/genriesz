@@ -547,8 +547,8 @@ class BregmanGenerator:
     ) -> NDArray[np.bool_]:
         """Mask of rows numerically at the boundary of the domain of ``g``.
 
-        A fit whose final iterate has any such row is reported with status
-        ``"uncertified_numerical_boundary"`` rather than ``"ok"``. The generic
+        Solvers count these rows at termination without stopping a feasible
+        iterate solely for proximity to the boundary. The generic
         implementation knows no boundary (as for SQ, whose domain is the whole real line).
         """
 
@@ -826,7 +826,7 @@ class BPGenerator(BregmanGenerator):
 
     The derivative of ``g`` stays bounded (``-> -k``) as ``|alpha| -> C``, so a
     fitted representer can approach the boundary at a finite dual coordinate;
-    the solvers report this as status ``"uncertified_numerical_boundary"``.
+    the solvers count such rows in ``n_boundary`` at termination.
 
     As with UKL, ``branch_fn`` can be supplied to select the sign.
 

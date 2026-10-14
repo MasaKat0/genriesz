@@ -164,9 +164,37 @@ def test_outcome_fit_chooses_from_the_grid_and_predicts() -> None:
 
 def test_arm_labels_are_unique_and_recorder_stems() -> None:
     labels = e21.ARM_LABELS
-    assert len(labels) == len(set(labels)) == 58
+    assert len(labels) == len(set(labels)) == 70
+    for estimand, gen in (("ATE", "UKL1"), ("ATT", "UKL0")):
+        for dic in e21.DICTS:
+            for est in e21.GRR_ESTIMATORS:
+                assert f"{estimand}|{dic}-{gen}|{est}" in labels
+                assert f"{estimand}|{dic}-{gen}_clip|{est}" in labels
     assert all(outputs.STEM.match(e21.record_label(a)) for a in labels)
     assert len({e21.record_label(a) for a in labels}) == len(labels)
+
+
+@pytest.mark.parametrize("estimand,gen", [("ATE", "UKL1"), ("ATT", "UKL0")])
+def test_ukl_clip_ihdp_cv_uses_fitting_rows_and_clips_all_functional_points(estimand, gen):
+    X, _ = _toy(n=300, seed=51)
+    pi = X[:, 0].mean()
+    inner = fold_ids(len(X), e21.INNER, np.random.default_rng(52))
+    status, mdl, lam, _ = e21.select_and_fit(
+        estimand, "lin", f"{gen}_clip", X, inner, pi, 0, e21._Warn(), "test"
+    )
+    assert status == "ok" and lam in e21.LAM_GRID and mdl.clip_dual
+    raw = mdl._predict_v_unclipped(X)
+    for s in (-1.0, 1.0):
+        rows = e21.sign(X) == s
+        assert mdl.dual_bounds_[s] == (raw[rows].min(), raw[rows].max())
+    eval_rows = X[:10].copy()
+    eval_rows[:, 1:] *= 1000
+    st, pred = e21._predict_checked(mdl, estimand, eval_rows)
+    assert st == "ok"
+    assert np.all(np.isfinite(e21.m_of(estimand, eval_rows, pred, pi)))
+    for d in (0, 1):
+        pts = e21.toggle(eval_rows, d)
+        assert np.all(np.abs(pred(pts)) <= np.max(np.abs(mdl.predict_alpha(X[X[:, 0] == d]))))
 
 
 def _fake_raw(reps=6):
@@ -188,6 +216,17 @@ def _fake_raw(reps=6):
     return pd.DataFrame(rows).drop(columns="_est")
 
 
+def test_clip_arms_do_not_shift_the_original_bootstrap_stream(monkeypatch):
+    raw = _fake_raw(reps=30)
+    with_clip = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
+    original = {est: tuple(g for g in gens if not g.endswith("_clip"))
+                for est, gens in e21.GENERATORS.items()}
+    monkeypatch.setattr(e21, "GENERATORS", original)
+    without_clip = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
+    for arm, interval in without_clip.items():
+        np.testing.assert_array_equal(with_clip[arm], interval)
+
+
 def test_summaries_s1_and_tables() -> None:
     raw = _fake_raw()
     summ = e21.summarise(raw)
@@ -197,7 +236,7 @@ def test_summaries_s1_and_tables() -> None:
     assert summ.loc[summ["arm"] == "ATE|RA", "coverage"].isna().all()
     s1a = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
     s1b = e21.s1_intervals(raw, Seeds(21, entropy=PILOT_ENTROPY))
-    assert s1a.keys() == s1b.keys() and len(s1a) == 16
+    assert s1a.keys() == s1b.keys() and len(s1a) == 20
     for k in s1a:
         assert np.allclose(s1a[k], s1b[k], equal_nan=True)
     buf = summ.to_csv(index=False)

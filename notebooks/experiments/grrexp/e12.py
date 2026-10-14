@@ -6,6 +6,9 @@ replication function (importable for process parallelism) and the aggregation
 shared by the pilot and the confirmatory stage. The notebook
 ``10_E12_omitted_direction_balance.ipynb`` runs the stages and writes the
 outputs; its last cell makes the tables from ``summary.csv`` only (§4).
+Arms with suffix ``_clip`` clip the dual coordinate to its fitting-sample
+range on each branch at every representer evaluation. Their fitting objective
+is unchanged; Stage 0 predictions apply to the original arms only.
 """
 
 from __future__ import annotations
@@ -28,9 +31,11 @@ CELLS = [list(c) for c in itertools.product(S_VALUES, SETS, N_VALUES)]  # regist
 R = 2000
 K = 5
 SQRT3 = np.sqrt(3.0)
-GRR_ARMS = ("SQ", "UKL1", "BKL1", "BP_C1", "BP_C0")
+ORIGINAL_GRR_ARMS = ("SQ", "UKL1", "BKL1", "BP_C1", "BP_C0")
+CLIP_ARMS = ("BKL1_clip", "BP_C1_clip", "BP_C0_clip")
+GRR_ARMS = ORIGINAL_GRR_ARMS + CLIP_ARMS
 ALL_ARMS = GRR_ARMS + ("EB",)
-BP_ARMS = ("BP_C1", "BP_C0")
+BP_ARMS = ("BP_C1", "BP_C0", "BP_C1_clip", "BP_C0_clip")
 ARM_LABELS = [f"{a}|{est}" for a in ALL_ARMS for est in ("RW_full", "ARW_cf", "TMLE_cf")] + [
     "UKL1|ARW_EF",
     "LogitAIPW",
@@ -78,7 +83,7 @@ def generator(arm):
         "BP_C1": lambda: g.BPGenerator(omega=0.5, C=1.0, branch_fn=sign),
         "BP_C0": lambda: g.BPGenerator(omega=0.5, C=0.0, branch_fn=sign),
         "EB": lambda: g.UKLGenerator(C=0.0, branch_fn=sign),
-    }[arm]()
+    }[arm.removesuffix("_clip")]()
 
 
 def features(Z, regressor_set):
@@ -222,7 +227,7 @@ def support_dual_margin(arm, regressor_set, beta):
 
 
 def stage0():
-    """All arms x sets x s at 48 and 64 points; certificate (i)-(iv); predictions per n.
+    """Original arms x sets x s at 48 and 64 points; certificate (i)-(iv); predictions per n.
 
     Every value is JSON-compatible: a quantity that is not available is
     ``None``, and the support margin carries its kind (``finite``,
@@ -234,7 +239,7 @@ def stage0():
     from .inference import predicted_coverage
 
     out = []
-    for arm, rs, s in itertools.product(ALL_ARMS, SETS, S_VALUES):
+    for arm, rs, s in itertools.product(ORIGINAL_GRR_ARMS + ("EB",), SETS, S_VALUES):
         r48 = population_cell(arm, rs, s, 48)
         r64 = population_cell(arm, rs, s, 64)
         solved = r48["status"] == "ok" and r64["status"] == "ok"
@@ -361,6 +366,7 @@ def _grr_cf(X, Y, arm, rs, folds):
             outcome_models="shared", outcome_link="identity", outcome_penalty="l2", outcome_lam=0.0,
             fold_ids=folds, estimators=("arw", "tmle"), expose_alpha_values=True,
             fit_hook=fw.hook,
+            riesz_clip_dual=arm in CLIP_ARMS,
         )
     )  # fmt: skip
     converged = converged and fw.converged
@@ -434,6 +440,7 @@ def _grr_model(arm, rs):
         penalty=None,
         lam=0.0,
         offset=g.offset_from_alpha(gen, alpha_ref),
+        clip_dual=arm in CLIP_ARMS,
     )
 
 
@@ -854,7 +861,9 @@ def summarise(raw, population_rows):
             elif ms == "zero_radicand":
                 row["root_n_sd_mcse"] = 0.0
             arm, _, estimator = label.partition("|")
-            if estimator:
+            if arm in CLIP_ARMS:
+                row["certified"] = False
+            if estimator and arm not in CLIP_ARMS:
                 p = pop[(arm, rs, s)]
                 row["certified"] = bool(p["certified"])
                 if p["certified"] and estimator in PREDICTED_ESTIMATORS:
@@ -1060,6 +1069,7 @@ LABEL = {
     "LogitAIPW": "LogitAIPW",
     "DML-GBM": "DML-GBM",
 }
+LABEL.update({a: f"{LABEL[a.removesuffix('_clip')]}, clip" for a in CLIP_ARMS})
 END = " \\\\"  # LaTeX row end
 
 

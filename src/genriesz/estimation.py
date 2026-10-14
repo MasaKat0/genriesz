@@ -419,6 +419,7 @@ def grr_functional(
     riesz_l1_radius: float | None = None,
     riesz_max_iter: int | None = None,
     riesz_tol: float | None = None,
+    riesz_clip_dual: bool = False,
     # Riesz inner cross-validation (optional; backward-compatible when all None)
     riesz_lam_grid: object | None = None,
     riesz_sigma_grid: object | None = None,
@@ -507,6 +508,10 @@ def grr_functional(
         Solver limits for the strict solvers (``None``: the registered defaults,
         see :meth:`GRRGLM.fit`). The legacy ``"lbfgs"`` solver uses ``max_iter``
         and ``tol``.
+    riesz_clip_dual:
+        Define alpha by clipping the dual coordinate to its fitting-sample range
+        on each branch before the inverse link, including inner validation rows
+        and every row evaluated by the functional. The fitting objective is unchanged.
     riesz_lam_grid, riesz_sigma_grid, riesz_n_centers_grid:
         Inner cross-validation grids for the Riesz hyper-parameters; each may be
         ``"auto"``, a scalar, or a list. ``None`` (the default) means *do not
@@ -901,6 +906,7 @@ def grr_functional(
                     riesz_l1_radius=riesz_l1_radius,
                     riesz_max_iter=riesz_max_iter,
                     riesz_tol=riesz_tol,
+                    riesz_clip_dual=riesz_clip_dual,
                     raise_on_failure=False,
                 )
                 if sel.status != OK:
@@ -965,6 +971,7 @@ def grr_functional(
                 offset=resolve_riesz_offset(generator_fold, riesz_offset, riesz_alpha_ref),
                 solver=riesz_solver,
                 l1_radius=riesz_l1_radius,
+                clip_dual=riesz_clip_dual,
             )
             if grr.solver == "lbfgs":
                 fit_result = _run_fit(

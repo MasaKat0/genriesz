@@ -19,7 +19,9 @@ Arms (each cross-fitted with ``K = 5`` folds on every one of the 100 fold splits
   compatible link, on three control-arm dictionaries (the treated arm has an intercept
   only): D1 the raw eight, D2 the Dehejia-Wahba specification, D3 a Gaussian RKHS with
   100 centers. D1 and D2 with lambda = 0; D3 with a ridge penalty chosen by the held-out
-  squared Riesz criterion (inner 3-fold CV on each training fold). No cap or clipping.
+  squared Riesz criterion (inner 3-fold CV on each training fold). Additional UKL
+  arms with suffix ``_clip`` clip the dual coordinate to its fitting-sample range
+  on each branch before the inverse link, at every representer evaluation.
   ARW and TMLE per arm. UKL (C=0) x D1 is entropy balancing for the ATT (reported as the
   EB row and checked against an independent dual Newton).
 - LogitAIPW (logistic MLE on the D2 features) and DML-GBM (gradient boosting with nested
@@ -51,7 +53,8 @@ R = 100  # fold splits (registration: 100, stream 1, seeds 0-99)
 K = 5
 GENERATORS = ("SQ", "UKL", "BP", "BKL")
 DICTIONARIES = ("D1", "D2", "D3")
-GRR_ARMS = tuple(f"{g}-{d}" for g in GENERATORS for d in DICTIONARIES)
+CLIP_ARMS = tuple(f"UKL-{d}_clip" for d in DICTIONARIES)
+GRR_ARMS = tuple(f"{g}-{d}" for g in GENERATORS for d in DICTIONARIES) + CLIP_ARMS
 EB_ARM = "UKL-D1"
 BASELINE_ARMS = ("LogitAIPW", "DML-GBM")
 ESTIMATORS = ("ARW", "TMLE")
@@ -294,7 +297,7 @@ def weight_summaries(D, Zs, X, alpha, basis_fitted):
 
 
 def _grr_arm(arm, X, Y, D, Zs, folds, inner_seed, center_seed):
-    gen_name, dictionary = arm.split("-")
+    gen_name, dictionary = arm.removesuffix("_clip").split("-")
     g = gr()
     basis = ATTArmBasis(dictionary, random_state=center_seed)
     kwargs = dict(
@@ -304,6 +307,7 @@ def _grr_arm(arm, X, Y, D, Zs, folds, inner_seed, center_seed):
         outcome_penalty="l2", outcome_lam=0.0,
         fold_ids=folds, estimators=("arw", "tmle"), expose_alpha_values=True,
         random_state=inner_seed,
+        riesz_clip_dual=arm in CLIP_ARMS,
     )  # fmt: skip
     if dictionary == "D3":
         kwargs.update(
@@ -496,7 +500,7 @@ def full_sample(entropy):
     inner_seed, center_seed = _seed_int(gen_seed), _seed_int(gen_seed)
     fits, alphas, n_warn_total = {}, {}, 0
     for arm in GRR_ARMS:
-        gen_name, dictionary = arm.split("-")
+        gen_name, dictionary = arm.removesuffix("_clip").split("-")
         gen = generator(gen_name)
         basis = ATTArmBasis(dictionary, random_state=center_seed).fit(X)
         lam, penalty = 0.0, None
@@ -506,11 +510,12 @@ def full_sample(entropy):
                                 admissibility_thresholds=admissibility_thresholds(),
                                 random_state=inner_seed)  # fmt: skip
             sel, warns_cv, conv_cv = baselines.run_recording_warnings(
-                lambda: g.select_grr_hyperparams(
+                lambda gen=gen, cfg=cfg, arm=arm: g.select_grr_hyperparams(
                     X_train=X, y_train=Y, m=m, basis=ATTArmBasis("D3", random_state=center_seed),
                     generator=gen, config=cfg, riesz_penalty="l2", riesz_lam=LAMBDA_GRID[0],
                     riesz_alpha_ref=alpha_ref, outcome_penalty="l2", outcome_lam=0.0,
                     raise_on_failure=False,
+                    riesz_clip_dual=arm in CLIP_ARMS,
                 )
             )  # fmt: skip
             n_warn_total += int(sum(warns_cv.values()))
@@ -519,7 +524,8 @@ def full_sample(entropy):
                 continue
             lam, penalty = float(sel.lam), "l2"
         model = g.GRRGLM(basis=basis, generator=gen, functional=m, penalty=penalty, lam=lam,
-                         offset=g.offset_from_alpha(gen, alpha_ref))  # fmt: skip
+                         offset=g.offset_from_alpha(gen, alpha_ref),
+                         clip_dual=arm in CLIP_ARMS)  # fmt: skip
         fr, warns, converged = baselines.run_recording_warnings(
             lambda: model.fit(X, tol=SAMPLE_TOL) if penalty is None else model.fit(X)
         )
@@ -595,7 +601,18 @@ def raw_frame(tasks, results):
             row.update({k: float(r.get(k, np.nan)) for k in NUMERIC_FIELDS})
             row.update({k: str(r.get(k, "")) for k in TEXT_FIELDS})
             rows.append(row)
-    return pd.DataFrame(rows)
+    return partition_data(pd.DataFrame(rows))
+
+
+def partition_data(raw):
+    """Table and figure data for every supplied partition, including failed partitions.
+
+    ``failed`` is explicit; estimates, standard errors, diagnostics and failure
+    statuses remain on their original rows. No partition is filtered out.
+    """
+    out = raw.copy()
+    out["failed"] = out["status"] != "ok"
+    return out.sort_values(["arm", "cell", "split"]).reset_index(drop=True)
 
 
 def total_warnings(raw):
@@ -622,6 +639,7 @@ def summarise(raw, full):
         k = len(ok)
         row = {"arm": arm, "R": len(g), "R_s": k,
                "status_counts": json.dumps(dict(sorted(collections.Counter(g["status"]).items())))}
+        row["partitions"] = partition_data(g).to_json(orient="records")
         if k > 0 and k >= len(g) / 2:  # reported unless more than half of the splits fail
             t, s2 = median_aggregate(ok["estimate"], N * ok["se"] ** 2, N)
             row.update(estimate=t, se=float(np.sqrt(s2 / N)), reported=True)
@@ -668,8 +686,10 @@ def _label(arm):
     if arm in BASELINE_ARMS:
         return arm
     base, est = arm.split("|")
-    gen, dic = base.split("-")
+    gen, dic = base.removesuffix("_clip").split("-")
     name = f"EB (= UKL, $C=0$, D1)" if base == EB_ARM else f"{GEN_LABEL[gen]}, {DICT_LABEL[dic]}"
+    if base in CLIP_ARMS:
+        name += ", clip"
     return name if est == "ARW" else f"{name}, TMLE"
 
 
@@ -682,27 +702,55 @@ def _estimate_cells(r):
 def tables(S):
     """``tab_E22_main`` (Main), ``tab_E22_full`` and ``tab_E22_smd`` (Supp; longtable
     bodies with repeated heads), ``tab_E22_diag`` (EB check and admissibility) and
-    ``tab_E22_status`` (failures by status)."""
+    ``tab_E22_status`` (failures by status), plus ``tab_E22_full_weights`` (full-sample
+    diagnostics) and ``tab_E22_partitions`` (every partition, including failures)."""
     out = {}
     by = {r["arm"]: r for _, r in S.iterrows()}
-    head = ["Method", "Estimate", "SE", "Splits", "Max SMD (8)", "ESS C", "Neg.\\ share"]
-    lines = ["\\begin{tabular}{lrrrrrr}", "\\hline", " & ".join(head) + END, "\\hline"]
+    head = ["Method", "Estimate", "SE", "Splits", "Max SMD (8, cf)", "ESS C (cf)",
+            "Neg.\\ share (cf)", "Max $|\\widehat\\alpha|$ (cf)"]
+    lines = ["\\begin{tabular}{lrrrrrrr}", "\\hline", " & ".join(head) + END, "\\hline"]
     for arm in [f"{a}|ARW" for a in GRR_ARMS] + list(BASELINE_ARMS):
         r = by[arm]
         cells = [_label(arm), *_estimate_cells(r), f"{int(r['R_s'])}/{int(r['R'])}"]
         if arm in BASELINE_ARMS:
-            cells += ["--", "--", "--"]
+            cells += ["--", "--", "--", "--"]
         else:
-            cells += [_fmt(r["full_smd_raw_max"]), _fmt(r["full_ess_c"], 1),
-                      _fmt(r["full_wrong_sign_share"])]  # fmt: skip
+            cells += [_fmt(r["cf_smd_raw_max"]), _fmt(r["cf_ess_c"], 1),
+                      _fmt(r["cf_wrong_sign_share"]), _fmt(r["cf_max_abs_alpha"], 2)]  # fmt: skip
         lines.append(" & ".join(cells) + END)
     lines += [
         "\\hline",
-        "\\multicolumn{7}{l}{Reference: the NSW experimental estimate is \\$1,794 (Dehejia and Wahba, 1999);}" + END,
-        "\\multicolumn{7}{l}{it is not the true effect for this observational sample.}" + END,
+        "\\multicolumn{8}{l}{Reference: the NSW experimental estimate is \\$1,794 (Dehejia and Wahba, 1999);}" + END,
+        "\\multicolumn{8}{l}{it is not the true effect for this observational sample.}" + END,
         "\\hline", "\\end{tabular}",
     ]  # fmt: skip
     out["tab_E22_main"] = "\n".join(lines) + "\n"
+
+    head = ["Method", "Status (full)", "Max SMD dict.\\ (full)", "Max SMD (8, full)",
+            "ESS C (full)", "Neg.\\ share (full)", "Max $|\\widehat\\alpha|$ (full)"]
+    h = ["\\hline", " & ".join(head) + END, "\\hline"]
+    lines = ["\\begin{tabular}{llrrrrr}", *h, "\\endfirsthead", *h, "\\endhead"]
+    for arm in GRR_ARMS:
+        r = by[f"{arm}|ARW"]
+        cells = [_label(f"{arm}|ARW"), str(r["full_status"]).replace("_", "\\_"),
+                 _fmt(r["full_smd_dict_max"]), _fmt(r["full_smd_raw_max"]),
+                 _fmt(r["full_ess_c"], 1), _fmt(r["full_wrong_sign_share"]),
+                 _fmt(r["full_max_abs_alpha"], 2)]
+        lines.append(" & ".join(cells) + END)
+    out["tab_E22_full_weights"] = "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
+
+    head = ["Method", "Split", "Failed", "Status", "Estimate", "SE", "Max SMD (8)",
+            "ESS C", "Neg.\\ share", "Max $|\\widehat\\alpha|$"]
+    h = ["\\hline", " & ".join(head) + END, "\\hline"]
+    lines = ["\\begin{tabular}{lrllrrrrrr}", *h, "\\endfirsthead", *h, "\\endhead"]
+    for arm in ARM_LABELS:
+        for p in json.loads(by[arm]["partitions"]):
+            cells = [_label(arm), str(p["split"]), "yes" if p["failed"] else "no",
+                     p["status"].replace("_", "\\_"), _fmt(p["estimate"], 1), _fmt(p["se"], 1),
+                     _fmt(p.get("smd_raw_max")), _fmt(p.get("ess_c"), 1),
+                     _fmt(p.get("wrong_sign_share")), _fmt(p.get("max_abs_alpha"), 2)]
+            lines.append(" & ".join(cells) + END)
+    out["tab_E22_partitions"] = "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
 
     head = ["Method", "Estimate", "SE", "Splits", "$\\lambda$ (med.)", "Max SMD dict.\\ (full)",
             "Max SMD (8, full)", "Max SMD dict.\\ (cf)", "Max SMD (8, cf)", "ESS C (cf)",
@@ -798,14 +846,15 @@ def figure(S):
     markers = {"D1": "o", "D2": "s"}
     colors = {"SQ": "#4C72B0", "UKL": "#DD8452", "BP": "#55A868", "BKL": "#C44E52"}
     for arm in GRR_ARMS:
-        gen, dic = arm.split("-")
+        gen, dic = arm.removesuffix("_clip").split("-")
         if dic not in markers:
             continue
         r = by[f"{arm}|ARW"]
         if not (isinstance(r["full_smd_raw"], str) and r["full_smd_raw"]):
             continue
+        label = f"{gen}, {dic}" + (", clip" if arm in CLIP_ARMS else "")
         ax.scatter(np.abs(json.loads(r["full_smd_raw"])), ys, marker=markers[dic],
-                   facecolors="none", edgecolors=colors[gen], label=f"{gen}, {dic}")  # fmt: skip
+                   facecolors="none", edgecolors=colors[gen], label=label)  # fmt: skip
     ax.set_yticks(ys, list(RAW))
     ax.set_xlabel("|SMD|")
     ax.axvline(0.1, color="0.6", lw=0.8, ls="--")

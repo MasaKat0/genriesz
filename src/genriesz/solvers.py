@@ -55,17 +55,17 @@ return an explicit status instead of raising:
   of about 2300). The stopping quantity is the registered proximal
   residual ``rho = L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` with the
   last ``L``; the subdifferential residual (with the normal cone of an active
-  ball) is reported as well.
+  ball) is reported as well and must meet the same tolerance, since the
+  proximal update can round to the current iterate when ``L`` is large.
 
 Statuses (:data:`STATUSES`):
 
 ``"ok"``
     The first-order criterion is met at a feasible point.
 ``"uncertified_numerical_boundary"``
-    An iterate has a fitting row within ``boundary_tol`` of the boundary of the
-    domain of ``g`` (see :meth:`BregmanGenerator.boundary_mask`; never for SQ).
-    This is a numerical finding; it does not establish that no minimizer
-    exists. (Exported as :data:`BOUNDARY`.)
+    Reserved status for numerical boundary diagnostics. The solvers report
+    ``n_boundary`` at termination; proximity alone does not stop a feasible
+    iterate. (Exported as :data:`BOUNDARY`.)
 ``"maxit"``
     The iteration limit was reached.
 ``"linesearch"``
@@ -623,16 +623,6 @@ def newton_solve(
         F = pt.loss + pen_val(pt.beta)
         G = pt.grad + pen_grad(pt.beta)
         gnorm = float(np.max(np.abs(G))) if G.size else 0.0
-        nb = int(np.sum(problem.at_boundary(pt, boundary_tol)))
-        if nb > 0:
-            status, message = BOUNDARY, f"{nb} row(s) at the domain boundary"
-            break
-        nc = problem.check_at_boundary(pt, boundary_tol)
-        if nc > 0:
-            status = DOMAIN_PREDICTION
-            message = (f"{nc} evaluation point(s) (counterfactual or numerator rows) reached "
-                       "the domain boundary")
-            break
         H = problem.hessian(pt) + np.diag(pen_hess(pt.beta))
         if not np.all(np.isfinite(H)):
             status, message = NONFINITE, "non-finite Hessian"
@@ -860,17 +850,7 @@ def fista_solve(
     n_extrapolation_resets = 0
     rho = prox_residual(pt, L)
     while it < max_iter:
-        nb = int(np.sum(problem.at_boundary(pt, boundary_tol)))
-        if nb > 0:
-            status, message = BOUNDARY, f"{nb} row(s) at the domain boundary"
-            break
-        nc = problem.check_at_boundary(pt, boundary_tol)
-        if nc > 0:
-            status = DOMAIN_PREDICTION
-            message = (f"{nc} evaluation point(s) (counterfactual or numerator rows) reached "
-                       "the domain boundary")
-            break
-        if rho <= tol:
+        if rho <= tol and subgrad_residual(pt)[0] <= tol:
             status, message = OK, ""
             break
         L = L * lipschitz_decrease
@@ -925,8 +905,7 @@ def fista_solve(
             in_ball = radius is None or float(np.sum(np.abs(b_pol))) <= radius * (1.0 + 1e-12)
             if cand.ok and same_signs and in_ball:
                 rho_pol = prox_residual(cand, L)
-                if (rho_pol <= rho and not np.any(problem.at_boundary(cand, boundary_tol))
-                        and problem.check_at_boundary(cand, boundary_tol) == 0):
+                if rho_pol <= rho and subgrad_residual(cand)[0] <= tol:
                     pt, rho = cand, rho_pol
                     polished = True
 

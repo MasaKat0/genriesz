@@ -24,6 +24,9 @@ Arms (ATE and ATT; one record per replication, estimand and arm):
   cross-fitted TMLE (§1.4).
 - EB: UKL(C = 0), lambda = 0, linear dictionary; each fold's weights are checked
   against an independent entropy-balancing dual Newton.
+- UKL arms with suffix ``_clip`` use the fitting-sample dual range on each
+  branch at every representer evaluation, including inner validation rows.
+  The fitting objective is unchanged.
 - LogitAIPW: l2 logistic propensity score with Cs chosen by 5-fold CV.
 - AutoDML-lasso (§1.4, dictionary ``(1, D, x_1..x_25, D x_1..D x_25)``).
 - DML-GBM: HistGradientBoosting propensity and outcome, hyper-parameters from the
@@ -57,7 +60,8 @@ LAM_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)
 RKHS_CENTERS = 100
 ESTIMANDS = ("ATE", "ATT")
 DICTS = ("lin", "rkhs")
-GENERATORS = {"ATE": ("SQ", "UKL1", "BKL1", "BP"), "ATT": ("SQ", "UKL0", "BKL005", "BP")}
+GENERATORS = {"ATE": ("SQ", "UKL1", "BKL1", "BP", "UKL1_clip"),
+              "ATT": ("SQ", "UKL0", "BKL005", "BP", "UKL0_clip")}
 GRR_ESTIMATORS = ("ARW", "RW", "TMLE")
 BASELINES = ("EB", "LogitAIPW", "AutoDML", "DMLGBM", "RA")
 EB_TOL = 1e-6  # EB weights against the independent dual Newton (relative to max |alpha|)
@@ -125,7 +129,7 @@ def generator(name):
         "BKL1": lambda: g.BKLGenerator(C=1.0, branch_fn=sign),
         "BKL005": lambda: g.BKLGenerator(C=0.05, branch_fn=sign),
         "BP": lambda: g.BPGenerator(C=0.0, omega=0.5, branch_fn=sign),
-    }[name]()
+    }[name.removesuffix("_clip")]()
 
 
 def alpha_ref(estimand):
@@ -167,6 +171,7 @@ def model(estimand, dictionary, gen_name, lam, pi_hat, center_seed):
         functional=functional(estimand, pi_hat),
         penalty="l2" if lam > 0 else None, lam=float(lam),
         offset=g.offset_from_alpha(gen, alpha_ref(estimand)),
+        clip_dual=gen_name.endswith("_clip"),
     )  # fmt: skip
 
 
@@ -836,38 +841,40 @@ def summarise(raw):
 def s1_intervals(raw, seeds):
     """S1: paired bootstrap (stream 4, family 1, 10^4 draws) of the ratio of the SD of the
     RW errors to that of the ARW errors over replications in which both succeed. The
-    draws are made per GRR arm in ``ARM_LABELS`` order. Returns ``{arm: (ratio, lo, hi)}``;
+    draws use the original arm order, followed by the clipped arms.
+    Returns ``{arm: (ratio, lo, hi)}``;
     the interval is undefined (NaN) when fewer than three replications qualify or a
     resample has a zero ARW standard deviation, and S1 is then not written."""
     gen = seeds.bootstrap(S1_FAMILY)
     out = {}
-    for estimand in ESTIMANDS:
-        for dic in DICTS:
-            for g in GENERATORS[estimand]:
-                base = f"{estimand}|{dic}-{g}"
-                rw = raw[raw["arm"] == f"{base}|RW"].sort_values("rep")
-                arw = raw[raw["arm"] == f"{base}|ARW"].sort_values("rep")
-                both = (rw["status"] == "ok").to_numpy() & (arw["status"] == "ok").to_numpy()
-                if both.sum() < 3:
-                    out[base] = (float("nan"), float("nan"), float("nan"))
-                    continue
-                e_rw, s_rw = _scaled((rw["estimate"] - rw["theta0"]).to_numpy()[both])
-                e_arw, s_arw = _scaled((arw["estimate"] - arw["theta0"]).to_numpy()[both])
-                # the ratio in logs: neither the scale quotient nor the SDs overflow alone
-                log_scale = math.log(s_rw) - math.log(s_arw)
-                with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-                    ratio = float(np.exp(log_scale + np.log(np.std(e_rw, ddof=1))
-                                         - np.log(np.std(e_arw, ddof=1))))  # fmt: skip
-                idx = gen.integers(0, len(e_rw), size=(S1_BOOT, len(e_rw)))
-                with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
-                    r = np.exp(log_scale + np.log(np.std(e_rw[idx], axis=1, ddof=1))
-                               - np.log(np.std(e_arw[idx], axis=1, ddof=1)))  # fmt: skip
-                undefined = int(np.sum(~np.isfinite(r)))
-                if undefined:  # a resample with a constant ARW error; reported, never dropped
-                    out[base] = (ratio, float("nan"), float("nan"))
-                    continue
-                lo, hi = (float(v) for v in np.quantile(r, [0.025, 0.975]))
-                out[base] = (ratio, lo, hi)
+    specs = [(estimand, dic, g) for estimand in ESTIMANDS
+             for dic in DICTS for g in GENERATORS[estimand]]
+    specs.sort(key=lambda spec: spec[2].endswith("_clip"))
+    for estimand, dic, g in specs:
+        base = f"{estimand}|{dic}-{g}"
+        rw = raw[raw["arm"] == f"{base}|RW"].sort_values("rep")
+        arw = raw[raw["arm"] == f"{base}|ARW"].sort_values("rep")
+        both = (rw["status"] == "ok").to_numpy() & (arw["status"] == "ok").to_numpy()
+        if both.sum() < 3:
+            out[base] = (float("nan"), float("nan"), float("nan"))
+            continue
+        e_rw, s_rw = _scaled((rw["estimate"] - rw["theta0"]).to_numpy()[both])
+        e_arw, s_arw = _scaled((arw["estimate"] - arw["theta0"]).to_numpy()[both])
+        # the ratio in logs: neither the scale quotient nor the SDs overflow alone
+        log_scale = math.log(s_rw) - math.log(s_arw)
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            ratio = float(np.exp(log_scale + np.log(np.std(e_rw, ddof=1))
+                                 - np.log(np.std(e_arw, ddof=1))))  # fmt: skip
+        idx = gen.integers(0, len(e_rw), size=(S1_BOOT, len(e_rw)))
+        with np.errstate(invalid="ignore", divide="ignore", over="ignore"):
+            r = np.exp(log_scale + np.log(np.std(e_rw[idx], axis=1, ddof=1))
+                       - np.log(np.std(e_arw[idx], axis=1, ddof=1)))  # fmt: skip
+        undefined = int(np.sum(~np.isfinite(r)))
+        if undefined:  # a resample with a constant ARW error; reported, never dropped
+            out[base] = (ratio, float("nan"), float("nan"))
+            continue
+        lo, hi = (float(v) for v in np.quantile(r, [0.025, 0.975]))
+        out[base] = (ratio, lo, hi)
     return out
 
 
@@ -898,7 +905,10 @@ def _row_label(arm):
     if parts[1] in BASE_LABEL:
         return BASE_LABEL[parts[1]]
     dic, gen = parts[1].split("-")
-    return f"{GEN_LABEL[gen]}, {DICT_LABEL[dic]}, {parts[2]}"
+    label = GEN_LABEL[gen.removesuffix("_clip")]
+    if gen.endswith("_clip"):
+        label += ", clip"
+    return f"{label}, {DICT_LABEL[dic]}, {parts[2]}"
 
 
 def _table(S, estimand, s1):

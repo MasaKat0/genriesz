@@ -55,7 +55,7 @@ from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError
 from .glm import OffsetSpec, _ensure_basis_fitted, evaluate_offset
-from .solvers import BOUNDARY, INFEASIBLE_START, LINESEARCH, MAXIT, NONFINITE, OK, SINGULAR
+from .solvers import INFEASIBLE_START, LINESEARCH, MAXIT, NONFINITE, OK, SINGULAR
 from .utils import as_2d
 
 LinkFn = Callable[[NDArray[np.float64], NDArray[np.float64]], ArrayLike]
@@ -186,8 +186,7 @@ class GRRGeneralLink:
     penalty, lam:
         ``None`` or ``"l2"`` (``lam/2 ||beta||^2``).
     boundary_tol:
-        Distance to the domain boundary below which the status is
-        ``"uncertified_numerical_boundary"`` (never for SQ).
+        Distance to the domain boundary used to count ``n_boundary`` at termination.
     """
 
     def __init__(
@@ -421,11 +420,6 @@ class GRRGeneralLink:
         hmin = float("nan")
         while True:
             assert ev.grad is not None and ev.alpha is not None and ev.u is not None
-            nb = int(np.sum(self.generator.boundary_mask(X_, ev.u, ev.alpha,
-                                                        tol=self.boundary_tol)))
-            if nb > 0:
-                return self._finish(X_, w, ev, ev.beta, BOUNDARY,
-                                    f"{nb} row(s) at the domain boundary", it, shifts, hmin)
             with np.errstate(over="ignore", invalid="ignore"):
                 H = self._hessian(X_, ev.beta, w)
             if not np.all(np.isfinite(H)):

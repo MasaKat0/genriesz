@@ -466,7 +466,12 @@ class GRRGLM:
     boundary_tol:
         Rows with a distance to the domain boundary at most ``boundary_tol``
         (``|alpha| - C`` for UKL/BP/BKL, also ``s v >= -1e-12`` for BKL; never
-        for SQ) make the status ``"uncertified_numerical_boundary"``.
+        for SQ) are counted in ``n_boundary`` at termination.
+    clip_dual:
+        Clip the dual coordinate before evaluating alpha to its fitting-sample
+        range on each branch. Requires an explicit ``branch_fn`` and a strict
+        solver. The fitting objective is unchanged; additional evaluation rows
+        are evaluated through the clipped model after fitting.
     """
 
     def __init__(
@@ -483,7 +488,13 @@ class GRRGLM:
         l1_radius: float | None = None,
         boundary_tol: float = 1e-8,
         check_counterfactuals: bool = True,
+        clip_dual: bool = False,
     ):
+        self.clip_dual = bool(clip_dual)
+        self.dual_bounds_: dict[float, tuple[float, float]] | None = None
+        if self.clip_dual and (getattr(generator, "branch_fn", None) is None
+                               or str(solver).lower() == "lbfgs"):
+            raise ValueError("clip_dual requires an explicit branch_fn and a strict solver.")
         self.check_counterfactuals = bool(check_counterfactuals)
         self.basis = basis
         self.generator = generator
@@ -511,6 +522,39 @@ class GRRGLM:
         self.fit_result_: FitResult | None = None
 
     def fit(
+        self,
+        X: ArrayLike,
+        *,
+        beta0: ArrayLike | None = None,
+        max_iter: int | None = None,
+        tol: float | None = None,
+        verbose: bool = False,
+    ) -> FitResult:
+        """Fit coefficients and set dual ranges from fitting rows when ``clip_dual=True``.
+
+        ``max_iter`` and ``tol`` use the existing solver defaults when omitted:
+        Newton 500 iterations and KKT tolerance ``1e-10`` (scaled without a
+        penalty); FISTA 100000 iterations and tolerance ``1e-6 * lam``
+        (``1e-10`` when ``lam = 0``); L-BFGS-B 500 iterations and ``ftol = 1e-8``.
+        """
+        self.dual_bounds_ = None
+        X_ = as_2d(X)
+        if self.clip_dual:
+            signs = self.generator._branch_signs(X_)
+            if np.unique(signs).size != 2:
+                raise ValueError("clip_dual requires fitting rows on both branches.")
+        result = self._fit_coefficients(
+            X_, beta0=beta0, max_iter=max_iter, tol=tol, verbose=verbose
+        )
+        if self.clip_dual and result.success:
+            v = self._predict_v_unclipped(X_)
+            self.dual_bounds_ = {
+                float(s): (float(v[signs == s].min()), float(v[signs == s].max()))
+                for s in np.unique(signs)
+            }
+        return result
+
+    def _fit_coefficients(
         self,
         X: ArrayLike,
         *,
@@ -796,7 +840,7 @@ class GRRGLM:
         pen = self.penalty
         b = M.mean(axis=0)
         check_X = check_Phi = check_off = None
-        if self.check_counterfactuals:
+        if self.check_counterfactuals and not self.clip_dual:
             cf = np.asarray(self.functional.evaluation_points(X_, self.basis), dtype=float)
             if cf.size:
                 check_X = cf
@@ -871,7 +915,21 @@ class GRRGLM:
         return out
 
     def predict_v(self, X: ArrayLike) -> NDArray[np.float64]:
-        """Dual coordinate ``v(x) = u_ref(x) + phi(x)^T beta``."""
+        """Dual coordinate, clipped to fitting branch ranges when ``clip_dual=True``."""
+
+        X_ = as_2d(X)
+        v = self._predict_v_unclipped(X_)
+        if self.clip_dual:
+            if self.dual_bounds_ is None:
+                raise RuntimeError("Model is not fit.")
+            signs = self.generator._branch_signs(X_)
+            for s, (lo, hi) in self.dual_bounds_.items():
+                rows = (signs == s) & np.isfinite(v)
+                v[rows] = np.clip(v[rows], lo, hi)
+        return v
+
+    def _predict_v_unclipped(self, X: ArrayLike) -> NDArray[np.float64]:
+        """Raw dual coordinate ``u_ref(x) + phi(x)^T beta``."""
 
         if self.beta_ is None:
             raise RuntimeError("Model is not fit.")
@@ -911,8 +969,9 @@ class GRRGLM:
             ``"raise"`` (default): raise :class:`DomainError` if any row is
             outside the domain or has a non-finite value (the message says
             which). ``"nan"``: return NaN at those rows; use :meth:`classify` to
-            tell the two cases apart. Nothing is clipped (generators built with
-            ``legacy_clip=True`` clip inside their own link).
+            tell the two cases apart. With ``clip_dual=True`` the dual coordinate
+            uses the fitting-sample range on its branch before the inverse link.
+            Generators built with ``legacy_clip=True`` clip inside their own link.
         """
 
         if out_of_domain not in {"raise", "nan"}:
@@ -946,6 +1005,11 @@ class GRRGLM:
         X_ = as_2d(X)
         dPhi = self.basis.derivative(X_, coordinate)
         dv = dPhi @ self.beta_ + offset_derivative(self.offset, X_, coordinate)
+        if self.clip_dual:
+            v = self._predict_v_unclipped(X_)
+            signs = self.generator._branch_signs(X_)
+            for s, (lo, hi) in self.dual_bounds_.items():
+                dv[(signs == s) & ((v < lo) | (v > hi))] = 0.0
         alpha = self.predict_alpha(X_, out_of_domain=out_of_domain)
         out = np.full_like(dv, np.nan, dtype=float)
         ok = np.isfinite(alpha)

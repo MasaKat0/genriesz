@@ -211,14 +211,74 @@ def test_majority_rule_and_split_median() -> None:
     np.testing.assert_allclose(cf, [np.median(0.01 * np.arange(100))] * 8)
 
 
+def test_partition_outputs_retain_all_100_partitions_and_explicit_failures():
+    raw = fake_raw({"UKL-D2|ARW": 47})
+    data = e22.partition_data(raw)
+    assert len(data) == len(raw) and "failed" not in raw
+    assert data.groupby("arm")["split"].nunique().eq(100).all()
+    rows = data[data["arm"] == "UKL-D2|ARW"]
+    assert rows["failed"].sum() == 47
+    assert rows.loc[rows["failed"], "estimate"].isna().all()
+    S = e22.summarise(raw, fake_full())
+    saved = json.loads(S.set_index("arm").loc["UKL-D2|ARW", "partitions"])
+    assert [p["split"] for p in saved] == list(range(100))
+    assert sum(p["failed"] for p in saved) == 47
+    assert all("se" in p and "ess_c" in p and "max_abs_alpha" in p for p in saved)
+    table = e22.tables(S)["tab_E22_partitions"]
+    assert " & 0 & yes & domain\\_prediction & -- & -- & " in table
+    assert " & 99 & no & ok & 1099.0 & 500.0 & " in table
+
+
+def test_main_balance_table_uses_crossfit_weights_and_full_weights_are_separate():
+    raw = fake_raw({})
+    raw.loc[raw["arm"] == "UKL-D2|ARW", ["ess_c", "max_abs_alpha", "smd_raw_max",
+                                       "wrong_sign_share"]] = [2.24, 3350.0, 0.875, 0.125]
+    S = e22.summarise(raw, fake_full())
+    tables = e22.tables(S)
+    main = next(line for line in tables["tab_E22_main"].splitlines()
+                if line.startswith("UKL ($C=0$), D2 &"))
+    assert " & 0.875 & 2.2 & 0.125 & 3350.00" in main
+    full = next(line for line in tables["tab_E22_full_weights"].splitlines()
+                if line.startswith("UKL ($C=0$), D2 &"))
+    assert " & 50.0 & 0.000 & 3.00" in full
+
+
+def test_ukl_clip_lalonde_is_a_new_arm_and_reaches_inner_cv(monkeypatch):
+    import genriesz as g
+
+    assert set(e22.CLIP_ARMS) == {f"UKL-{d}_clip" for d in e22.DICTIONARIES}
+    assert all(f"UKL-{d}" in e22.GRR_ARMS for d in e22.DICTIONARIES)
+    D, Y, Zs, _, X = synthetic(n=300, seed=53)
+    folds = fold_ids(len(Y), e22.K, np.random.default_rng(54))
+    fit = g.GRRGLM.fit
+    seen = []
+
+    def tracked(model, rows, **kw):
+        result = fit(model, rows, **kw)
+        seen.append((model.clip_dual, len(rows), result.status))
+        if result.success:
+            raw = model._predict_v_unclipped(rows)
+            for d, s in ((0, -1.0), (1, 1.0)):
+                a = raw[rows[:, 0] == d]
+                assert model.dual_bounds_[s] == (a.min(), a.max())
+        return result
+
+    monkeypatch.setattr(g.GRRGLM, "fit", tracked)
+    result = e22._grr_arm("UKL-D3_clip", X, Y, D, Zs, folds, 4, 5)
+    assert result["ARW"]["status"] == result["TMLE"]["status"] == "ok"
+    assert len(seen) == e22.K * (len(e22.LAMBDA_GRID) * e22.INNER_FOLDS + 1)
+    assert all(clip for clip, _, _ in seen)
+    assert all(n < len(X) for _, n, _ in seen)
+
+
 def test_tables_have_heads_reference_no_negative_zero_and_failures() -> None:
     S = e22.summarise(fake_raw({"BKL-D1|ARW": 60}), fake_full())
     tabs = e22.tables(S)
     assert set(tabs) == {"tab_E22_main", "tab_E22_full", "tab_E22_smd", "tab_E22_diag",
-                         "tab_E22_status"}
+                         "tab_E22_status", "tab_E22_full_weights", "tab_E22_partitions"}
     assert "1,794" in tabs["tab_E22_main"] and "not the true effect" in tabs["tab_E22_main"]
     assert "no exact fit (40/100)" in tabs["tab_E22_main"]
-    for name in ("tab_E22_full", "tab_E22_smd"):
+    for name in ("tab_E22_full", "tab_E22_smd", "tab_E22_full_weights", "tab_E22_partitions"):
         assert "\\endfirsthead" in tabs[name] and "\\endhead" in tabs[name]
     assert all("-0.000" not in t for t in tabs.values())
     assert "domain\\_prediction: 60" in tabs["tab_E22_status"]
@@ -440,8 +500,7 @@ def test_d3_tunes_and_fits_on_outer_training_rows_only(monkeypatch) -> None:
 
 def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypatch) -> None:
     """Every recorded call reports one warning; the fourth CV (BKL x D3) does not converge,
-    so that arm is not fitted; the logistic fit does not converge. The total is exact:
-    4 CV calls + 11 fits + 1 logistic = 16."""
+    so that arm is not fitted; the logistic fit does not converge."""
     D, Y, Zs, raw, X = synthetic(n=300, seed=15)
     monkeypatch.setattr(e22, "data", lambda: {"D": D, "Y": Y, "Zs": Zs, "raw": raw, "X": X})
     calls = {"cv": 0}
@@ -460,8 +519,8 @@ def test_full_sample_counts_warnings_and_drops_a_nonconverged_logistic(monkeypat
     # no scikit-learn fit in this process (its OpenMP pool would outlive the test)
     monkeypatch.setattr(e22, "_logistic_full", lambda F2, D_: np.full(len(D_), 0.3))
     full = e22.full_sample(20261007)
-    assert calls["cv"] == 4
-    assert full["n_warnings"] == 4 + 11 + 1
+    assert calls["cv"] == 5
+    assert full["n_warnings"] == 5 + 14 + 1
     assert full["fits"]["BKL-D3"]["status"] == "convergence_warning"
     ad = full["admissibility"]
     assert ad["logit_converged"] is False

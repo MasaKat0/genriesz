@@ -44,7 +44,14 @@ from numpy.typing import ArrayLike, NDArray
 from .basis import Basis, _median_pairwise_distance
 from .functionals import AMEFunctional, LinearFunctional
 from .generators import BregmanGenerator
-from .glm import GRRGLM, OffsetSpec, OutcomeGLM, offset_from_alpha
+from .glm import (
+    GRRGLM,
+    OffsetSpec,
+    OutcomeGLM,
+    evaluate_offset,
+    offset_derivative,
+    offset_from_alpha,
+)
 from .solvers import CV_FAILED, OK
 from .utils import Fold, is_binary_y, kfold_splits, stratified_kfold_splits
 
@@ -444,6 +451,7 @@ def score_grr_candidate(
     riesz_l1_radius: float | None = None,
     riesz_max_iter: int | None = None,
     riesz_tol: float | None = None,
+    riesz_clip_dual: bool = False,
 ) -> dict:
     """Evaluate one candidate over the inner folds and aggregate diagnostics.
 
@@ -505,6 +513,7 @@ def score_grr_candidate(
             offset=riesz_offset,
             solver=riesz_solver,
             l1_radius=riesz_l1_radius,
+            clip_dual=riesz_clip_dual,
         )
         if grr.solver == "lbfgs":
             fr = grr.fit(X_itr, max_iter=max_iter, tol=tol)
@@ -542,7 +551,21 @@ def score_grr_candidate(
                 all_success = False
                 continue
             g_star, _, _ = generator.dual_eval(X_iva, v_iva)
-        risks.append(float(np.mean(g_star - (M_iva @ beta))))
+        if grr.clip_dual:
+            m_dual = m.m_from_function(
+                X_iva,
+                predict=lambda rows, mdl=grr: (
+                    mdl.predict_v(rows) - evaluate_offset(mdl.offset, rows)
+                ),
+                derivative=lambda rows, coordinate, mdl=grr: (
+                    generator.grad2(rows, mdl.predict_alpha(rows))
+                    * mdl.derivative_alpha(rows, coordinate)
+                    - offset_derivative(mdl.offset, rows, coordinate)
+                ),
+            )
+        else:
+            m_dual = M_iva @ beta
+        risks.append(float(np.mean(g_star - m_dual)))
 
         # Generator-agnostic squared-loss (LSIF) validation risk of the fitted
         # representer alpha_hat = generator.inv_grad(phi @ beta):
@@ -810,6 +833,7 @@ def select_grr_hyperparams(
     riesz_l1_radius: float | None = None,
     riesz_max_iter: int | None = None,
     riesz_tol: float | None = None,
+    riesz_clip_dual: bool = False,
     raise_on_failure: bool = True,
 ) -> GRRCVResult:
     """Select Riesz hyper-parameters on the outer *training* sample only.
@@ -1045,6 +1069,7 @@ def select_grr_hyperparams(
                         riesz_l1_radius=riesz_l1_radius,
                         riesz_max_iter=riesz_max_iter,
                         riesz_tol=riesz_tol,
+                        riesz_clip_dual=riesz_clip_dual,
                     )
                     # Report the candidate at its outer-training resolution -- the
                     # values it is refit with -- not the per-fold ones.
