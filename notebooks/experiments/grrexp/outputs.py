@@ -112,6 +112,8 @@ REGISTERED_OUTPUTS = {
     23: ("tables/tab_E23.tex",),
     24: (
         "tables/tab_E24.tex",
+        "tables/tab_E24_matched.tex",
+        "tables/tab_E24_matched_comparisons.tex",
         "figures/fig_E24_rmse.pdf",
         "macros_E-24.tex",
         "tables/tab_E24_autodml.tex",

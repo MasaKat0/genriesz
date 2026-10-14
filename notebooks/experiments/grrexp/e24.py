@@ -9,18 +9,22 @@ the docstrings below.
 There are no Stage 0 predictions (B type). Stage 0 checks the design constants by
 quadrature and records ``E[alpha0^2]`` and the efficiency bound.
 
-Arms (all cross-fitted with ``K = 5``; one common outcome model except DML-GBM):
+Arms (all cross-fitted with ``K = 5``; common outcome except DML-GBM and RieszNet):
 
 - GRR: SQ, UKL(C=1), BKL(C=1), BP(0.5, C=0), offset ``alpha_ref = +-2``, ridge
   ``lambda`` tuned on pilot data, Nystrom features with treatment interaction;
-- RieszNet: SQ Riesz loss, one hidden ReLU layer of 100 units on the raw ``(D, Z)``;
+- RieszNet: shared representation, RR and regression heads, multitask loss and
+  targeted regularisation (Chernozhukov et al., ICML 2022, §3 and Appendix A.1);
 - AutoDML: the CNS lasso procedure of §1.4 on the degree-2 dictionary (``p = 56``);
 - EB: UKL(C=0), ``lambda = 0``, degree-2 polynomials with treatment interaction;
 - LogitAIPW: l2-penalised logistic propensity on the Nystrom features;
 - DML-GBM: gradient boosting for the propensity (Z) and the outcome (D, Z).
 
-Each arm reports the cross-fitted ARW (the primary estimator, compared in the
-families) and the cross-fitted TMLE (descriptive).
+Matched arms use SQ, UKL(C=0), UKL(C=1), BKL(C=1) and BP(C=0): degree-2
+polynomials with lambda=0 or inner-CV ridge, and Nystrom with inner-CV ridge.
+They share the observations, folds, outcome predictions, grid and selection rule.
+Each arm reports cross-fitted ARW (primary) and TMLE (descriptive). RieszNet uses
+its own jointly learned regression for the DR estimator of the cited paper, §5.
 """
 
 from __future__ import annotations
@@ -46,7 +50,21 @@ SQRT3 = np.sqrt(3.0)
 
 GRR_ARMS = ("SQ", "UKL1", "BKL1", "BP_C0")
 BASELINE_ARMS = ("RieszNet", "AutoDML", "EB", "LogitAIPW", "DML-GBM")
-ARMS = GRR_ARMS + BASELINE_ARMS
+EXISTING_ARMS = GRR_ARMS + BASELINE_ARMS
+MATCHED_GENERATORS = ("SQ", "UKL0", "UKL1", "BKL1", "BP_C0")
+MATCHED_GROUPS = {
+    "H24-Poly0": tuple(f"{a}_poly_lam0" for a in MATCHED_GENERATORS),
+    "H24-PolyCV": tuple(f"{a}_poly_cv" for a in MATCHED_GENERATORS),
+    "H24-NysCV": tuple(f"{a}_nys_cv" for a in MATCHED_GENERATORS),
+}
+MATCHED_ARMS = tuple(a for group in MATCHED_GROUPS.values() for a in group)
+MATCHED_SPECS = {
+    name: (a, dictionary, tuned)
+    for dictionary, suffix, tuned in (("poly", "lam0", False), ("poly", "cv", True),
+                                      ("nys", "cv", True))
+    for a in MATCHED_GENERATORS for name in (f"{a}_{dictionary}_{suffix}",)
+}
+ARMS = EXISTING_ARMS + MATCHED_ARMS
 ESTIMATORS = ("ARW_cf", "TMLE_cf")
 ARM_LABELS = [f"{a}|{e}" for a in ARMS for e in ESTIMATORS]
 
@@ -57,17 +75,10 @@ ALPHA0_BOUND = 49.349747
 
 # tuning grids (registration E-24)
 LAMBDA_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)  # GRR ridge and the common outcome ridge
-WD_GRID = (0.0, 1e-5, 1e-4, 1e-3, 1e-2)  # RieszNet weight decay
 C_GRID = (0.01, 0.1, 1.0, 10.0, 100.0)  # LogitAIPW inverse l2 strength
 N_CENTRES = 100
 EIG_FLOOR = 1e-8  # relative eigenvalue floor of K(C, C)
 SAMPLE_TOL = 1e-8  # §1.3 C, ridge: rho <= 1e-8; lambda = 0 (EB): scaled 1e-8
-
-# RieszNet (registration E-24)
-NN_HIDDEN = 100
-NN_LR = 1e-3
-NN_EPOCHS = 300
-NN_BATCH = 256
 
 # AutoDML-lasso (§1.4)
 CNS_C = (1.0, 0.1, 0.1)
@@ -271,6 +282,7 @@ def generator(arm):
     g = gr()
     return {
         "SQ": lambda: g.SquaredGenerator(C=0.0),
+        "UKL0": lambda: g.UKLGenerator(C=0.0, branch_fn=sign),
         "UKL1": lambda: g.UKLGenerator(C=1.0, branch_fn=sign),
         "BKL1": lambda: g.BKLGenerator(C=1.0, branch_fn=sign),
         "BP_C0": lambda: g.BPGenerator(omega=0.5, C=0.0, branch_fn=sign),
@@ -282,6 +294,18 @@ def glm_model(arm, base, lam):
     """GRRGLM of a GRR arm (ridge ``lam``) or of EB (``lam = 0``, degree-2 basis)."""
     g = gr()
     gen = generator(arm)
+    # Objective: mean(g*(u_ref + Phi beta)) - mean(m(W, Phi))' beta
+    # + (lambda/2)*sum(beta_j^2), up to the fixed offset moment. All generators
+    # use this sample-mean normalisation, without multiplying a generator's loss.
+    # Offset: u_ref = g'(alpha_ref), alpha_ref = +2 for D=1 and -2 for D=0.
+    # The ridge penalises every dual-coordinate deviation, including both arm
+    # intercepts. The outcome ridge separately leaves its intercepts unpenalised.
+    # Phi = (D*B, (1-D)*B), with B's first column equal to one. Polynomial B is
+    # (1, raw degree-1 and degree-2 monomials), with no centring or rescaling.
+    # This is exactly EB's dictionary and the same span as CNS AutoDML's b;
+    # CNS's lasso and its coefficient coordinates are not a matched ridge arm.
+    # Nystrom uses the same frozen pilot mean, SD, centres and eigenvalue map
+    # for every arm; no additional column scaling is applied.
     basis = g.TreatmentInteractionBasis(base_basis=g.CallableBasis(base))
     return g.GRRGLM(
         basis=basis, generator=gen, functional=g.ATEFunctional(0),
@@ -435,51 +459,34 @@ def _torch():
     return torch
 
 
-def fit_riesznet(wd, seed, X_tr):
-    """SQ Riesz loss ``mean(alpha(X)^2 - 2 (alpha(1, Z) - alpha(0, Z)))`` with a one-hidden-
-    layer ReLU network (100 units) on the raw ``(D, Z)``; Adam (lr 1e-3, weight decay
-    ``wd``), 300 epochs, mini-batches of 256 in a seeded random order, float64."""
+def fit_riesznet(seed, X_tr, Y_tr):
+    """RieszNet §3 and Appendix A.1; returns both jointly trained nuisances."""
+    from . import riesznet
+
     torch = _torch()
-    gen = torch.Generator().manual_seed(int(seed))
-    net = torch.nn.Sequential(
-        torch.nn.Linear(1 + PZ, NN_HIDDEN), torch.nn.ReLU(), torch.nn.Linear(NN_HIDDEN, 1)
-    ).double()
-    with torch.no_grad():
-        for prm in net.parameters():  # default PyTorch init, drawn from the seeded generator
-            if prm.dim() == 2:
-                bound = 1.0 / np.sqrt(prm.shape[1])
-                prm.uniform_(-bound, bound, generator=gen)
-            else:
-                prm.uniform_(-bound, bound, generator=gen)
-    opt = torch.optim.Adam(net.parameters(), lr=NN_LR, weight_decay=float(wd))
-    X = torch.as_tensor(X_tr, dtype=torch.float64)
-    X1 = X.clone()
-    X1[:, 0] = 1.0
-    X0 = X.clone()
-    X0[:, 0] = 0.0
-    n = len(X)
-    for _ in range(NN_EPOCHS):
-        perm = torch.randperm(n, generator=gen)
-        for s in range(0, n, NN_BATCH):
-            idx = perm[s : s + NN_BATCH]
-            loss = (
-                net(X[idx]).squeeze(1) ** 2 - 2.0 * (net(X1[idx]) - net(X0[idx])).squeeze(1)
-            ).mean()
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
+    net, training = riesznet.fit(seed, X_tr, Y_tr)
 
     def fn(Xe, Xe1, Xe0):
         with torch.no_grad():
             a = [
-                net(torch.as_tensor(r, dtype=torch.float64)).squeeze(1).numpy()
+                net(torch.as_tensor(r, dtype=torch.float64))[0].numpy()
                 for r in (Xe, Xe1, Xe0)
             ]
         if not all(np.all(np.isfinite(v)) for v in a):
             return None, None, None, "nonfinite"
         return a[0], a[1], a[2], "ok"
 
-    return Rep("ok", fn)
+    rep = Rep("ok", fn, training)
+
+    def outcome(X):
+        with torch.no_grad():
+            # Section 5's DR estimator uses g, not g + epsilon*alpha; epsilon
+            # enters Eq. (5) while fitting. The separately reported E-24 TMLE
+            # still applies the post-fit fluctuation in _scores.
+            return net(torch.as_tensor(X, dtype=torch.float64))[1].numpy()
+
+    rep.outcome = outcome
+    return rep
 
 
 # ---------------------------------------------------------------- outcome models
@@ -540,6 +547,52 @@ def _cv_select(grid, score_fn, tie):
 
 def _cv_failures(record):
     return sum(len(r["failures"]) for r in record.values())
+
+
+def fit_matched(arm, base_nys, X_tr, cv):
+    """Outer-training-only inner CV, common splits and criterion for matched arms.
+
+    The grid is LAMBDA_GRID; the held-out squared Riesz criterion is summed over
+    all inner held-out rows. Exact ties prefer larger lambda, as in tune(). A
+    candidate with a failed or warned fit or evaluation is ineligible. Every
+    candidate's score and failure record, and the choice, are retained per fold.
+    The frozen pilot determines only the Nystrom dictionary, never this lambda.
+    """
+    gen, dictionary, tuned = MATCHED_SPECS[arm]
+    base = poly_base if dictionary == "poly" else base_nys
+    if not tuned:
+        return fit_glm(gen, base, 0.0, X_tr)
+
+    def score(lam):
+        total, failures = 0.0, []
+        for k in range(CV_FOLDS):
+            tr, te = cv != k, cv == k
+
+            def evaluate(tr=tr, te=te):
+                rep = fit_glm(gen, base, lam, X_tr[tr])
+                if rep.status != "ok":
+                    return rep.status, None
+                a, a1, a0, st = rep.at(X_tr[te])
+                return (st, None) if st != "ok" else (st, riesz_criterion(a, a1, a0))
+
+            (st, loss), counts, _ = baselines.run_recording_warnings(evaluate)
+            if st == "ok" and counts:
+                st = "warning"
+            if st == "ok" and not np.isfinite(loss):
+                st = "nonfinite"
+            if st != "ok":
+                failures.append([k, st, counts])
+            else:
+                total += loss
+        return (None if failures else total), failures
+
+    lam, record = _cv_select(LAMBDA_GRID, score, "larger")
+    info = {"lambda": lam, "cv_scores": record, "cv_failures": _cv_failures(record)}
+    if lam is None:
+        return Rep("cv_failed", info=info)
+    rep = fit_glm(gen, base, lam, X_tr)
+    rep.info.update(info)
+    return rep
 
 
 def tune(cell, entropy):
@@ -604,13 +657,11 @@ def tune(cell, entropy):
             raise RuntimeError(f"E-24 tuning: no eligible lambda for {arm} at n = {n}: {sc}")
         out["lambda"][arm] = lam
 
-    wd, sc = _cv_select(
-        WD_GRID, lambda wd: riesz_loss(lambda Xt: fit_riesznet(wd, nn_seed, Xt)), "larger"
-    )
-    out["scores"]["RieszNet"] = sc
-    if wd is None:
-        raise RuntimeError(f"E-24 tuning: no eligible weight decay at n = {n}: {sc}")
-    out["weight_decay"] = wd
+    # RieszNet uses Appendix A.1's fixed L2, loss weights and training schedule;
+    # it is not tuned on the pilot or with the representer-only Riesz criterion.
+    from .riesznet import L2
+
+    out["weight_decay"] = L2
 
     def logit_loss(C):
         from sklearn.linear_model import LogisticRegression
@@ -724,17 +775,17 @@ def _failed(status, **extra):
     return {"estimate": float("nan"), "se": float("nan"), "status": status, **extra}
 
 
-def _scores(D, Y, a, a1, a0, g, g1, g0):
+def _scores(D, Y, a, a1, a0, g, g1, g0, ddof=0):
     """ARW and TMLE (§1.4) from cross-fitted alpha and gamma (each length n)."""
     n = len(Y)
     psi = g1 - g0 + a * (Y - g)
     theta = float(np.mean(psi))
-    arw = (theta, float(np.std(psi - theta) / np.sqrt(n)))
+    arw = (theta, float(np.std(psi - theta, ddof=ddof) / np.sqrt(n)))
     eps = float(np.sum(a * (Y - g)) / np.sum(a**2))
     gs, gs1, gs0 = g + eps * a, g1 + eps * a1, g0 + eps * a0
     th_t = float(np.mean(gs1 - gs0))
     psi_t = gs1 - gs0 + a * (Y - gs) - th_t
-    tmle = (th_t, float(np.std(psi_t) / np.sqrt(n)))
+    tmle = (th_t, float(np.std(psi_t, ddof=ddof) / np.sqrt(n)))
     return arw, tmle
 
 
@@ -751,6 +802,10 @@ def replicate(task):
     brng = seeds.baseline(cell, rep)
     nn_seeds = [int(s) for s in brng.integers(2**31 - 1, size=K)]
     gbm_seed = int(brng.integers(2**31 - 1))
+    # Stream 2 is separate from the original data, outer-fold and baseline streams.
+    # Generate one common inner partition per outer training fold for all matched arms.
+    inner_rng = seeds.inner_cv(cell, rep)
+    inner = [fold_ids(int(np.sum(folds != k)), CV_FOLDS, inner_rng) for k in range(K)]
     base = fz.nys.base
     nys = fz.nys
     gbm_p, gbm_o = tuple(t["gbm"]["propensity"]), tuple(t["gbm"]["outcome"])
@@ -759,18 +814,21 @@ def replicate(task):
             arm: (lambda Xt, k, arm=arm: fit_glm(arm, base, t["lambda"][arm], Xt))
             for arm in GRR_ARMS
         },
-        "RieszNet": lambda Xt, k: fit_riesznet(t["weight_decay"], nn_seeds[k], Xt),
+        "RieszNet": lambda Xt, k: fit_riesznet(nn_seeds[k], Xt, Y[folds != k]),
         "AutoDML": lambda Xt, k: fit_autodml(Xt),
         "EB": lambda Xt, k: fit_glm("EB", poly_base, 0.0, Xt),
         "LogitAIPW": lambda Xt, k: fit_logit(nys, t["logit_C"], Xt),
         "DML-GBM": lambda Xt, k: fit_gbm_propensity(gbm_p, gbm_seed, Xt),
+        **{arm: (lambda Xt, k, arm=arm: fit_matched(arm, base, Xt, inner[k]))
+           for arm in MATCHED_ARMS},
     }
     A = {arm: np.full((3, n), np.nan) for arm in ARMS}
-    G = {key: np.full((3, n), np.nan) for key in ("common", "gbm")}
+    G = {key: np.full((3, n), np.nan) for key in ("common", "gbm", "RieszNet")}
     status = {arm: "ok" for arm in ARMS}
     fold_status = {arm: [] for arm in ARMS}
     warns = {arm: collections.Counter() for arm in ARMS}
     info = {arm: collections.defaultdict(int) for arm in ARMS}
+    fold_info = {arm: [] for arm in (*MATCHED_ARMS, "RieszNet")}
     out_warn = collections.Counter()
     X1, X0 = _arms_rows(Z)
     out_status = {"common": "ok", "gbm": "ok"}
@@ -803,7 +861,8 @@ def replicate(task):
                 G[key][:, te] = preds
                 continue
             for arm in ARMS:
-                if status[arm] == "ok" and (key == "gbm") == (arm == "DML-GBM"):
+                if (status[arm] == "ok" and arm != "RieszNet"
+                        and (key == "gbm") == (arm == "DML-GBM")):
                     fold_status[arm].append([k, f"outcome {out_status[key]}"])
                     status[arm] = out_status[key]
         for arm in ARMS:
@@ -813,6 +872,8 @@ def replicate(task):
                 lambda arm=arm, tr=tr, k=k: makers[arm](X[tr], k)
             )
             warns[arm].update(counts)
+            if arm in fold_info:
+                fold_info[arm].append({"fold": k, **rep_.info})
             st = rep_.status
             if st == "ok" and not converged:
                 st = "convergence_warning"
@@ -825,7 +886,19 @@ def replicate(task):
                     st = "convergence_warning"
                 if st == "ok":
                     A[arm][:, te] = [a, a1, a0]
-                for key, v in rep_.info.items():
+                    if arm == "RieszNet":
+                        preds, counts, conv = baselines.run_recording_warnings(
+                            lambda rep_=rep_, te=te: [rep_.outcome(rows)
+                                                     for rows in (X[te], X1[te], X0[te])]
+                        )
+                        warns[arm].update(counts)
+                        if not conv:
+                            st = "convergence_warning"
+                        elif not all(np.all(np.isfinite(p)) for p in preds):
+                            st = "outcome_nonfinite"
+                        else:
+                            G["RieszNet"][:, te] = preds
+                for key, v in (rep_.info.items() if arm not in fold_info else ()):
                     info[arm][key] = (
                         max(info[arm][key], v) if key != "outer_cap_reached" else info[arm][key] + v
                     )
@@ -834,24 +907,27 @@ def replicate(task):
                 status[arm] = st
     out = {}
     for arm in ARMS:
+        outcome_warn = {} if arm == "RieszNet" else dict(out_warn)
         common = {
             "fold_status": json.dumps(fold_status[arm]),
-            "warnings": json.dumps({"fit": dict(warns[arm]), "outcome": dict(out_warn)}),
-            "n_warnings": int(sum(warns[arm].values()) + sum(out_warn.values())),
-            "info": json.dumps(dict(info[arm])),
+            "warnings": json.dumps({"fit": dict(warns[arm]), "outcome": outcome_warn}),
+            "n_warnings": int(sum(warns[arm].values()) + sum(outcome_warn.values())),
+            "info": json.dumps({"folds": fold_info[arm]} if arm in fold_info else dict(info[arm])),
         }
         if status[arm] != "ok":
             for e in ESTIMATORS:
                 out[f"{arm}|{e}"] = _failed(status[arm], **common)
             continue
-        g = G["gbm"] if arm == "DML-GBM" else G["common"]
+        g = G["gbm" if arm == "DML-GBM" else "RieszNet" if arm == "RieszNet" else "common"]
         a, a1, a0 = A[arm]
         (arw, tmle), counts, _ = baselines.run_recording_warnings(
-            lambda a=a, a1=a1, a0=a0, g=g: _scores(D, Y, a, a1, a0, *g)
+            lambda a=a, a1=a1, a0=a0, g=g, arm=arm: _scores(
+                D, Y, a, a1, a0, *g, ddof=1 if arm == "RieszNet" else 0
+            )  # RieszNet §5: sample SD of the DR moment divided by sqrt(n).
         )
         warns[arm].update(counts)
-        common["warnings"] = json.dumps({"fit": dict(warns[arm]), "outcome": dict(out_warn)})
-        common["n_warnings"] = int(sum(warns[arm].values()) + sum(out_warn.values()))
+        common["warnings"] = json.dumps({"fit": dict(warns[arm]), "outcome": outcome_warn})
+        common["n_warnings"] = int(sum(warns[arm].values()) + sum(outcome_warn.values()))
         extra = {"max_abs_alpha": float(np.max(np.abs(a))), "ess": metrics.ess(a)}
         for e, (th, se) in (("ARW_cf", arw), ("TMLE_cf", tmle)):
             if np.isfinite(th) and np.isfinite(se):
@@ -955,7 +1031,10 @@ def comparisons():
     then H24-GRR (for each n, generator pair in GRR order)."""
     base = [("H24-Base", n, a, b) for n in N_VALUES for a in GRR_ARMS for b in BASELINE_ARMS]
     pairs = [("H24-GRR", n, a, b) for n in N_VALUES for a, b in itertools.combinations(GRR_ARMS, 2)]
-    return base + pairs
+    matched = [(fam, n, a, b) for fam, arms in MATCHED_GROUPS.items()
+               for n in N_VALUES for a, b in itertools.combinations(arms, 2)]
+    # Append matched comparisons so the original family-7 draw order is retained.
+    return base + pairs + matched
 
 
 def compare(raw, seeds):
@@ -999,7 +1078,7 @@ def compare(raw, seeds):
         out.append(rec)
     from .inference import holm
 
-    for fam in ("H24-Base", "H24-GRR"):
+    for fam in ("H24-Base", "H24-GRR", *MATCHED_GROUPS):
         idx = [i for i, r in enumerate(out) if r["family"] == fam]
         if not idx:
             continue
@@ -1014,6 +1093,8 @@ def family_sentences(comps):
     for fam, none in (
         ("H24-Base", "no difference from the registered baselines was detected"),
         ("H24-GRR", "no difference between generators was detected"),
+        *((fam, "no difference between matched generators was detected")
+          for fam in MATCHED_GROUPS),
     ):
         rows = [r for r in comps if r["family"] == fam]
         rej = [r for r in rows if r["rejected"]]
@@ -1030,9 +1111,12 @@ def family_sentences(comps):
 
 LABEL = {
     "SQ": "SQ", "UKL1": "UKL ($C=1$)", "BKL1": "BKL ($C=1$)", "BP_C0": "BP ($C=0$)",
-    "RieszNet": "RieszNet-type", "AutoDML": "AutoDML-lasso", "EB": "EB",
+    "UKL0": "UKL ($C=0$)",
+    "RieszNet": "RieszNet", "AutoDML": "AutoDML-lasso", "EB": "EB",
     "LogitAIPW": "LogitAIPW", "DML-GBM": "DML-GBM",
 }  # fmt: skip
+LABEL.update({name: f"{LABEL[gen]} ({dictionary}, " + ("CV)" if tuned else "$\\lambda=0$)")
+              for name, (gen, dictionary, tuned) in MATCHED_SPECS.items()})
 END = " \\\\"
 
 
@@ -1040,9 +1124,8 @@ def _fmt(x, d=3):
     return "--" if x is None or x != x else f"{float(x):.{d}f}"
 
 
-def tables(S, comps):
-    """``tab_E24`` (metrics) and ``tab_E24_comparisons``: longtable bodies (the head is
-    repeated with ``\\endfirsthead``/``\\endhead``; the manuscript adds the caption)."""
+def _metrics_table(S, arms):
+    """Metrics table with the supplied arm order."""
     heads = [
         "Method",
         "Estimator",
@@ -1056,7 +1139,7 @@ def tables(S, comps):
     ]
     head = ["\\hline", " & ".join(heads) + END, "\\hline"]
     lines = ["\\begin{tabular}{llrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
-    for arm in ARMS:
+    for arm in arms:
         for e in ESTIMATORS:
             for n in N_VALUES:
                 r = S[(S["arm"] == f"{arm}|{e}") & (S["n"] == n)].iloc[0]
@@ -1071,8 +1154,11 @@ def tables(S, comps):
                     )
                     + END
                 )  # fmt: skip
-    tab = "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
+    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
 
+
+def _comparisons_table(comps):
+    """Paired RMSE comparisons, with a separate family per matched condition."""
     heads = ["Family", "$n$", "A", "B", "Common success", "RMSE$_A$/RMSE$_B$", "$p$", "Rejected"]
     head = ["\\hline", " & ".join(heads) + END, "\\hline"]
     lines = ["\\begin{tabular}{lrllrrrl}", *head, "\\endfirsthead", *head, "\\endhead"]
@@ -1089,8 +1175,27 @@ def tables(S, comps):
             )
             + END
         )  # fmt: skip
-    comp = "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
-    out = {"tab_E24": tab, "tab_E24_comparisons": comp}
+    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
+
+
+def tables(S, comps):
+    """Keep existing comparisons and dictionary-and-ridge-matched ones in separate tables.
+
+    The matched polynomial lambda=0 UKL0 arm is EB; SQ is unpenalised linear
+    Riesz regression. The CV block compares ridge linear Riesz regression to
+    ridge UKL and the other generators. AutoDML-lasso remains in the existing
+    table: its lasso penalty is not the ridge or lambda=0 condition.
+    """
+    out = {
+        "tab_E24": _metrics_table(S, EXISTING_ARMS),
+        "tab_E24_comparisons": _comparisons_table(
+            [r for r in comps if r["family"] not in MATCHED_GROUPS]
+        ),
+        "tab_E24_matched": _metrics_table(S, MATCHED_ARMS),
+        "tab_E24_matched_comparisons": _comparisons_table(
+            [r for r in comps if r["family"] in MATCHED_GROUPS]
+        ),
+    }
     if "cns_outer_cap_folds" in S:
         out["tab_E24_autodml"] = autodml_table(S)
     return out
@@ -1128,7 +1233,7 @@ def figure(S):
     import matplotlib.pyplot as plt
 
     fig, ax = plt.subplots(figsize=(5.5, 3.6))
-    for arm in ARMS:
+    for arm in EXISTING_ARMS:
         g = S[S["arm"] == f"{arm}|ARW_cf"].sort_values("n")
         ax.plot(g["n"], g["rmse"], marker="o", label=LABEL[arm].replace("$", ""),
                 linestyle="-" if arm in GRR_ARMS else "--")  # fmt: skip
@@ -1150,16 +1255,18 @@ def tune_task(task):
 
 
 def tuning_table(tunings):
-    """``tab_E24_tuning``: the frozen per-``n`` choices (pilot data, 5-fold CV)."""
+    """Pilot choices and fixed RieszNet L2; matched lambdas are recorded per outer fold."""
+    from .riesznet import L2
+
     heads = ["$n$"] + [f"$\\lambda$ {LABEL[a]}" for a in GRR_ARMS] + [
-        "Weight decay", "LogitAIPW $C$", "Outcome $\\lambda$", "Nystr\\\"om dim.",
+        "RieszNet L2", "LogitAIPW $C$", "Outcome $\\lambda$", "Nystr\\\"om dim.",
     ]  # fmt: skip
     spec = "r" * len(heads)
     lines = ["\\begin{tabular}{" + spec + "}", "\\hline", " & ".join(heads) + END, "\\hline"]
     for tj in tunings:
         t = json.loads(tj)
         cells = [str(t["n"])] + [f"{t['lambda'][a]:g}" for a in GRR_ARMS] + [
-            f"{t['weight_decay']:g}", f"{t['logit_C']:g}", f"{t['outcome_lambda']:g}",
+            f"{L2:g}", f"{t['logit_C']:g}", f"{t['outcome_lambda']:g}",
             str(t["nystrom_dim"]),
         ]  # fmt: skip
         lines.append(" & ".join(cells) + END)

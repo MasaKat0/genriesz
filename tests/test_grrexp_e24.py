@@ -233,10 +233,18 @@ def test_summary_tables_macros_and_figure(monkeypatch) -> None:
     assert {"rmse", "coverage", "coverage_close_to_nominal", "failure_rate"} <= set(S.columns)
     comps = e24.compare(raw, Seeds(24, entropy=PILOT_ENTROPY))
     tabs = e24.tables(S, comps)
-    assert set(tabs) == {"tab_E24", "tab_E24_comparisons", "tab_E24_autodml"}
+    assert set(tabs) == {"tab_E24", "tab_E24_comparisons", "tab_E24_autodml",
+                         "tab_E24_matched", "tab_E24_matched_comparisons"}
     for name in ("tab_E24", "tab_E24_comparisons"):  # the long tables; the stopping one is short
         assert "\\endfirsthead" in tabs[name] and "\\endhead" in tabs[name]
-    assert tabs["tab_E24"].count(" \\\\") == 2 + len(e24.ARM_LABELS) * len(e24.N_VALUES)
+    assert tabs["tab_E24"].count(" \\\\") == (
+        2 + len(e24.EXISTING_ARMS) * len(e24.ESTIMATORS) * len(e24.N_VALUES)
+    )
+    assert tabs["tab_E24_matched"].count(" \\\\") == (
+        2 + len(e24.MATCHED_ARMS) * len(e24.ESTIMATORS) * len(e24.N_VALUES)
+    )
+    assert "H24-PolyCV" not in tabs["tab_E24_comparisons"]
+    assert "H24-Base" not in tabs["tab_E24_matched_comparisons"]
     m = e24.macros(S, comps)
     assert all(outputs.MACRO_NAME.match(k) for k in m)
     fig = e24.figure(S)
@@ -248,6 +256,8 @@ def test_registered_outputs_and_runs() -> None:
     assert outputs.REGISTERED_RUNS[24]["main"] == (1000, [1000, 2000, 4000, 8000])
     assert set(outputs.REGISTERED_OUTPUTS[24]) == {
         "tables/tab_E24.tex",
+        "tables/tab_E24_matched.tex",
+        "tables/tab_E24_matched_comparisons.tex",
         "tables/tab_E24_autodml.tex",
         "figures/fig_E24_rmse.pdf",
         "macros_E-24.tex",
@@ -305,7 +315,7 @@ def test_per_cell_aggregation_compares_only_the_present_cell(monkeypatch) -> Non
     raw = _fake_raw(reps=12)
     one = raw[raw["n"] == 2000]
     comps = e24.compare(one, Seeds(24, entropy=PILOT_ENTROPY))
-    assert {c["n"] for c in comps} == {2000} and len(comps) == 20 + 6
+    assert {c["n"] for c in comps} == {2000} and len(comps) == 20 + 6 + 30
     S = e24.summarise(one)
     assert set(S["n"]) == {2000} and "root_n_sd" in S
 
@@ -322,3 +332,156 @@ def test_autodml_stopping_table_counts_folds_once():
     ])
     rows = [ln for ln in e24.autodml_table(S).splitlines() if ln[:1].isdigit()]
     assert rows == ["1000 & 4997 of 5000 & 77 \\\\"]
+
+
+def test_matched_dictionary_offset_and_penalty():
+    X = np.column_stack([[1., 0., 1., 0.], np.arange(24.).reshape(4, 6) / 10])
+    B = e24.interaction(e24.poly_base, X)
+    cns = e24.cns_dictionary(X)
+    # CNS b=(1,D,P,DP) and the EB interaction dictionary span exactly the same
+    # space: B=(D,DP,1-D,P-DP). Test the explicit transformation, not just rank.
+    assert np.allclose(B, np.column_stack([cns[:, 1], cns[:, 29:],
+                                         cns[:, 0] - cns[:, 1],
+                                         cns[:, 2:29] - cns[:, 29:]]))
+    for lam in (0.0, *e24.LAMBDA_GRID):
+        for arm in e24.MATCHED_GENERATORS:
+            mdl = e24.glm_model(arm, e24.poly_base, lam)
+            mdl.basis.fit(X)
+            assert np.array_equal(mdl.basis(X), B)
+            from genriesz.glm import evaluate_offset
+
+            u_ref = evaluate_offset(mdl.offset, X)
+            assert np.allclose(mdl.generator.inv_grad(X, u_ref), e24.alpha_ref(X))
+            # Every coordinate, including intercepts, receives lambda/2 beta^2.
+            assert mdl.penalty.value(np.ones(B.shape[1])) == pytest.approx(lam * 28)
+    eb = e24.fit_glm("EB", e24.poly_base, 0.0, X)
+    uk = e24.fit_matched("UKL0_poly_lam0", None, X, None)
+    assert eb.status == uk.status  # identical even when this tiny design fails
+
+
+def test_matched_cv_uses_only_outer_training_and_common_splits(monkeypatch):
+    X = np.column_stack([np.arange(25) % 2, np.arange(25), np.zeros((25, 5))])
+    cv = np.arange(25) % e24.CV_FOLDS
+    calls = []
+
+    def fake_fit(gen, base, lam, Xt):
+        fitted = set(Xt[:, 1])
+
+        def fn(Xv, X1, X0):
+            assert fitted.isdisjoint(Xv[:, 1])
+            calls.append((gen, base, lam, fitted, set(Xv[:, 1])))
+            # All candidates tie: the existing rule must select the largest.
+            a = np.ones(len(Xv))
+            return a, a, -a, "ok"
+
+        return e24.Rep("ok", fn)
+
+    monkeypatch.setattr(e24, "fit_glm", fake_fit)
+    for arm in (a for a in e24.MATCHED_ARMS if e24.MATCHED_SPECS[a][2]):
+        rep = e24.fit_matched(arm, e24.poly_base, X, cv)
+        assert rep.status == "ok" and rep.info["lambda"] == max(e24.LAMBDA_GRID)
+        assert set(rep.info["cv_scores"]) == {repr(x) for x in e24.LAMBDA_GRID}
+    assert len(calls) == 10 * len(e24.LAMBDA_GRID) * e24.CV_FOLDS
+    expected = [(set(X[cv != k, 1]), set(X[cv == k, 1])) for k in range(e24.CV_FOLDS)]
+    for start in range(0, len(calls), e24.CV_FOLDS):
+        assert [(r[3], r[4]) for r in calls[start:start + e24.CV_FOLDS]] == expected
+
+
+@pytest.mark.parametrize("failure", ["maxit", "warning", "nonfinite", "domain_prediction"])
+def test_matched_cv_records_failures_without_substitution(monkeypatch, failure):
+    import warnings
+
+    X = np.column_stack([np.arange(20) % 2, np.zeros((20, 6))])
+
+    def failed_fit(*args):
+        if failure == "warning":
+            warnings.warn("inner CV warning", RuntimeWarning, stacklevel=1)
+            return e24.Rep("ok", lambda *x: (np.ones(len(x[0])), np.ones(len(x[0])),
+                                            -np.ones(len(x[0])), "ok"))
+        return e24.Rep(failure)
+
+    monkeypatch.setattr(e24, "fit_glm", failed_fit)
+    rep = e24.fit_matched("SQ_poly_cv", None, X, np.arange(20) % e24.CV_FOLDS)
+    assert rep.status == "cv_failed" and rep.info["lambda"] is None
+    assert rep.info["cv_failures"] == len(e24.LAMBDA_GRID) * e24.CV_FOLDS
+    assert all(r["score"] is None for r in rep.info["cv_scores"].values())
+    assert all(f[1] == failure for r in rep.info["cv_scores"].values() for f in r["failures"])
+
+
+def test_matched_comparisons_hold_dictionary_and_penalty_fixed():
+    for fam, n, a, b in e24.comparisons():
+        if fam in e24.MATCHED_GROUPS:
+            assert n in e24.N_VALUES
+            assert e24.MATCHED_SPECS[a][1:] == e24.MATCHED_SPECS[b][1:]
+            assert e24.MATCHED_SPECS[a][0] != e24.MATCHED_SPECS[b][0]
+    assert len(e24.MATCHED_ARMS) == 15
+    assert all(sum(c[0] == fam for c in e24.comparisons()) == 40
+               for fam in e24.MATCHED_GROUPS)
+
+
+def test_matched_fold_tuning_is_saved_for_successes_and_failures(two_replications):
+    (res, _) = two_replications
+    for arm in e24.MATCHED_ARMS:
+        folds = json.loads(res[f"{arm}|ARW_cf"]["info"])["folds"]
+        if e24.MATCHED_SPECS[arm][2]:
+            assert folds and all("lambda" in f and "cv_scores" in f for f in folds)
+    nn = json.loads(res["RieszNet|ARW_cf"]["info"])["folds"]
+    assert len(nn) == e24.K
+    assert all(f["settings"]["lambda_targeted"] == 1 for f in nn)
+
+
+@pytest.mark.parametrize("outcome_failure", [None, "convergence_warning", "outcome_nonfinite"])
+def test_replication_uses_riesznet_regression_and_only_its_outcome_warnings(
+    monkeypatch, outcome_failure
+):
+    import warnings
+
+    from sklearn.exceptions import ConvergenceWarning
+
+    D, Z, Y = e24.draw(Seeds(24, entropy=PILOT_ENTROPY).data(0, 0), 1000)
+    X = np.column_stack([D, Z])
+    outer = e24.fold_ids(1000, e24.K, Seeds(24, entropy=PILOT_ENTROPY).folds(0, 0))
+    seen = []
+
+    def fake_net(seed, Xt, Yt):
+        k = len(seen)
+        assert np.array_equal(Xt, X[outer != k])
+        assert np.array_equal(Yt, Y[outer != k])
+        seen.append(k)
+
+        def at(Xv, X1, X0):
+            return (np.where(Xv[:, 0] == 1, 2., -2.), np.full(len(Xv), 2.),
+                    np.full(len(Xv), -2.), "ok")
+
+        rep = e24.Rep("ok", at)
+
+        def outcome(Xv):
+            if outcome_failure == "convergence_warning":
+                warnings.warn("network outcome", ConvergenceWarning, stacklevel=1)
+            if outcome_failure == "outcome_nonfinite":
+                return np.full(len(Xv), np.nan)
+            return 5. + 2. * Xv[:, 0]
+
+        rep.outcome = outcome
+        return rep
+
+    def unused_outcome(*args):
+        warnings.warn("unused outcome", ConvergenceWarning, stacklevel=1)
+        return lambda Xv: np.full(len(Xv), 1000.)
+
+    monkeypatch.setattr(e24, "ARMS", ("RieszNet",))
+    monkeypatch.setattr(e24, "fit_riesznet", fake_net)
+    monkeypatch.setattr(e24, "Ridge", unused_outcome)
+    monkeypatch.setattr(e24, "GBMOutcome", unused_outcome)
+    res = e24.replicate((0, 0, PILOT_ENTROPY, _stub_tuning()))
+    row = res["RieszNet|ARW_cf"]
+    if outcome_failure is not None:
+        assert row["status"] == outcome_failure and seen == [0]
+        assert np.isnan(row["estimate"]) and np.isnan(row["se"])
+        assert json.loads(row["warnings"])["outcome"] == {}
+        return
+    assert row["status"] == "ok" and seen == list(range(e24.K))
+    psi = 2. + np.where(D == 1, 2., -2.) * (Y - 5. - 2. * D)
+    assert row["estimate"] == pytest.approx(psi.mean())
+    assert row["se"] == pytest.approx(psi.std(ddof=1) / np.sqrt(len(Y)))
+    assert row["n_warnings"] == 0 and json.loads(row["warnings"])["outcome"] == {}
