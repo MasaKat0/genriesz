@@ -1,0 +1,59 @@
+{
+  "counts": {
+    "correctly_specified": {
+      "cells": 16,
+      "judged": 16,
+      "violations": 0
+    },
+    "main": {
+      "cells": 224,
+      "judged": 221,
+      "violations": 0
+    },
+    "sq": {
+      "cells": 48,
+      "judged": 48,
+      "violations": 0
+    }
+  },
+  "negative_result": {
+    "non_sq": false,
+    "sq": false
+  },
+  "not_certified": [
+    {
+      "a0": 0.0,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "maxit"
+    },
+    {
+      "a0": 0.5,
+      "a1": 1.5,
+      "a2": 1.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "maxit"
+    },
+    {
+      "a0": 0.5,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "maxit"
+    }
+  ],
+  "unexpected_delta_zero": [],
+  "warnings": {
+    "by_message": {
+      "DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)": 6750570
+    },
+    "total": 6750570
+  }
+}
