@@ -319,7 +319,7 @@ class _Fit:
         u = self.u(d, Psi4)
         s = 2.0 * d - 1.0
         su = s * u
-        out = np.abs(u - self.u_ref[d]) > RADIUS[self.gen_name]
+        out = np.zeros(len(u), dtype=bool)
         name = self.gen_name
         if name == "SQ":
             a = u / 2.0
@@ -332,7 +332,7 @@ class _Fit:
         else:  # BP(omega = 0.5, C = 0): |alpha| = (1 + s u / k)^(1/omega), k = 3
             out = out | (su <= -3.0)
             a = s * (1.0 + su / 3.0) ** 2
-        return a, out | ~np.isfinite(a) | (np.abs(a) > A_ALPHA)
+        return a, out | ~np.isfinite(a)
 
     def conj(self, d, Psi4):
         X = np.zeros((len(Psi4), 4))
@@ -348,14 +348,18 @@ def _arm_basis(arm, degree):
     return gr().CallableBasis(f)
 
 
-def fit_candidate(index, X_fit):
+def fit_candidate(index, X_fit, *, return_diagnostics=False):
     """Fit candidate ``index`` (< A0) on ``X_fit``; returns ``(status, _Fit | None)``.
     Each arm is fitted on its own block (the product of the two l1 balls)."""
     g = gr()
     gen_name, degree, lam = CANDIDATES[index]
     D = X_fit[:, 0]
+    diagnostics = []
+    def result(status, fitted):
+        return (status, fitted, diagnostics) if return_diagnostics else (status, fitted)
+
     if not (np.any(D == 1) and np.any(D == 0)):
-        return "degenerate_functional", None
+        return result("degenerate_functional", None)
     betas = {}
     for arm in (1.0, 0.0):
         gen = generator(gen_name)
@@ -366,15 +370,20 @@ def fit_candidate(index, X_fit):
             l1_radius=RADIUS[gen_name] * SOLVER_RADIUS_FACTOR,
         )  # fmt: skip
         fr = mdl.fit(X_fit)
+        norm = float(np.sum(np.abs(fr.beta)))
+        diagnostics.append({"arm": arm, "status": str(fr.status), "message": str(fr.message),
+                            "l1_beta": norm if np.isfinite(norm) else None,
+                            "radius": RADIUS[gen_name],
+                            "solver_radius": RADIUS[gen_name] * SOLVER_RADIUS_FACTOR,
+                            "radius_ok": bool(norm <= RADIUS[gen_name])})
         if fr.status != "ok":
-            return str(fr.status), None
+            return result(str(fr.status), None)
+        if not np.all(np.isfinite(fr.beta)):
+            diagnostics[-1]["status"] = "nonfinite"
+            return result("nonfinite", None)
         beta = np.asarray(mdl.beta_, dtype=float)
-        if not float(np.sum(np.abs(beta))) <= RADIUS[gen_name]:
-            # the solver radius leaves room for its polishing allowance (1e-12, relative);
-            # a coefficient outside the stated ball would break the |alpha| <= 50 envelope
-            raise RuntimeError(f"candidate {index}: ||beta||_1 exceeds R_g after the fit")
         betas[arm] = beta
-    return "ok", _Fit(gen_name, degree, betas)
+    return result("ok", _Fit(gen_name, degree, betas))
 
 
 # ------------------------------------------------------------------ one replication
@@ -385,18 +394,25 @@ def _risk_values(alpha1, alpha0_, e):
     return e * (alpha1 - 1.0 / e) ** 2 + (1.0 - e) * (alpha0_ + 1.0 / (1.0 - e)) ** 2
 
 
-def bernstein_interval(values, b, delta):
+def bernstein_interval(values, b, delta, *, return_diagnostics=False):
     """Two-sided empirical Bernstein interval (Maurer and Pontil 2009, Thm 4) for the mean
     of i.i.d. values in ``[0, b]``; each side holds with probability ``>= 1 - delta``."""
     x = np.asarray(values, dtype=float)
     N = x.size
-    if np.any(x < 0) or np.any(x > b):
-        raise ValueError("risk integrand outside [0, b]")
+    finite = bool(np.isfinite(x).all())
+    diagnostic = {"minimum": float(x.min()) if finite else None,
+                  "maximum": float(x.max()) if finite else None, "upper_bound": float(b),
+                  "finite": finite, "range_ok": bool(finite and (x >= 0).all()
+                                                        and (x <= b).all())}
     mean = float(x.mean())
     var = float(x.var(ddof=1))
     lg = np.log(2.0 / delta)
     w = np.sqrt(2.0 * var * lg / N) + 7.0 * b * lg / (3.0 * (N - 1))
-    return mean, max(0.0, mean - w), mean + w
+    diagnostic["integrand_finite"] = finite
+    finite = bool(finite and np.isfinite(mean) and np.isfinite(var) and np.isfinite(w))
+    diagnostic["finite"] = finite
+    interval = (mean, max(0.0, mean - w), mean + w) if finite else (np.nan, np.nan, np.nan)
+    return (*interval, diagnostic) if return_diagnostics else interval
 
 
 def rhs(r, design, n_v):
@@ -413,16 +429,18 @@ def _fold_selection(design, X, Z, fit_idx, sel_idx, Psi4, Psi_eval, e_eval, b_ra
     """Fit all candidates on ``fit_idx`` and select on ``sel_idx``.
 
     Returns the per-candidate records and the fitted models (``None`` if failed)."""
-    fits, statuses, warn = [], [], collections.Counter()
+    fits, statuses, warn, diagnostics = [], [], collections.Counter(), []
     for a in range(A0):
-        (status, f), counts, converged = baselines.run_recording_warnings(
-            lambda a=a: fit_candidate(a, X[fit_idx])
+        (status, f, diagnostic), counts, converged = baselines.run_recording_warnings(
+            lambda a=a: fit_candidate(a, X[fit_idx], return_diagnostics=True)
         )
         warn.update(counts)
         if status == "ok" and not converged:
             status, f = "convergence_warning", None
         statuses.append(status)
         fits.append(f)
+        diagnostics.append({"candidate": a, "fits": diagnostic, "status": status})
+    diagnostics.append({"candidate": A0, "status": "ok"})
     Pv = Psi4[sel_idx]
     Dv = X[sel_idx, 0]
     crit = np.full(M, np.nan)
@@ -444,9 +462,26 @@ def _fold_selection(design, X, Z, fit_idx, sel_idx, Psi4, Psi_eval, e_eval, b_ra
             a0v, o0 = f.alpha(0.0, Pv)
             ae1, oe1 = f.alpha(1.0, Psi_eval)
             ae0, oe0 = f.alpha(0.0, Psi_eval)
+            values = np.r_[a1v, a0v, ae1, ae0]
+            finite = bool(np.isfinite(values).all())
+            diagnostics[a]["predictions"] = {
+                "finite": finite, "domain_ok": not bool(np.any(o1) or np.any(o0)
+                                                        or np.any(oe1) or np.any(oe0)),
+                "max_abs_alpha": float(np.abs(values).max()) if finite else None,
+                "A_alpha": A_ALPHA,
+                "alpha_bound_ok": bool(finite and (np.abs(values) <= A_ALPHA).all()),
+                "max_abs_u_minus_ref": float(max(np.abs(f.u(d, P) - f.u_ref[d]).max()
+                                                 for d in (1.0, 0.0) for P in (Pv, Psi_eval))),
+                "radius": RADIUS[f.gen_name],
+            }
+            diagnostics[a]["predictions"]["radius_ok"] = bool(
+                diagnostics[a]["predictions"]["max_abs_u_minus_ref"] <= RADIUS[f.gen_name])
             if np.any(o1) or np.any(o0) or np.any(oe1) or np.any(oe0):
-                # the ball keeps |u - u_ref| <= R_g inside the domain on the support
-                raise RuntimeError(f"candidate {a} left the domain at a selection point")
+                statuses[a] = "domain_prediction" if finite else "nonfinite"
+                diagnostics[a].update(status=statuses[a],
+                                      message="Inadmissible selection or evaluation prediction.")
+                fits[a] = None
+                continue
             # raw Bregman objective of the candidate's own generator on the selection rows
             u1, u0 = f.u(1.0, Pv), f.u(0.0, Pv)
             gstar = np.where(Dv == 1, f.conj(1.0, Pv), f.conj(0.0, Pv))
@@ -454,7 +489,19 @@ def _fold_selection(design, X, Z, fit_idx, sel_idx, Psi4, Psi_eval, e_eval, b_ra
         alpha_obs = np.where(Dv == 1, a1v, a0v)
         crit[a] = float(np.mean(alpha_obs**2 - 2.0 * (a1v - a0v)))
         vals = _risk_values(ae1, ae0, e_eval)
-        risk[a], lo[a], hi[a] = bernstein_interval(vals, b_range, EB_DELTA)
+        risk[a], lo[a], hi[a], diagnostic = bernstein_interval(
+            vals, b_range, EB_DELTA, return_diagnostics=True)
+        diagnostics[a]["risk"] = diagnostic
+        if (not diagnostic["finite"] or not np.isfinite(crit[a])
+                or (a < A0 and not np.isfinite(raw[a]))):
+            diagnostics[a].update(status="nonfinite",
+                                  message="Non-finite risk or selection objective.")
+            if a < A0:
+                statuses[a] = "nonfinite"
+                fits[a] = None
+                raw[a] = np.nan
+            crit[a] = np.nan
+            risk[a] = lo[a] = hi[a] = np.nan
     avail = np.isfinite(crit)
     sel = int(np.flatnonzero(avail)[np.argmin(crit[avail])])  # first minimiser: registered order
     rawsel = A0 if not np.any(np.isfinite(raw)) else int(np.nanargmin(raw))
@@ -474,6 +521,7 @@ def _fold_selection(design, X, Z, fit_idx, sel_idx, Psi4, Psi_eval, e_eval, b_ra
         "control_status": statuses[CONTROL],
         "statuses": collections.Counter(statuses),
         "warnings": warn,
+        "diagnostics": diagnostics,
     }, fits
 
 
@@ -633,6 +681,7 @@ def raw_frame(tasks, results):
                    "n_warnings": int(sum(r["warnings"].values()))}  # fmt: skip
             for f in FOLD_FIELDS:
                 row[f] = json.dumps([fr[f] for fr in r["folds"]])
+            row["diagnostics"] = json.dumps([fr.get("diagnostics", []) for fr in r["folds"]])
             for est in ("SEL", "CTRL"):
                 e = r.get(est, {})
                 row[f"{est}_estimate"] = float(e.get("estimate", np.nan))

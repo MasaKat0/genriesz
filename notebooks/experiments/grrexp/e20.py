@@ -186,6 +186,8 @@ def dgp_check(points=64):
         "E_r0_sq_quadrature": quad,
         "E_r0_sq_registered": E_R0_SQ,
         "E_r0": mass,
+        "reference_tolerance": DGP_TOL, "quadrature_tolerance": 1e-12,
+        "mass_tolerance": 1e-12,
         "ok": bool(
             abs(closed - E_R0_SQ) <= DGP_TOL
             and abs(quad - closed) <= 1e-12
@@ -196,7 +198,7 @@ def dgp_check(points=64):
 
 def population_ratio(points):
     """The population UKL(C=0) ratio fit on ``(1, z1, z2)``: the minimizer of
-    ``E_0 g*(phi'beta) - E_1 phi'beta`` by the SciPy default BFGS.
+    ``E_0 g*(phi'beta) - E_1 phi'beta`` by SciPy trust-ncg with the analytic Hessian.
 
     ``E_1 phi = E_0 r0 phi``, so ``M = r0 phi`` on the source rows.
     """
@@ -280,15 +282,18 @@ def stage0():
         "checks": checks,
         "status_48": s48.status,
         "status_64": s64.status,
-        "beta_64": [float(x) for x in s64.beta],
+        "message_48": s48.message, "message_64": s64.message,
+        "diagnostics_48": s48.diagnostics, "diagnostics_64": s64.diagnostics,
+        "beta_64": [_finite_or_none(x) for x in s64.beta],
         "beta_closed_form": [float(x) for x in beta_star],
-        "beta_closed_form_max_abs_diff": float(np.max(np.abs(s64.beta - beta_star))),
+        "beta_closed_form_max_abs_diff": _finite_or_none(np.max(np.abs(s64.beta - beta_star))),
         "beta_diff_48_64": beta_diff,
         "max_gradient_48": _finite_or_none(s48.max_gradient),
         "max_gradient_64": _finite_or_none(s64.max_gradient),
         "min_hessian_eig_64": _finite_or_none(s64.min_hessian_eig),
         "support_margin": _finite_or_none(s64.min_dual_margin),
-        "support_margin_kind": "unbounded" if np.isinf(s64.min_dual_margin) else "finite",
+        "support_margin_kind": ("unavailable" if not solved else
+                                "unbounded" if np.isinf(s64.min_dual_margin) else "finite"),
         **mom,
         "moments_48_max_abs_diff": float(max(abs(mom[k] - mom48[k]) for k in mom)),
         "predictions": predictions if certified else None,

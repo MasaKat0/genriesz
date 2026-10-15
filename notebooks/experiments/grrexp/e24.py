@@ -181,6 +181,9 @@ def stage0(points=(48, 64)):
     eta_max = 1.2 * SQRT3 + 1.8
     e_lo = 1.0 / (1.0 + np.exp(eta_max))
     out["eta_max_exact"] = eta_max
+    out["reference"] = {"eta_bound": ETA_BOUND, "e_range": list(E_RANGE),
+                        "alpha0_bound": ALPHA0_BOUND, "theta0": THETA0}
+    out["tolerances"] = {"eta_bound": 1e-6, "theta0": 1e-10, "quadrature_agreement": 1e-6}
     out["checks"] = {
         "eta_bound_outward": bool(ETA_BOUND >= eta_max and ETA_BOUND - eta_max < 1e-6),
         "e_range_outward": bool(E_RANGE[0] <= e_lo and E_RANGE[1] >= 1.0 - e_lo),

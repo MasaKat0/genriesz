@@ -373,13 +373,15 @@ class GRRGeneralLink:
         tol: float | None = None,
         options: dict | None = None,
         sample_weight: ArrayLike | None = None,
+        method: str = "BFGS",
     ) -> GeneralLinkFitResult:
-        """Minimize the unchanged arbitrary-link objective with SciPy's default BFGS.
+        """Minimize the arbitrary-link objective with SciPy (BFGS by default).
 
         ``sample_weight`` replaces the sample mean by normalized weighted means.
         ``max_iter``, ``tol`` and ``options`` are optional SciPy settings; ``None``
         uses library defaults. Success is the library's success at a finite,
         feasible point; Hessian eigenvalues are diagnostics only.
+        ``method="trust-ncg"`` supplies the analytic Hessian to SciPy.
         """
 
         X_ = as_2d(X)
@@ -401,7 +403,14 @@ class GRRGeneralLink:
         opts = {} if options is None else dict(options)
         if max_iter is not None:
             opts["maxiter"] = int(max_iter)
-        res = optimize.minimize(value, beta, jac=gradient, tol=tol, options=opts)
+        initial = self._evaluate(X_, beta, w)
+        if method == "trust-ncg" and (not initial.feasible or not initial.finite):
+            status = INFEASIBLE_START if not initial.feasible else NONFINITE
+            return self._finish(X_, w, initial, beta, status,
+                                "Inadmissible initial point.", 0, 0, float("nan"))
+        hess = {"hess": lambda b: self._hessian(X_, b, w)} if method == "trust-ncg" else {}
+        res = optimize.minimize(value, beta, method=method, jac=gradient, tol=tol,
+                                options=opts, **hess)
         ev = self._evaluate(X_, res.x, w)
         status = scipy_status(res)
         if not np.all(np.isfinite(res.x)):

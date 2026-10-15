@@ -196,7 +196,7 @@ def test_stage0_rows_are_json_compatible_with_unbounded_and_failed_cells(monkeyp
     def fake_cell(arm, rs, s, points):
         if arm == "BKL1":
             return {
-                "status": "maxit",
+                "status": "maxit", "message": "library failure", "diagnostics": {},
                 "max_gradient": 1.0,
                 "min_hessian_eig": np.nan,
                 "beta": np.full(10, np.nan),
@@ -205,7 +205,7 @@ def test_stage0_rows_are_json_compatible_with_unbounded_and_failed_cells(monkeyp
         ref = {("UKL1", "Omit", 1.25): (7.2906549, 7.6013032)}.get((arm, rs, s), (4.0, 4.0))
         e2 = {("SQ", "Include", 0.5): 4.3664466, ("UKL1", "Include", 0.5): 4.4173369}
         return {
-            "status": "ok",
+            "status": "ok", "message": "library success", "diagnostics": {},
             "max_gradient": 1e-14,
             "min_hessian_eig": 1.0,
             "beta": np.zeros(10),
@@ -271,13 +271,14 @@ def _raw(status, estimate=1.0, ratio=1e-10, arm="SQ|RW_full", reps=4):
     return pd.DataFrame(rows)
 
 
-def test_balance_checks_stop_on_training_imbalance() -> None:
+def test_balance_checks_record_training_imbalance_and_identity_violation() -> None:
     assert e12.balance_checks(_raw("ok"))["fits_checked"] == 4
     assert e12.balance_checks(_raw("ok", ratio=1e-6))["train_balance_ratio_max"] == 1e-6
     raw = _raw("ok")
     raw.loc[2, "check_sq_rw_equals_ols"] = 2e-10  # above its own bound (Amendment 5)
-    with pytest.raises(AssertionError, match="check_sq_rw_equals_ols"):
-        e12.balance_checks(raw)
+    diagnostic = e12.balance_checks(raw)
+    assert not diagnostic["identities_ok"]["check_sq_rw_equals_ols"]
+    assert diagnostic["identities_max"]["check_sq_rw_equals_ols"] == 2e-10
 
 
 def _population(certified):

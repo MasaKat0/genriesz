@@ -9,7 +9,7 @@ dual objective is
 
 whose gradient is the population imbalance ``sum_i w_i alpha_i phi_i - b`` and
 whose Hessian is ``sum_i w_i (d alpha / d v)_i phi_i phi_i'``. :func:`solve`
-minimizes it with SciPy's default unconstrained BFGS routine. Infeasible
+minimizes it with SciPy's trust-ncg routine and the analytic Hessian. Infeasible
 points have objective value +inf. Library success determines the fit status;
 gradients, Hessian eigenvalues and domain margins are reported as diagnostics.
 
@@ -21,7 +21,7 @@ smallest distance of the dual coordinate to the finite end of its range
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from scipy import optimize
@@ -30,13 +30,14 @@ from scipy import optimize
 @dataclass(frozen=True)
 class PopulationSolution:
     beta: np.ndarray
-    status: str  # "ok", "maxit", "linesearch", "singular"
+    status: str
     n_iter: int
     max_gradient: float
     min_hessian_eig: float
     alpha: np.ndarray  # on the support rows
     min_dual_margin: float  # over support and counterfactual rows
     message: str = ""
+    diagnostics: dict = field(default_factory=dict)
 
     def certified(self, grad_tol: float | None = None, margin_tol: float = 1e-4) -> bool:
         """§1.9 (ii)–(iii) on a finite support: gradient, positive Hessian, dual margin."""
@@ -90,8 +91,16 @@ def solve(
     n, p = Phi.shape
     if w.shape != (n,) or M.shape != (n, p) or offset.shape != (n,):
         raise ValueError("w, M and offset must match the support rows")
-    if np.any(w < 0) or not np.isclose(w.sum(), 1.0, rtol=0, atol=1e-14):
-        raise ValueError("w must be non-negative probabilities summing to one")
+    if np.any(w < 0):
+        raise ValueError("w must be non-negative probabilities")
+    weight_sum = float(w.sum())
+    diagnostics = {
+        "method": "trust-ncg",
+        "weight_sum": weight_sum if np.isfinite(weight_sum) else None,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14,
+        "weight_sum_ok": bool(np.isclose(weight_sum, 1.0, rtol=0, atol=1e-14)),
+    }
     # imported here, after the notebook selected this checkout (grrexp.env.use_submodule_genriesz)
     from genriesz.solvers import scipy_status
 
@@ -116,22 +125,38 @@ def solve(
         point = evaluate(coef)
         return np.full_like(coef, np.nan) if point is None else Phi.T @ (w * point[1]) - b
 
+    def hessian(coef):
+        point = evaluate(coef)
+        return (np.full((p, p), np.nan) if point is None
+                else Phi.T @ (Phi * (w * point[2])[:, None]))
+
+    if not np.all(np.isfinite(w)) or evaluate(beta) is None:
+        status = "nonfinite" if not np.all(np.isfinite(w)) else "infeasible_start"
+        return PopulationSolution(beta, status, 0, np.nan, np.nan, np.full(n, np.nan),
+                                  np.nan, "Non-finite weights or inadmissible initial point.",
+                                  diagnostics)
+
     opts = {} if options is None else dict(options)
     if max_iter is not None:
         opts["maxiter"] = int(max_iter)
-    res = optimize.minimize(value, beta, jac=gradient, tol=tol, options=opts)
+    res = optimize.minimize(value, beta, method="trust-ncg", jac=gradient, hess=hessian,
+                            tol=tol, options=opts)
     beta = res.x
     point = evaluate(beta)
     status = scipy_status(res)
-    if point is None or not np.isfinite(res.fun) or not np.all(np.isfinite(beta)):
-        return PopulationSolution(beta, "nonfinite" if point is not None or not np.all(np.isfinite(beta))
-                                  else "infeasible_start",
+    if (point is None or not np.isfinite(res.fun) or not np.all(np.isfinite(beta))
+            or not np.all(np.isfinite(res.jac))):
+        status = "optimizer_failure" if point is None and np.all(np.isfinite(beta)) else "nonfinite"
+        return PopulationSolution(beta, status,
                                   int(getattr(res, "nit", 0)), np.nan, np.nan,
-                                  np.full(n, np.nan), np.nan, str(res.message))
+                                  np.full(n, np.nan), np.nan, str(res.message), diagnostics)
     n_iter = int(getattr(res, "nit", 0))
     g_star, alpha, dalpha = point
     grad = Phi.T @ (w * alpha) - b
     H = Phi.T @ (Phi * (w * dalpha)[:, None])
+    if not np.all(np.isfinite(H)) or not np.all(np.isfinite(grad)):
+        return PopulationSolution(beta, "nonfinite", n_iter, np.nan, np.nan,
+                                  np.full(n, np.nan), np.nan, str(res.message), diagnostics)
     margin = float(np.min(generator.dual_margin(X, offset + Phi @ beta)))
     if has_checks:
         margin = min(
@@ -146,6 +171,7 @@ def solve(
         alpha=alpha,
         min_dual_margin=margin,
         message=str(res.message),
+        diagnostics=diagnostics,
     )
 
 

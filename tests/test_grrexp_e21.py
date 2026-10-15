@@ -95,8 +95,9 @@ def test_ukl_c0_lambda0_equals_entropy_balancing(estimand) -> None:
     warn = e21._Warn()
     st, mdl = e21._eb_fit(estimand, X, pi_hat, warn, "t")
     assert st == "ok"
-    diff = e21.eb_check(estimand, mdl, X, pi_hat)
-    assert diff is not None and diff <= 1e-4
+    diagnostic = e21.eb_check(estimand, mdl, X, pi_hat)
+    assert diagnostic["max_relative_difference"] <= 1e-4
+    assert all(f["status"] == "ok" for f in diagnostic["fits"])
 
 
 # ---------------------------------------------------------------- AutoDML-lasso

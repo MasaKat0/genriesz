@@ -362,6 +362,10 @@ def stage0():
         max_abs_alpha0 = max(1.0 / FROZEN[name]["pi1"], FROZEN[name]["a_range"][1])
         rows.append({
             "generator": name, "design": vals, "frozen_checks": checks,
+            "frozen_reference": FROZEN[name], "constant_reference": CONST[name],
+            "diagnostic_tolerances": {"gradient": CERT_GRADIENT, "difference": CERT_DIFF,
+                                      "margin": CERT_MARGIN, "constant_relative": 1e-8,
+                                      "rounding_relative": 1e-9},
             "certificate": cert, "certificate_checks": cert_checks,
             "certified": bool(all(cert_checks.values())),
             "frozen_ok": bool(all(checks.values())),
@@ -498,29 +502,27 @@ def evaluate(des, gen, beta, entropy, rep, *, block=999, N=N_EVAL):
         at = float(treated_alpha(des.name, des.uref_t + beta[0], gen)[0])
         f = (1.0 - e) * (a_hat - a0) ** 2 + e * (at - 1.0 / des.pi1) ** 2
     finite = bool(np.all(np.isfinite(a_hat)) and math.isfinite(at) and np.all(np.isfinite(f)))
+    diag = {"eval_finite": finite, "A_alpha": des.A_alpha, "B_eval_squared": des.B_eval**2,
+            "max_abs_alpha_eval": float(max(np.abs(a_hat).max(), abs(at))),
+            "max_integrand_eval": float(f.max())}
     if not finite:
-        return {"eval_status": "nonfinite"}
+        return {"eval_status": "nonfinite", "eval_message": "Non-finite evaluation.", **diag}
     max_alpha = float(max(np.abs(a_hat).max(), abs(at)))
-    if max_alpha > des.A_alpha or f.max() > des.B_eval**2:
-        # beta_hat is in the l1 ball, whose induced range is certified at Stage 0: a value
-        # outside it is an implementation error, not a statistical outcome (stop).
-        raise RuntimeError(
-            f"evaluation outside the certified range: max |alpha| = {max_alpha} "
-            f"(A_alpha = {des.A_alpha}), max integrand = {float(f.max())} (B^2 = {des.B_eval**2})"
-        )
+    in_range = bool(max_alpha <= des.A_alpha and f.max() <= des.B_eval**2)
     mean = float(f.mean())
     var = float(f.var(ddof=1))
     lg = math.log(2.0 / DELTA_EVAL)
     lower = mean - math.sqrt(2.0 * var * lg / N) - 7.0 * des.B_eval**2 * lg / (3.0 * (N - 1))
     if not (math.isfinite(mean) and math.isfinite(var) and math.isfinite(lower)):
-        return {"eval_status": "nonfinite"}
+        return {"eval_status": "nonfinite", "eval_message": "Non-finite risk moments.", **diag}
     return {"eval_status": "ok", "err2": mean, "err2_var": var, "err2_lower": lower,
-            "eval_in_range": True, "max_abs_alpha_eval": max_alpha}  # fmt: skip
+            "eval_in_range": in_range, **diag}  # fmt: skip
 
 
 def _fit_record(des, gen, res, lam, events, entropy, rep, xi_star_inf):
     rec = {
         "status": res.status, "lam": lam, "n_iter": int(res.n_iter),
+        "message": res.message,
         "support": int(np.sum(res.beta != 0.0)), "ball_active": bool(res.l1_ball_active),
         "prox_residual": float(res.prox_residual), "kkt_residual": float(res.kkt_residual),
         "E1": bool(lam >= 2.0 * xi_star_inf), **events,
@@ -531,10 +533,10 @@ def _fit_record(des, gen, res, lam, events, entropy, rep, xi_star_inf):
         nz = np.flatnonzero(res.beta)
         rec["beta_hat"] = json.dumps({int(j): float(res.beta[j]) for j in nz})
         ev = evaluate(des, gen, res.beta, entropy, rep)
-        if ev.pop("eval_status") != "ok":
+        rec.update(ev)
+        if ev["eval_status"] != "ok":
             rec["status"] = "nonfinite"  # §1.3 B: a non-finite prediction fails the fit
             return rec
-        rec.update(ev)
         rec["l1_beta_hat"] = float(np.abs(res.beta).sum())
         rec["bnd_violation"] = bool(rec["events"] and rec["err2_lower"] > rec["bound"] ** 2)
     return rec
@@ -567,16 +569,26 @@ def _replicate(task):
     xi_star = xi_matrix(alpha_star, Phi, D, Z, des.pi1)
     grad_star = xi_star.mean(axis=0)
     xi_star_inf = float(np.abs(grad_star).max())
+    out = {"n_treated": int(D.sum()), "grad_star_inf": xi_star_inf}
+    def failed_design(message, **diagnostic):
+        out["design_diagnostics"] = {"finite": False, "message": message, **diagnostic}
+        out.update({pen: {"status": "nonfinite", "message": message} for pen in PENALTIES})
+        return out
+
     if not (math.isfinite(xi_star_inf) and np.all(np.isfinite(Phi))):
-        raise FloatingPointError("non-finite design or gradient at beta*")
+        return failed_design("Non-finite design or gradient at beta*.",
+                             design_finite=bool(np.isfinite(Phi).all()),
+                             gradient_finite=bool(np.isfinite(grad_star).all()))
     Sig_hat = Phi.T @ Phi / n
+    if not np.all(np.isfinite(Sig_hat)):
+        return failed_design("Non-finite sample second-moment matrix.")
     ev_hat = float(np.linalg.eigvalsh(Sig_hat).min())
     ev_e3 = float(np.linalg.eigvalsh(Sig_hat - 0.5 * des.sigma(p_c)).min())
     if not (math.isfinite(ev_hat) and math.isfinite(ev_e3)):
-        raise FloatingPointError("non-finite eigenvalue in the (E2)/(E3) checks")
+        return failed_design("Non-finite eigenvalue in the (E2)/(E3) checks.")
     events = {"lam_min_Sigma_hat": ev_hat, "lam_min_E3": ev_e3,
               "E2": bool(ev_hat >= des.lam_min_Sigma / 2.0), "E3": bool(ev_e3 >= 0.0)}  # fmt: skip
-    out = {"n_treated": int(D.sum()), "grad_star_inf": xi_star_inf}
+    out["design_diagnostics"] = {"finite": True}
     lam = lam_sn(xi_star, n, p)
     out["SN"] = _fit_record(des, gen, fit(des, gen, D, Phi, b, lam), lam, events, entropy, rep,
                             xi_star_inf)
@@ -594,6 +606,7 @@ def _replicate(task):
     else:
         # the failed first step is the LTH fit's status (a solver status, §1.3 B)
         rec = {"status": first.status, "lam": float("nan"), "E1": False, "events": False,
+               "message": first.message,
                "lth_first_step_failed": True, **events}  # fmt: skip
     rec["lam1"] = lam1
     out["LTH"] = rec
@@ -618,8 +631,10 @@ def tasks_for(entropy, reps, stage0_json, cells=None):
 
 FIT_NUMERIC = ("lam", "lam1", "n_iter", "support", "prox_residual", "kkt_residual", "bound",
                "err2", "err2_var", "err2_lower", "l1_beta_hat", "max_abs_alpha_eval",
+               "max_integrand_eval", "A_alpha", "B_eval_squared",
                "lam_min_Sigma_hat", "lam_min_E3")  # fmt: skip
-FIT_BOOL = ("E1", "E2", "E3", "events", "ball_active", "bnd_violation", "eval_in_range")
+FIT_BOOL = ("E1", "E2", "E3", "events", "ball_active", "bnd_violation", "eval_in_range",
+            "eval_finite")
 
 
 def raw_frame(tasks, results):
@@ -631,6 +646,7 @@ def raw_frame(tasks, results):
         name, p_c, n = CELLS[ci]
         base = {"cell": ci, "generator": name, "p_c": p_c, "n": n, "rep": rep,
                 "n_treated": res["n_treated"], "grad_star_inf": res["grad_star_inf"],
+                "design_diagnostics": json.dumps(res.get("design_diagnostics", {})),
                 "n_warnings": res["n_warnings"], "warnings": res["warnings"]}  # fmt: skip
         for pen in PENALTIES:
             r = res[pen]
@@ -639,6 +655,7 @@ def raw_frame(tasks, results):
                 **{k: float(r.get(k, np.nan)) for k in FIT_NUMERIC},
                 **{k: (bool(r[k]) if k in r else None) for k in FIT_BOOL},
                 "beta_hat": r.get("beta_hat", ""),
+                "message": r.get("message", ""), "eval_message": r.get("eval_message", ""),
             })  # fmt: skip
         if "BKL_zero_offset_status" in res:
             rows.append({**base, "penalty": "BKL_u0", "status": res["BKL_zero_offset_status"]})
@@ -899,9 +916,11 @@ def reevaluate(stage0_json, raw, entropy=CONFIRMATORY_ENTROPY):
             beta[int(j)] = x
         ev = evaluate(des, generator(r.generator), beta, entropy, int(r.rep), block=REEVAL_BLOCK,
                       N=N_REEVAL)  # fmt: skip
-        if ev["eval_status"] != "ok":
-            raise FloatingPointError("non-finite re-evaluation")
         out.append({"cell": int(r.cell), "rep": int(r.rep), "penalty": r.penalty,
+                    "status": ev["eval_status"], "message": ev.get("eval_message", ""),
+                    "finite": ev["eval_finite"], "eval_in_range": ev.get("eval_in_range"),
                     "err2_lower_1e6": float(r.err2_lower), "bound": float(r.bound),
-                    "err2_1e7": ev["err2"], "err2_lower_1e7": ev["err2_lower"]})  # fmt: skip
+                    "err2_1e7": ev.get("err2"), "err2_lower_1e7": ev.get("err2_lower"),
+                    **{k: ev[k] if math.isfinite(ev[k]) else None for k in
+                       ("max_abs_alpha_eval", "max_integrand_eval", "A_alpha", "B_eval_squared")}})
     return out

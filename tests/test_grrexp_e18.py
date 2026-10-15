@@ -116,8 +116,10 @@ def test_bernstein_interval():
     x = rng.uniform(0, 4, 100_000)
     mean, lo, hi = e18.bernstein_interval(x, 4.0, 1e-6)
     assert lo <= 2.0 <= hi and lo <= mean <= hi
-    with pytest.raises(ValueError):
-        e18.bernstein_interval(np.array([0.0, 5.0]), 4.0, 0.01)
+    mean, lo, hi, diagnostic = e18.bernstein_interval(
+        np.array([0.0, 5.0]), 4.0, 0.01, return_diagnostics=True)
+    assert mean == 2.5 and lo <= mean <= hi
+    assert not diagnostic["range_ok"] and diagnostic["maximum"] == 5.0
 
 
 def test_rhs_increasing_and_huge_at_small_nv():
@@ -217,17 +219,17 @@ def test_outcome_arm_absent_or_too_small_fails():
     assert st == "degenerate_functional" and psi is None
 
 
-def test_alpha_flags_rows_outside_the_ball_and_arw_reports_domain_prediction():
+def test_alpha_outside_the_ball_remains_a_finite_prediction():
     X, Z, Y = _xy()
     P = e18.legendre_features(Z)
     beta = np.zeros(e18.N_COLS[1])
     beta[0] = e18.RADIUS["UKL1"] * (1 + 1e-6)  # just outside the stated ball
     f = e18._Fit("UKL1", 1, {1.0: beta, 0.0: beta})
     _, out = f.alpha(1.0, P)
-    assert out.all()
+    assert not out.any()
     comp, te = np.arange(100, 400), np.arange(100)
     st, psi, a = e18._arw_fold(f, X, Y, P, e18.quadratic(Z), comp, te)
-    assert st == "domain_prediction" and psi is None
+    assert st == "ok" and np.isfinite(psi).all()
     sq = np.zeros(e18.N_COLS[1])
     sq[0] = e18.RADIUS["SQ"]  # on the sphere: |alpha| = 50 exactly, allowed
     a, out = e18._Fit("SQ", 1, {1.0: sq, 0.0: -sq}).alpha(1.0, P)
@@ -255,7 +257,7 @@ def _small_fold(monkeypatch=None):
 
 
 def test_all_candidates_failing_selects_a0(monkeypatch):
-    monkeypatch.setattr(e18, "fit_candidate", lambda a, X: ("linesearch", None))
+    monkeypatch.setattr(e18, "fit_candidate", lambda a, X, **kw: ("linesearch", None, []))
     rec, fits = _small_fold()
     assert rec["sel"] == e18.A0 and rec["raw_sel"] == e18.A0
     assert rec["n_failed"] == e18.A0 and rec["control_status"] == "linesearch"
@@ -270,10 +272,10 @@ def test_convergence_warning_excludes_the_candidate(monkeypatch):
 
     real = e18.fit_candidate
 
-    def warned(a, X):
+    def warned(a, X, **kwargs):
         if a == e18.CONTROL:
             warnings.warn("did not converge", ConvergenceWarning, stacklevel=1)
-        return real(a, X)
+        return real(a, X, **kwargs)
 
     monkeypatch.setattr(e18, "fit_candidate", warned)
     rec, fits = _small_fold()

@@ -166,12 +166,13 @@ def dml_gbm(D, Z, Y, fold_ids, prop_params, out_params, seed):
     return {"estimate": theta, "se": se, "status": "ok"}
 
 
-def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None):
+def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None,
+                   return_diagnostics=False):
     """Entropy-balancing weights from SciPy's default unconstrained BFGS.
 
     The objective remains ``sum exp(Phi c) - c' target``. ``n`` is retained for
-    callers; no sample-dependent convergence threshold is applied. Failures
-    raise with the library message, so no failed fit supplies weights.
+    callers; no sample-dependent convergence threshold is applied. Failed fits
+    return no weights. ``return_diagnostics`` also returns status and library message.
     """
     Phi_arm, target = np.asarray(Phi_arm, float), np.asarray(target, float)
 
@@ -187,7 +188,14 @@ def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None):
     res = optimize.minimize(value, np.zeros(Phi_arm.shape[1]), jac=gradient,
                             tol=tol, options=opts)
     weights = np.exp(Phi_arm @ res.x)
-    if (not res.success or not np.isfinite(res.fun) or not np.all(np.isfinite(weights))
-            or not np.all(np.isfinite(res.jac)) or not np.all(weights > 0)):
-        raise RuntimeError(f"Entropy-balancing optimization failed: {res.message}")
-    return weights
+    from genriesz.solvers import scipy_status
+
+    finite = bool(np.isfinite(res.fun) and np.all(np.isfinite(weights))
+                  and np.all(np.isfinite(res.jac)) and np.all(weights > 0))
+    status = scipy_status(res) if finite else "nonfinite"
+    result = weights if status == "ok" else None
+    diagnostic = {"status": status, "message": str(res.message),
+                  "max_gradient": (float(np.max(np.abs(res.jac)))
+                                   if np.all(np.isfinite(res.jac)) else None),
+                  "finite": finite, "library_success": bool(res.success)}
+    return (result, diagnostic) if return_diagnostics else result

@@ -422,8 +422,16 @@ class RunRecorder:
         self.files: dict[str, Path] = {}
         self.parallel_identity: dict | None = None
         self.closed = False
+        self.diagnostics: dict[str, list] = {}
 
     # -- writers -------------------------------------------------------------
+
+    def record_diagnostics(self, name: str, value) -> None:
+        """Keep numerical checks in the stage's manifest extra fields."""
+        if self.closed:
+            raise RuntimeError("this run is finalized")
+        value = json.loads(json.dumps(value), parse_constant=lambda _: None)
+        self.diagnostics.setdefault(name, []).append(value)
 
     def _path(self, stem: str, folder: str | None, suffix: str) -> tuple[str, Path]:
         if self.closed:
@@ -576,7 +584,8 @@ class RunRecorder:
             "pip_freeze_sha256": freeze_hash,
             "blas": env.blas_config(),
             "cpu": env.cpu_description(),
-            "extra": extra or {},
+            "extra": {**(extra or {}), **({"numerical_diagnostics": self.diagnostics}
+                                        if self.diagnostics else {})},
         }
         if self.parallel_identity is not None:
             record["parallel_identity"] = self.parallel_identity

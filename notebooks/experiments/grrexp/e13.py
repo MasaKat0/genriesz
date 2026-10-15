@@ -212,6 +212,7 @@ def dgp_check(points=64):
         "e_range_registered": list(E_RANGE),
         "E_alpha0_sq": e_alpha0,
         "E_alpha0_sq_registered": E_ALPHA0_SQ,
+        "tolerance": DGP_TOL,
         "ok": bool(
             E_RANGE[0] <= lo and hi <= E_RANGE[1] and abs(e_alpha0 - E_ALPHA0_SQ) <= DGP_TOL
         ),
@@ -306,7 +307,7 @@ def population_moments(X, w, alpha, dalpha_dbeta, score, H):
 
 
 def population_compatible(pair, points):
-    """§1.9 (i)-(ii): the population dual solution (SciPy default BFGS)."""
+    """§1.9 (i)-(ii): the population dual solution (SciPy trust-ncg)."""
     g = gr()
     gen = generator(pair)
     X, w, *_ = quadrature(points)
@@ -316,17 +317,19 @@ def population_compatible(pair, points):
     M = np.asarray(g.ATEFunctional(0).m_basis_matrix(X, bas), dtype=float)
     off = np.asarray(gen.grad(X, alpha_ref(X)), dtype=float)
     sol = population.solve(generator=gen, X=X, w=w, Phi=Phi, M=M, offset=off)
-    H = Phi.T @ (Phi * (w * gen.dual_eval(X, off + Phi @ sol.beta)[2])[:, None])
-    eig = np.linalg.eigvalsh(0.5 * (H + H.T))
     out = {
         "status": sol.status,
         "beta": sol.beta,
         "max_gradient": sol.max_gradient,
-        "min_hessian_eig": float(eig.min()),
-        "max_hessian_eig": float(eig.max()),
+        "min_hessian_eig": sol.min_hessian_eig,
+        "max_hessian_eig": float("nan"),
+        "message": sol.message,
+        "diagnostics": sol.diagnostics,
     }
     if sol.status != "ok":
         return out, None
+    H = Phi.T @ (Phi * (w * gen.dual_eval(X, off + Phi @ sol.beta)[2])[:, None])
+    out["max_hessian_eig"] = float(np.linalg.eigvalsh(0.5 * (H + H.T)).max())
     dalpha = gen.dual_eval(X, off + Phi @ sol.beta)[2]
     mom = population_moments(
         X, w, sol.alpha, dalpha[:, None] * Phi, sol.alpha[:, None] * Phi - M, H
@@ -336,13 +339,13 @@ def population_compatible(pair, points):
 
 def _general_fit(pair, X, w, beta0=None):
     mdl = model(pair)
-    res = mdl.fit(X, sample_weight=w, beta0=beta0)
+    res = mdl.fit(X, sample_weight=w, beta0=beta0, method="trust-ncg")
     return mdl, res
 
 
 def population_incompatible(pair, points, starts=None):
-    """Population fit from ``v_ref`` (beta = 0), using the same SciPy defaults
-    as the sample fits with quadrature weights; (iv') uses ``starts`` if given."""
+    """Population fit from ``v_ref`` (beta = 0), using trust-ncg with the analytic
+    Hessian and library defaults; (iv') uses ``starts`` if given."""
     g = gr()
     X, w, *_ = quadrature(points)
     mdl, res = _general_fit(pair, X, w)
@@ -352,6 +355,10 @@ def population_incompatible(pair, points, starts=None):
         "max_gradient": res.tangent_imbalance,
         "n_iter": res.n_iter,
         "n_hessian_shifts": res.n_hessian_shifts,
+        "message": res.message,
+        "diagnostics": {"method": "trust-ncg", "weight_sum": float(w.sum()),
+                        "weight_sum_tolerance": 1e-14,
+                        "weight_sum_ok": bool(np.isclose(w.sum(), 1.0, rtol=0, atol=1e-14))},
     }
     if res.status != "ok":
         out.update(min_hessian_eig=float("nan"), max_hessian_eig=float("nan"))
@@ -364,7 +371,7 @@ def population_incompatible(pair, points, starts=None):
         for b0 in starts:
             _, r = _general_fit(pair, X, w, beta0=b0)
             diff = float(np.max(np.abs(r.beta - res.beta))) if r.status == "ok" else None
-            ms.append({"status": r.status, "max_abs_diff": diff})
+            ms.append({"status": r.status, "message": r.message, "max_abs_diff": diff})
         out["multistart"] = ms
     link, dlink, _ = LINKS[pair]
     v = V_REF[pair] + np.asarray(mdl.basis(X), dtype=float) @ res.beta
@@ -447,6 +454,8 @@ def stage0():
             "checks": checks,
             "status_48": r48["status"],
             "status": r64["status"],
+            "message_48": r48["message"], "message_64": r64["message"],
+            "diagnostics_48": r48["diagnostics"], "diagnostics_64": r64["diagnostics"],
             "beta_diff_48_64": beta_diff,
             "max_gradient_48": _finite_or_none(r48["max_gradient"]),
             "max_gradient_64": _finite_or_none(r64["max_gradient"]),

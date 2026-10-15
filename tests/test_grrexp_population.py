@@ -6,10 +6,10 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from scipy.optimize._optimize import _minimize_bfgs
+from scipy.optimize._trustregion import _minimize_trust_region
 from scipy.special import expit
 
-BFGS_GTOL = signature(_minimize_bfgs).parameters["gtol"].default
+TRUST_GTOL = signature(_minimize_trust_region).parameters["gtol"].default
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -57,16 +57,21 @@ def test_ukl_recovers_a_representer_in_the_model() -> None:
     np.testing.assert_allclose(sol.alpha, alpha0, rtol=1e-4, atol=0)
 
 
-def test_start_outside_domain_and_bad_weights_stop() -> None:
+def test_start_outside_domain_fails_and_weight_sum_is_diagnostic() -> None:
     X, w, Phi, M, _ = ate_population(0.0, 0.5)
     sign = lambda A: np.where(np.atleast_2d(A)[:, 0] == 1, 1, -1)  # noqa: E731
     bkl = gr.BKLGenerator(C=1.0, branch_fn=sign)
     sol = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=np.zeros(len(X)))
     assert sol.status == "infeasible_start" and sol.message
-    with pytest.raises(ValueError, match="probabilities"):
-        population.solve(
-            generator=gr.SquaredGenerator(), X=X, w=2 * w, Phi=Phi, M=M, offset=np.zeros(len(X))
-        )
+    scaled = population.solve(
+        generator=gr.SquaredGenerator(), X=X, w=2 * w, Phi=Phi, M=M, offset=np.zeros(len(X))
+    )
+    assert scaled.status == "ok"
+    assert not scaled.diagnostics["weight_sum_ok"]
+    assert scaled.diagnostics["weight_sum"] == pytest.approx(2.0)
+    with pytest.raises(ValueError, match="non-negative"):
+        population.solve(generator=gr.SquaredGenerator(), X=X, w=-w, Phi=Phi, M=M,
+                         offset=np.zeros(len(X)))
 
 
 def sign(A):
@@ -108,7 +113,7 @@ def test_objective_derivatives_match_finite_differences(name) -> None:
             (F(beta + e)[1] - F(beta - e)[1]) / (2 * h), H[:, j], rtol=0, atol=1e-7
         )
     sol = population.solve(generator=gen, X=X, w=w, Phi=Phi, M=M, offset=off)
-    assert sol.status == "ok" and sol.max_gradient <= BFGS_GTOL
+    assert sol.status == "ok" and sol.max_gradient <= TRUST_GTOL
 
 
 def test_certificate_uses_the_dual_margin() -> None:
@@ -186,6 +191,6 @@ def test_backtracking_and_failed_acceptance() -> None:
     off = np.asarray(bkl.grad(X, np.where(X[:, 0] == 1, 1.01, -1.01)))
     sol = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=off)
     assert sol.status == "ok" and sol.certified()
-    stuck = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=off, max_iter=0)
-    assert stuck.status == "maxit" and stuck.n_iter == 0 and not stuck.certified()
+    stuck = population.solve(generator=bkl, X=X, w=w, Phi=Phi, M=M, offset=off, max_iter=1)
+    assert stuck.status == "maxit" and stuck.n_iter == 1 and not stuck.certified()
     assert "iterations" in stuck.message.lower()

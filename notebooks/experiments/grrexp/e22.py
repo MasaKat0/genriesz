@@ -542,8 +542,9 @@ def full_sample(entropy):
     unweighted = _smd(Zs[t], Zs[c], np.full(int(c.sum()), 1.0 / c.sum()))
     # EB check: UKL (C=0) x D1, lambda = 0, against an independent entropy-balancing dual fit
     F = np.column_stack([np.ones(n), Zs])
-    w_eb = baselines.eb_dual_newton(F[c], n * F[t].mean(axis=0), n)
-    eb = {"converged": w_eb is not None}
+    w_eb, eb_fit = baselines.eb_dual_newton(F[c], n * F[t].mean(axis=0), n,
+                                          return_diagnostics=True)
+    eb = {"converged": w_eb is not None, "fit": eb_fit, "tolerance": EB_TOL}
     if w_eb is not None and EB_ARM in alphas:
         diff = float(np.max(np.abs(w_eb - (-alphas[EB_ARM][c]))) / max(1.0, float(np.max(w_eb))))
         eb.update(max_rel_diff=diff, agrees=bool(diff <= EB_TOL))

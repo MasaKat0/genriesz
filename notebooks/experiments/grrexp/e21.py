@@ -338,7 +338,7 @@ def _eb_fit(estimand, X_fit, pi_hat, warn, tag):
 
 def eb_check(estimand, mdl, X_fit, pi_hat):
     """Largest relative difference between the UKL(C = 0) weights and an independent
-    entropy-balancing dual minimization on the same sample. Library failures propagate.
+    entropy-balancing dual minimization on the same sample, with fit diagnostics.
 
     ATE: each arm's weights match the full-sample mean of ``(1, x)``. ATT: the treated
     weights are ``1/pi_hat``; the control weights match ``sum_treated (1, x) / pi_hat``."""
@@ -351,14 +351,23 @@ def eb_check(estimand, mdl, X_fit, pi_hat):
     else:
         arms = ((D == 0, F[D == 1].sum(axis=0) / pi_hat, -1.0),)
     worst = 0.0
+    fits = []
+    failed = False
     for rows, target, s in arms:
-        w = baselines.eb_dual_newton(F[rows], target, n)
+        w, diagnostic = baselines.eb_dual_newton(F[rows], target, n, return_diagnostics=True)
+        fits.append(diagnostic)
         if w is None:
-            return None
+            failed = True
+            continue
         worst = max(worst, float(np.max(np.abs(s * a[rows] - w))))
     if estimand == "ATT":
         worst = max(worst, float(np.max(np.abs(a[D == 1] - 1.0 / pi_hat))))
-    return worst / float(np.max(np.abs(a)))
+    if failed:
+        return {"max_relative_difference": None, "ok": False,
+                "tolerance": EB_TOL, "fits": fits}
+    diff = worst / float(np.max(np.abs(a)))
+    return {"max_relative_difference": diff, "ok": bool(diff <= EB_TOL),
+            "tolerance": EB_TOL, "fits": fits}
 
 
 # ---------------------------------------------------------------- baselines
@@ -545,8 +554,8 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
                 status = st
                 break
             if gen == "EB":
-                diff = eb_check(estimand, mdl, X[tr], pi_hat)
-                eb_diff.append(diff)
+                diagnostic = eb_check(estimand, mdl, X[tr], pi_hat)
+                eb_diff.append(diagnostic)
             st, pred = _predict_checked(mdl, estimand, X[te])
             if st != "ok":
                 status = st
@@ -558,7 +567,8 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
             resid_g[te] = Y[te] - g(X[te])
             alpha[te] = pred(X[te])
             m_a[te] = m_of(estimand, X[te], pred, pi_hat)
-        extra = {"fold_status": json.dumps(detail), **warn.fields()}
+        extra = {"fold_status": json.dumps(detail), "eb_diagnostics": json.dumps(eb_diff),
+                 **warn.fields()}
         if status == "ok" and not out_ok:
             status = "convergence_warning"
         if status != "ok":
@@ -570,7 +580,9 @@ def _grr_arms(estimand, X, Y, D, folds, inner, gamma, pi_hat, center_seed, out_o
             continue
         extra["lam"] = float(np.mean(lams))
         if eb_diff:
-            extra["eb_diff"] = float(max(eb_diff))
+            differences = [d["max_relative_difference"] for d in eb_diff]
+            extra["eb_diff"] = (float(max(differences))
+                                if all(d is not None for d in differences) else float("nan"))
         out[f"{base}|ARW"] = _score_record(estimand, m_g + alpha * resid_g, alpha, D, pi_hat, extra)
         if gen == "EB":
             continue
@@ -712,7 +724,7 @@ def tasks_for(entropy, reps, cells=None):
 
 NUMERIC_FIELDS = ("estimate", "se", "max_abs_alpha", "ess", "lam", "eb_diff", "epsilon",
                   "n_warnings")  # fmt: skip
-TEXT_FIELDS = ("status", "warnings", "fold_status", "adml_folds", "gbm_params")
+TEXT_FIELDS = ("status", "warnings", "fold_status", "adml_folds", "gbm_params", "eb_diagnostics")
 
 
 def raw_frame(tasks, results):
@@ -743,8 +755,12 @@ def total_warnings(raw):
 
 def eb_summary(raw):
     eb = raw[raw["arm"].str.contains(r"\|EB\|", regex=True) & (raw["status"] == "ok")]
+    difference = float(eb["eb_diff"].max()) if len(eb) else np.nan
     return {"records_checked": int(len(eb)), "max_relative_difference":
-            float(eb["eb_diff"].max()) if len(eb) else None, "tolerance": EB_TOL}  # fmt: skip
+            difference if np.isfinite(difference) else None, "tolerance": EB_TOL,
+            "ok": bool(len(eb) and np.isfinite(eb["eb_diff"]).all()
+                       and (eb["eb_diff"] <= EB_TOL).all()),
+            "fits": eb["eb_diagnostics"].tolist() if "eb_diagnostics" in eb else []}
 
 
 SUMMARY_COLUMNS = ("R", "R_s", "failure_rate", "failure_rate_cp_upper", "status_counts",

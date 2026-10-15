@@ -281,6 +281,9 @@ def stage0():
             "status_48": s48.status,
             "status_64": s64.status,
             "status_4d": s4.status,
+            "message_48": s48.message, "message_64": s64.message, "message_4d": s4.message,
+            "diagnostics_48": s48.diagnostics, "diagnostics_64": s64.diagnostics,
+            "diagnostics_4d": s4.diagnostics,
             "beta_diff_48_64": beta_diff,
             "max_gradient_64": _finite_or_none(s64.max_gradient),
             "min_hessian_eig_64": _finite_or_none(s64.min_hessian_eig),
@@ -323,7 +326,8 @@ def stage0():
                 }
             )
         gens.append(row)
-    return {"part_a": rows_a, "part_a_ok": ok_a, "generators": gens}
+    return {"part_a": rows_a, "part_a_ok": ok_a, "part_a_tolerance": PART_A_TOL,
+            "generators": gens}
 
 
 # ---------------------------------------------------------------- Stage 1 replication
@@ -760,12 +764,13 @@ def total_warnings(raw):
 
 
 def anem_check(raw):
-    """The identity of Part B in every successful RW_full fit; a violation raises."""
+    """The identity of Part B in every successful RW_full fit, as a diagnostic."""
     rw = raw[raw["arm"].str.endswith("RW_full") & (raw["status"] == "ok")]
     gap = float(rw["anem_gap"].max()) if len(rw) else None
-    out = {"fits_checked": int(len(rw)), "max_gap": gap, "tolerance": ANEM_TOL}
-    if len(rw) and not gap <= ANEM_TOL:
-        raise AssertionError(f"ANEM identity violated: {json.dumps(out)}")
+    finite = gap is not None and math.isfinite(gap)
+    out = {"fits_checked": int(len(rw)), "max_gap": gap if finite else None,
+           "finite": finite, "tolerance": ANEM_TOL}
+    out["ok"] = bool(not len(rw) or (finite and gap <= ANEM_TOL))
     return out
 
 

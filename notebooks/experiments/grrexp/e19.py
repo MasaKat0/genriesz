@@ -31,6 +31,7 @@ import json
 import math
 
 import numpy as np
+from scipy import optimize
 
 from . import baselines, metrics
 from .seeds import Seeds, fold_ids
@@ -239,7 +240,13 @@ def population_q(points):
     G = Phi.T @ (Phi * w[:, None])
     mbar = w @ dPhi
     # SQ (g = alpha^2, C = 0): population objective E[alpha^2 - 2 m(W, alpha)], alpha = Phi beta
-    beta = np.linalg.solve(G, mbar)
+    res = optimize.minimize(lambda b: float(b @ G @ b - 2.0 * b @ mbar),
+                            np.zeros(len(mbar)), method="trust-ncg",
+                            jac=lambda b: 2.0 * (G @ b - mbar), hess=lambda b: 2.0 * G)
+    from genriesz.solvers import scipy_status
+
+    beta = res.x
+    finite = bool(np.isfinite(res.fun) and np.isfinite(beta).all() and np.isfinite(res.jac).all())
     grad = 2.0 * (G @ beta - mbar)
     eig = np.linalg.eigvalsh(2.0 * G)
     # Riesz identity on the dictionaries (alpha_0 is the representer): E[alpha_0 phi] = E[d phi]
@@ -251,6 +258,8 @@ def population_q(points):
     )
     return {
         "theta0": theta0,
+        "status": scipy_status(res) if finite else "nonfinite", "message": str(res.message),
+        "method": "trust-ncg",
         "E_alpha0_sq": e_a2,
         "V_star": v_star,
         "beta_sq": beta,
@@ -316,11 +325,13 @@ def stage0():
     SQ population minimizer (alpha_0 lies in the span, so the minimizer is alpha_0), the
     H19-Inf predictions (b = 0, sigma_true = sigma_SE = sqrt(V*), c(n) = 0.95), the
     H19-Cex predictions and the exact finite-n reference values of counterexample (i)."""
+    from .e12 import _finite_or_none
     from .inference import predicted_coverage
 
     q48, q64 = population_q(48), population_q(64)
     beta_diff = float(np.max(np.abs(q48["beta_sq"] - q64["beta_sq"])))
     checks = {
+        "solver_ok": q48["status"] == "ok" and q64["status"] == "ok",
         "i_gradient": bool(
             q48["max_gradient"] <= CERT_GRADIENT and q64["max_gradient"] <= CERT_GRADIENT
         ),
@@ -335,16 +346,19 @@ def stage0():
     v = q64["V_star"]
     inference = {
         "certified": bool(all(checks.values())),
+        "status_48": q48["status"], "status_64": q64["status"],
+        "message_48": q48["message"], "message_64": q64["message"],
+        "method": q64["method"],
         "checks": checks,
         "theta0": q64["theta0"],
         "theta0_48": q48["theta0"],
         "V_star": v,
         "V_star_48": q48["V_star"],
         "E_alpha0_sq": q64["E_alpha0_sq"],
-        "beta_sq": [float(x) for x in q64["beta_sq"]],
-        "beta_diff_48_64": beta_diff,
-        "max_gradient_48": q48["max_gradient"],
-        "max_gradient_64": q64["max_gradient"],
+        "beta_sq": [_finite_or_none(x) for x in q64["beta_sq"]],
+        "beta_diff_48_64": _finite_or_none(beta_diff),
+        "max_gradient_48": _finite_or_none(q48["max_gradient"]),
+        "max_gradient_64": _finite_or_none(q64["max_gradient"]),
         "min_hessian_eig_64": q64["min_hessian_eig"],
         "riesz_identity_gap_64": q64["riesz_identity_gap"],
         "b": 0.0,

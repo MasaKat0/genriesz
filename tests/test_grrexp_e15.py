@@ -172,13 +172,13 @@ def test_aggregation_families_tables_and_figure(small_run) -> None:
     plt.close(e15.figure(summ))
 
 
-def test_anem_check_stops_on_a_violation(small_run) -> None:
+def test_anem_check_records_a_violation(small_run) -> None:
     raw, _ = small_run
     bad = raw.copy()
     i = bad.index[bad["arm"].str.endswith("RW_full") & (bad["status"] == "ok")][0]
     bad.loc[i, "anem_gap"] = 1e-6
-    with pytest.raises(AssertionError):
-        e15.anem_check(bad)
+    diagnostic = e15.anem_check(bad)
+    assert not diagnostic["ok"] and diagnostic["max_gap"] == 1e-6
 
 
 def test_total_warnings_counts_each_shared_group_once() -> None:

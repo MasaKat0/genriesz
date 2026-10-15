@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import sys
+from inspect import signature
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.optimize._trustregion import _minimize_trust_region
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
 
@@ -17,6 +19,8 @@ from grrexp import e12, e13, outputs  # noqa: E402
 from grrexp.seeds import PILOT_ENTROPY, Seeds  # noqa: E402
 
 import genriesz as gr  # noqa: E402
+
+TRUST_GTOL = signature(_minimize_trust_region).parameters["gtol"].default
 
 
 def _rows(n=5):
@@ -136,7 +140,7 @@ def test_support_margins_are_the_exact_range_over_the_box(pair) -> None:
 def test_compatible_population_has_zero_bias_and_equal_variances(pair) -> None:
     out, mom = e13.population_compatible(pair, 12)
     assert out["status"] == "ok"
-    assert abs(mom["b"]) < 1e-4 and np.max(np.abs(mom["delta"])) <= 1e-5
+    assert abs(mom["b"]) < 1e-4 and np.max(np.abs(mom["delta"])) <= TRUST_GTOL
     for k in ("sigma2_true_rw", "sigma2_true_arw", "sigma2_se"):
         assert np.isclose(mom[k], mom["E_alpha2"], rtol=1e-4)
 

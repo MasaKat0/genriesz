@@ -235,7 +235,7 @@ def test_nonfinite_evaluation_fails_the_fit(designs) -> None:
     beta = des.beta_star(4)
     beta[1] = -1000.0  # a = exp(-u) overflows on the evaluation sample
     ev = e14.evaluate(des, e14.generator("UKL"), beta, PILOT_ENTROPY, 0, N=1000)
-    assert ev == {"eval_status": "nonfinite"}
+    assert ev["eval_status"] == "nonfinite" and not ev["eval_finite"]
     res = gr.solvers.SolverResult(beta=beta, status="ok", n_iter=1)
     events = {"lam_min_Sigma_hat": 1.0, "lam_min_E3": 1.0, "E2": True, "E3": True}
     rec = e14._fit_record(des, e14.generator("UKL"), res, 0.1, events, PILOT_ENTROPY, 0, 0.0)
@@ -243,12 +243,13 @@ def test_nonfinite_evaluation_fails_the_fit(designs) -> None:
     assert "bnd_violation" not in rec and "err2_lower" not in rec
 
 
-def test_evaluation_outside_the_certified_range_stops(designs) -> None:
+def test_evaluation_outside_the_certified_range_is_diagnostic(designs) -> None:
     des = designs["SQ"]
     beta = des.beta_star(4)
     beta[1] = -50.0  # far outside the l1 ball: |alpha| above A_alpha
-    with pytest.raises(RuntimeError, match="certified range"):
-        e14.evaluate(des, e14.generator("SQ"), beta, PILOT_ENTROPY, 0, N=1000)
+    ev = e14.evaluate(des, e14.generator("SQ"), beta, PILOT_ENTROPY, 0, N=1000)
+    assert ev["eval_status"] == "ok" and not ev["eval_in_range"]
+    assert ev["max_abs_alpha_eval"] > ev["A_alpha"]
 
 
 def _bkl_raw(statuses):
