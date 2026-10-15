@@ -718,7 +718,7 @@ def test_squared_loss_validation_matches_hand_computed_lsif_risk():
     cb = make_candidate_basis(template, sigma=None, centers=None)
     cb.fit(X[fold.train], Y[fold.train])
     grr = GRRGLM(basis=cb, generator=gen, functional=m, penalty="l2", lam=1e-2)
-    fr = grr.fit(X[fold.train], max_iter=500, tol=1e-8)
+    fr = grr.fit(X[fold.train])
     assert fr.success and grr.beta_ is not None
     beta = grr.beta_
 

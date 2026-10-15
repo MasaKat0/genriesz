@@ -51,9 +51,6 @@ RHO[[0, 1, 2]] = (THETA0, 1.0, 0.5)
 RHO[[P_COV + 2, P_COV + 3]] = (1.0, 0.5)
 ALPHA_LEVEL = 0.05  # the 0.05 of the lambda rule sqrt(2 log(2p/0.05)/n)
 
-#: §1.3 C: l1 -> proximal residual <= 1e-6 lambda (genriesz FISTA default);
-#: lambda = 0 -> max_j |grad_j| <= 1e-8 max(1, ||P_n m(W, phi)||_inf).
-SAMPLE_TOL_L0 = 1e-8
 ANEM_TOL = 1e-10  # the identity of §E-15 Part B, checked in every RW_full fit
 PART_A_TOL = 1e-12
 CERT_GRADIENT = 1e-12
@@ -68,10 +65,6 @@ BIAS_N = (2000, 4000, 8000)
 
 # AutoDML-lasso (§1.4, CNS A.1.1 and A.2, frozen constants)
 ADML_C = (1.0, 0.1, 0.1)
-ADML_OUTER = 10
-ADML_OUTER_TOL = 1e-8
-ADML_INNER = 10000
-ADML_INNER_TOL = 1e-10
 ADML_LOADING_SHIFT = 0.2
 
 
@@ -377,7 +370,7 @@ class _Warn:
 
 def _fit(gen_name, lam, X_fit, beta0=None):
     mdl = model(gen_name, lam)
-    fr = mdl.fit(X_fit, beta0=beta0, tol=None if lam > 0 else SAMPLE_TOL_L0)
+    fr = mdl.fit(X_fit, beta0=beta0)
     return str(fr.status), mdl
 
 
@@ -569,34 +562,76 @@ def adml_dictionary(X):
     return B, Mb
 
 
-def _soft(x, t):
-    return math.copysign(max(abs(x) - t, 0.0), x)
+def coordinate_descent(G, Mh, thr, rho0, *, max_iter=None, tol=None, options=None):
+    """Minimize the CNS fixed-loading objective with SciPy's default L-BFGS-B.
+
+    Returns ``(rho, iterations, converged)`` for compatibility. A library failure
+    raises with its message before a loading update can use the failed fit.
+    """
+    from genriesz.solvers import minimize_coefficients
+
+    res = minimize_coefficients(
+        lambda rho: float(rho @ G @ rho - 2.0 * rho @ Mh),
+        lambda rho: 2.0 * (G @ rho - Mh), rho0, l1=2.0 * np.asarray(thr),
+        max_iter=max_iter, tol=tol, options=options,
+    )
+    if (not res.success or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x))
+            or not np.all(np.isfinite(res.jac))):
+        raise RuntimeError(f"AutoDML fixed-loading optimization failed: {res.message}")
+    return res.x, int(res.nit), True
 
 
-def coordinate_descent(G, Mh, thr, rho0):
-    """CNS A.2: minimize ``rho'G rho - 2 rho'M + 2 sum_j thr_j |rho_j|`` by cyclic
-    soft-thresholding from ``rho0``; stop when a sweep changes no coefficient by more
-    than 1e-10, or after 10000 sweeps. Returns ``(rho, sweeps, converged)``."""
-    rho = np.array(rho0, dtype=float)
-    diag = np.diag(G)
-    g_rho = G @ rho
-    change = np.inf
-    for sweep in range(1, ADML_INNER + 1):
-        change = 0.0
-        for j in range(len(rho)):
-            zj = Mh[j] - (g_rho[j] - diag[j] * rho[j])
-            new = _soft(zj, thr[j]) / diag[j]
-            d = new - rho[j]
-            if d != 0.0:
-                g_rho += G[:, j] * d
-                rho[j] = new
-                change = max(change, abs(d))
-        if change <= ADML_INNER_TOL:
-            return rho, sweep, True
-    return rho, ADML_INNER, False
+def loading_fit(B, Mb, G, Mh, rho, r_l, c3, shift, *,
+                max_iter=None, tol=None, inner_options=None):
+    """CNS loading updates using SciPy's unaccelerated fixed-point iteration.
+
+    Only explicit ``max_iter`` and ``tol`` override ``fixed_point`` defaults.
+    Each fixed-loading l1 problem uses ``coordinate_descent``. A failed inner
+    or outer solve returns no coefficient vector and preserves the message.
+    """
+    from scipy import optimize
+
+    act = np.diag(G) > 0.0
+    info = {"outer": 0, "outer_capped": False, "inner_capped": 0, "sweeps": 0,
+            "inner_iterations_max": 0, "zero_columns": np.flatnonzero(~act).tolist()}
+    status = "optimizer_failure"
+
+    def update(old):
+        nonlocal status
+        info["outer"] += 1
+        Dj = np.sqrt(np.mean((B * (B @ old)[:, None] - Mb) ** 2, axis=0)) + shift
+        thr = r_l * Dj
+        thr[0] *= c3
+        if np.any(np.abs(Mh[~act]) > thr[~act]):
+            status = "degenerate_functional"
+            raise RuntimeError("zero dictionary column has an unbounded coefficient objective")
+        coef, iterations, _ = coordinate_descent(
+            G[np.ix_(act, act)], Mh[act], thr[act], old[act], options=inner_options
+        )
+        new = np.zeros_like(old)
+        new[act] = coef
+        info["sweeps"] += iterations
+        info["inner_iterations_max"] = max(info["inner_iterations_max"], iterations)
+        return new
+
+    options = {}
+    if max_iter is not None:
+        options["maxiter"] = int(max_iter)
+    if tol is not None:
+        options["xtol"] = float(tol)
+    try:
+        fitted = optimize.fixed_point(update, rho, method="iteration", **options)
+    except RuntimeError as exc:
+        info["message"] = str(exc)
+        info["outer_capped"] = str(exc).startswith("Failed to converge")
+        return status, None, info
+    if not np.all(np.isfinite(fitted)):
+        info["message"] = "scipy.optimize.fixed_point returned non-finite coefficients"
+        return "nonfinite", None, info
+    return "ok", fitted, info
 
 
-def adml_fit(X_fit):
+def adml_fit(X_fit, *, max_iter=None, tol=None, inner_options=None):
     """CNS A.1.1 / A.2 on one training sample. Returns ``(status, rho, info)``."""
     B, Mb = adml_dictionary(X_fit)
     n, p = B.shape
@@ -615,23 +650,8 @@ def adml_fit(X_fit):
     from scipy import stats
 
     r_l = c1 / math.sqrt(n) * float(stats.norm.ppf(1.0 - c2 / (2.0 * p)))
-    outer, inner_capped, sweeps_total = 0, 0, 0
-    for outer in range(1, ADML_OUTER + 1):
-        resid = B @ rho
-        Dj = np.sqrt(np.mean((B * resid[:, None] - Mb) ** 2, axis=0)) + ADML_LOADING_SHIFT
-        thr = r_l * Dj
-        thr[0] = r_l * c3 * Dj[0]
-        old = rho.copy()
-        rho, sweep, converged = coordinate_descent(G, Mh, thr, rho)
-        sweeps_total += sweep
-        inner_capped += int(not converged)
-        if not np.all(np.isfinite(rho)):
-            return "nonfinite", None, {}
-        if np.max(np.abs(rho - old)) <= ADML_OUTER_TOL:
-            break
-    capped = bool(np.max(np.abs(rho - old)) > ADML_OUTER_TOL)
-    return "ok", rho, {"outer": outer, "outer_capped": capped, "inner_capped": inner_capped,
-                       "sweeps": sweeps_total}  # fmt: skip
+    return loading_fit(B, Mb, G, Mh, rho, r_l, c3, ADML_LOADING_SHIFT,
+                        max_iter=max_iter, tol=tol, inner_options=inner_options)
 
 
 def _autodml(X, Y, folds):

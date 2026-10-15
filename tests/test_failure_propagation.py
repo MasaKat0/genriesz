@@ -78,10 +78,10 @@ def test_boundary_fold_makes_every_estimate_nan():
         riesz_penalty=None, outcome_link="identity", folds=2, random_state=0,
         estimators=("rw", "arw", "tmle", "ra"),
     )
-    assert res.status == "maxit"
+    assert res.status == "optimizer_failure"
     assert set(res.estimates) == {"rw", "arw", "tmle", "ra"}
     assert all(np.isnan(v.estimate) for v in res.estimates.values())
-    assert res.diagnostics["failure"]["status"] == "maxit"
+    assert res.diagnostics["failure"]["status"] == "optimizer_failure"
 
 
 def test_evaluation_row_outside_the_bp_domain_is_domain_prediction():

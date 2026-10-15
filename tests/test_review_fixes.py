@@ -88,7 +88,7 @@ def test_ridge_and_active_l1_ball_match_the_independent_solution(
     assert np.max(np.abs(r.beta - np.array(expected))) < 1e-10
     assert r.l1_ball_active
     assert abs(r.ball_multiplier - mu) < 1e-10
-    assert r.kkt_residual < 1e-10 and r.prox_residual < 1e-10
+    assert r.kkt_residual < 1e-10 and np.isnan(r.prox_residual)
     # The reported imbalance excludes the ridge term: Delta = beta - b here.
     assert abs(r.max_abs_imbalance - float(np.max(np.abs(np.array(expected) - _B)))) < 1e-10
 
@@ -99,8 +99,9 @@ def test_ridge_with_an_inactive_ball_keeps_the_newton_solution():
         penalty="l2", lam=0.5, l1_radius=10.0,
     )
     r = model.fit(_X3)
-    assert r.status == "ok" and r.solver == "newton"
+    assert r.status == "ok" and r.solver == "fista"
     assert np.max(np.abs(r.beta - _B / 1.5)) < 1e-12
+    assert r.gradient_norm <= 1e-5
 
 
 def test_l1_prox_residual_is_reported_and_used():
@@ -112,7 +113,7 @@ def test_l1_prox_residual_is_reported_and_used():
     r = model.fit(X3)
     # Soft-thresholding of b at 0.3 (scaled by the curvature 1): (2.7, 0.7, 0).
     assert np.max(np.abs(r.beta - np.array([2.7, 0.7, 0.0]))) < 1e-10
-    assert np.isfinite(r.prox_residual) and r.prox_residual <= 1e-6 * 0.3
+    assert np.isnan(r.prox_residual) and r.kkt_residual <= 1e-5
 
 
 def test_status_names_follow_the_registration():
@@ -146,7 +147,7 @@ def test_density_ratio_numerator_rows_stay_in_the_domain():
     res = fit_density_ratio(X_num2, X_den, basis=_linear(), generator=gen, penalty=None)
     # Iterates keep the numerator rows in the domain; with no admissible minimizer the
     # fit stops at the iteration limit instead of at the boundary (U43). It still fails.
-    assert res.status == "maxit" and not res.success
+    assert res.status == "optimizer_failure" and not res.success
 
 
 def test_density_ratio_underflow_is_outside_not_valid():

@@ -453,8 +453,8 @@ def grr_functional(
     null: float = 0.0,
     expose_alpha_values: bool = False,
     # Optimizers
-    max_iter: int = 500,
-    tol: float = 1e-8,
+    max_iter: int | None = None,
+    tol: float | None = None,
     verbose: bool = False,
     fit_hook: Callable | None = None,
 ) -> FunctionalEstimate:

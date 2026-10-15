@@ -28,60 +28,13 @@ coordinate lies in the open range of ``g'`` on the row's branch and the
 representer value lies in the open domain of ``g`` on that branch (so an exp
 underflow to ``|alpha| = C`` is infeasible) and is finite.
 
-Two solvers are provided. Both keep every iterate feasible, never clip, and
-return an explicit status instead of raising:
-
-- :func:`newton_solve` -- damped Newton for no penalty, ridge, and ``l_q``
-  penalties with ``q >= 2``. Backtracking halves the step until the trial point
-  is feasible, finite, and satisfies the Armijo condition (coefficient
-  ``1e-4``; at most ``max_halvings`` halvings, then ``"linesearch"``).
-- :func:`fista_solve` -- projected proximal gradient with acceleration (FISTA)
-  for ``h = lam ||.||_1 + I{||.||_1 <= R}`` (either part may be absent) with an
-  optional ridge term in the smooth part, and for ``l_q`` with ``1 < q < 2``.
-  The update is ``beta+ = prox_{h/L}(y - grad f(y)/L)``: soft-thresholding at
-  ``max(lam/L, tau)``, with ``tau`` the level that puts the result on the ball.
-  ``L`` doubles until ``beta+`` is feasible and the sufficient-decrease
-  condition holds. As registered, the extrapolation is discarded (``y = beta_k``,
-  ``t = 1``, and ``beta+`` is recomputed from ``beta_k``) when the extrapolated
-  point is infeasible and at an adaptive restart. **Deviation from the
-  registration (§1.3 A-3):** the restart test is the gradient-mapping form of
-  O'Donoghue and Candes (2015), ``(y - beta+)'(beta+ - beta_k) > 0``, i.e.
-  ``G(y)'(beta+ - beta_k) > 0`` with ``G(y) = L (y - beta+)``, instead of the
-  registered ``grad f(y)'(beta+ - beta_k) > 0``. The two coincide when
-  ``h = 0``; with an ``l1`` term, ``grad f`` does not vanish at the solution
-  (it equals ``-lam * sign(beta)`` on the support), the registered test then
-  fires at almost every step, and FISTA degrades to an unaccelerated proximal
-  gradient (an RKHS ``l1`` example needed more than 100000 iterations instead
-  of about 2300). The stopping quantity is the registered proximal
-  residual ``rho = L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` with the
-  last ``L``; the subdifferential residual (with the normal cone of an active
-  ball) is reported as well and must meet the same tolerance, since the
-  proximal update can round to the current iterate when ``L`` is large.
-
-Statuses (:data:`STATUSES`):
-
-``"ok"``
-    The first-order criterion is met at a feasible point.
-``"uncertified_numerical_boundary"``
-    Reserved status for numerical boundary diagnostics. The solvers report
-    ``n_boundary`` at termination; proximity alone does not stop a feasible
-    iterate. (Exported as :data:`BOUNDARY`.)
-``"maxit"``
-    The iteration limit was reached.
-``"linesearch"``
-    Backtracking exhausted its budget without an acceptable point.
-``"singular"``
-    The Newton system is numerically singular (or, for the arbitrary-link
-    objective, the final Hessian is not positive definite).
-``"infeasible_start"``
-    The starting point is infeasible (e.g. BKL with ``u_ref = 0``).
-``"nonfinite"``
-    A non-finite objective, gradient, curvature or representer value.
-``"domain_prediction"``
-    An additional evaluation point (a counterfactual row evaluated by the
-    functional, or a numerator row of a density ratio) reached the boundary of
-    the domain: the iterates are blocked by the requirement that these points
-    stay in the domain.
+The entry points ``newton_solve`` and ``fista_solve`` use
+``scipy.optimize.minimize``. Smooth unconstrained objectives use its default
+BFGS method. Exact l1 penalties use positive and negative coefficient parts,
+with nonnegative bounds (default L-BFGS-B); an l1 ball adds a linear
+constraint (default SLSQP). No solver is retried on failure. ``ok`` means the
+library reported success at a finite, feasible solution. Library messages and
+status codes are retained. Residuals and boundary counts are diagnostics.
 
 A solver status is a statement about the optimization run on this sample. It is
 not evidence that the population problem, or even this sample's problem, has no
@@ -90,11 +43,11 @@ solution; see :mod:`genriesz.certificates` for the sample-level weight program.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import optimize
 
 from .generators import DomainError
 
@@ -108,9 +61,11 @@ NONFINITE = "nonfinite"
 DEGENERATE_FUNCTIONAL = "degenerate_functional"
 DOMAIN_PREDICTION = "domain_prediction"
 CV_FAILED = "cv_failed"
+OPTIMIZER_FAILURE = "optimizer_failure"
 
 #: Every status the strict solvers and the high-level estimators can report.
 STATUSES = (
+    OPTIMIZER_FAILURE,
     OK,
     BOUNDARY,
     MAXIT,
@@ -126,8 +81,6 @@ STATUSES = (
 #: Statuses that count as a successful fit. ``"closed_form"`` and
 #: ``"converged"`` are produced by the legacy ``solver="lbfgs"`` path only.
 SUCCESS_STATUSES = frozenset({OK, "closed_form", "converged"})
-
-_EPS = float(np.finfo(float).eps)
 
 
 @dataclass
@@ -265,9 +218,8 @@ class DualProblem:
         except DomainError:
             # A user-defined generator signals "outside my domain" by raising
             # DomainError from its link (the generic link_domain cannot know the
-            # domain). That is a property of this trial point, handled exactly
-            # like a link_domain violation: backtrack, or report
-            # "infeasible_start". Any other exception propagates.
+            # domain). This trial point has infinite objective value in the
+            # optimizer. Any other exception propagates.
             return _Point(beta=beta, feasible=False, v=v)
         fin_a, dom_a = _alpha_ok(self.generator, self.X, alpha)
         if not dom_a:
@@ -378,8 +330,7 @@ class SolverResult:
         N_B(beta)`` (with the smooth penalty in ``grad L``); for smooth
         penalties without a ball, ``max_j |dF/dbeta_j|``.
     prox_residual:
-        FISTA only: ``L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` with
-        the last ``L`` (the registered stopping quantity).
+        Unavailable for the SciPy routines (NaN).
     alpha, v:
         Representer values and dual coordinates on the fitting rows.
     n_boundary:
@@ -388,7 +339,7 @@ class SolverResult:
         Whether ``||beta||_1 = R1`` at the solution and the multiplier ``mu >= 0``
         of the ball constraint used in the residual.
     polished:
-        Whether the FISTA solution was refined by Newton on its support.
+        False for the SciPy routines.
     hessian_min_eig:
         Smallest eigenvalue of the (penalized) Hessian at ``beta`` when computed.
     """
@@ -413,33 +364,6 @@ class SolverResult:
     @property
     def success(self) -> bool:
         return self.status == OK
-
-
-# ---------------------------------------------------------------------------
-# Penalties
-# ---------------------------------------------------------------------------
-def _smooth_penalty(
-    lam: float, q: float | None
-) -> tuple[
-    Callable[[NDArray[np.float64]], float],
-    Callable[[NDArray[np.float64]], NDArray[np.float64]],
-    Callable[[NDArray[np.float64]], NDArray[np.float64]],
-]:
-    """Value, gradient and Hessian diagonal of ``(lam/q) ||beta||_q^q`` (``q >= 2``)."""
-
-    if q is None or lam == 0.0:
-        return (
-            lambda b: 0.0,
-            lambda b: np.zeros_like(b),
-            lambda b: np.zeros_like(b),
-        )
-    if q < 2.0:
-        raise ValueError("newton_solve requires a twice-differentiable penalty (q >= 2).")
-    return (
-        lambda b: float((lam / q) * np.sum(np.abs(b) ** q)),
-        lambda b: lam * np.sign(b) * np.abs(b) ** (q - 1.0),
-        lambda b: lam * (q - 1.0) * np.abs(b) ** (q - 2.0),
-    )
 
 
 def soft_threshold(z: NDArray[np.float64], tau: float) -> NDArray[np.float64]:
@@ -482,22 +406,23 @@ def prox_l1_ball(
     return soft_threshold(z, max(step * lam, tau))
 
 
-def prox_lq(z: NDArray[np.float64], step: float, lam: float, q: float) -> NDArray[np.float64]:
-    """Proximal map of ``step * (lam/q) ||.||_q^q`` for ``1 < q < 2`` (bisection).
+def prox_lq(z: NDArray[np.float64], step: float, lam: float, q: float,
+            *, options: dict | None = None) -> NDArray[np.float64]:
+    """Proximal map of ``step * (lam/q) ||.||_q^q`` for ``1 < q < 2`` (SciPy Brent roots).
 
     Coordinatewise ``x = sign(z) r`` with ``r + step*lam*r^(q-1) = |z|``.
     """
 
     c = step * lam
+    if c == 0.0:
+        return z.copy()
     a = np.abs(z)
-    lo = np.zeros_like(a)
-    hi = a.copy()
-    for _ in range(200):
-        mid = 0.5 * (lo + hi)
-        f = mid + c * np.power(mid, q - 1.0) - a
-        lo = np.where(f < 0.0, mid, lo)
-        hi = np.where(f < 0.0, hi, mid)
-    return np.sign(z) * 0.5 * (lo + hi)
+    roots = np.array([
+        0.0 if v == 0.0 else optimize.brentq(lambda r, v=v: r + c * r ** (q - 1.0) - v,
+                                              0.0, v, **({} if options is None else options))
+        for v in a.flat
+    ]).reshape(a.shape)
+    return np.sign(z) * roots
 
 
 def l1_kkt_residual(
@@ -506,7 +431,7 @@ def l1_kkt_residual(
     lam: float,
     radius: float | None = None,
     *,
-    active_rtol: float = 1e-12,
+    active_rtol: float | None = None,
 ) -> tuple[float, bool, float]:
     r"""Residual of ``0 in grad + lam * subdiff||beta||_1 + N_B(beta)``.
 
@@ -539,7 +464,9 @@ def l1_kkt_residual(
         off = np.maximum(np.abs(grad[~S]) - lp, 0.0) if np.any(~S) else np.zeros(0)
         return float(max(on.max(initial=0.0), off.max(initial=0.0)))
 
-    active = radius is not None and float(np.sum(np.abs(beta))) >= radius * (1.0 - active_rtol)
+    active = radius is not None and float(np.sum(np.abs(beta))) >= radius * (
+        1.0 if active_rtol is None else 1.0 - active_rtol
+    )
     if not active:
         return resid(lam), False, 0.0
     if np.any(S):
@@ -562,372 +489,128 @@ def lq_residual(
 
 
 
-def _accept_newton(F: float, Ft: float, slope: float, step: float, armijo: float,
-                   gnorm: float, gnorm_t: float) -> bool:
-    """Armijo, or -- when the objective change is below rounding -- gradient decrease."""
+def minimize_coefficients(fun, jac, beta0, *, l1=0.0, radius=None,
+                          max_iter=None, tol=None, options=None):
+    """Minimize an objective with an exact (possibly weighted) l1 penalty.
 
-    if Ft <= F - armijo * step * slope:
-        return True
-    roundoff = 8.0 * _EPS * max(1.0, abs(F))
-    return abs(Ft - F) <= roundoff and gnorm_t < gnorm
-
-
-def newton_solve(
-    problem: DualProblem,
-    *,
-    beta0: NDArray[np.float64],
-    lam: float = 0.0,
-    q: float | None = None,
-    max_iter: int = 500,
-    max_halvings: int = 60,
-    tol: float = 1e-10,
-    tol_scale: float = 1.0,
-    boundary_tol: float = 1e-8,
-    armijo: float = 1e-4,
-    singular_rtol: float = 1e-13,
-    margin_shrink: float = 0.01,
-) -> SolverResult:
-    """Damped Newton for ``F = smooth part + (lam/q)||beta||_q^q`` with ``q >= 2``.
-
-    Stops with ``"ok"`` when ``max_j |dF/dbeta_j| <= tol * tol_scale`` at a
-    feasible point. ``tol_scale`` lets the caller express the registered
-    unpenalized criterion ``max_j|Delta_j| <= tol * max(1, max_j|b_j|)``.
-
-    A trial step is accepted when it is feasible (see :class:`DualProblem`),
-    everything is finite, the Armijo condition holds (or, when the objective
-    change is below rounding, the gradient norm decreases), and no fitting row's
-    distance to the domain boundary shrinks below ``margin_shrink`` times its
-    current value. The step is halved otherwise, at most ``max_halvings`` times.
+    ``beta = positive - negative`` and ``positive, negative >= 0`` give an
+    equivalent smooth constrained problem. With a ball, their sum is at most
+    ``radius``. ``None`` leaves every SciPy solver setting at its default.
     """
+    beta0 = np.asarray(beta0, dtype=float)
+    opts = {} if options is None else dict(options)
+    if max_iter is not None:
+        opts["maxiter"] = int(max_iter)
+    split = radius is not None or np.any(np.asarray(l1) != 0.0)
+    if not split:
+        return optimize.minimize(fun, beta0, jac=jac, tol=tol, options=opts)
+    p = beta0.size
+    weights = np.broadcast_to(l1, beta0.shape)
+    z0 = np.concatenate((np.maximum(beta0, 0.0), np.maximum(-beta0, 0.0)))
 
-    pen_val, pen_grad, pen_hess = _smooth_penalty(float(lam), q)
-    beta = np.asarray(beta0, dtype=float).reshape(-1).copy()
-    pt = problem.evaluate(beta)
-    if not pt.feasible:
-        return SolverResult(
-            beta=beta,
-            status=INFEASIBLE_START,
-            n_iter=0,
-            message="the starting point is outside the domain of the generator at a "
-            "fitting row or at an evaluation point required by the problem",
-        )
-    if not pt.finite:
-        return SolverResult(beta=beta, status=NONFINITE, n_iter=0,
-                            message="non-finite objective at the starting point")
+    def value(z):
+        return fun(z[:p] - z[p:]) + float(weights @ (z[:p] + z[p:]))
 
-    status = MAXIT
-    message = ""
-    hmin = float("nan")
-    it = 0
-    while True:
-        F = pt.loss + pen_val(pt.beta)
-        G = pt.grad + pen_grad(pt.beta)
-        gnorm = float(np.max(np.abs(G))) if G.size else 0.0
-        H = problem.hessian(pt) + np.diag(pen_hess(pt.beta))
-        if not np.all(np.isfinite(H)):
-            status, message = NONFINITE, "non-finite Hessian"
-            break
-        evals, evecs = np.linalg.eigh(H) if H.size else (np.zeros(0), np.zeros((0, 0)))
-        hmin = float(evals.min()) if evals.size else float("nan")
-        if gnorm <= tol * tol_scale:
-            status = OK
-            break
-        if it >= max_iter:
-            status, message = MAXIT, f"reached max_iter={max_iter}"
-            break
-        emax = float(evals.max())
-        if emax <= 0.0 or hmin <= singular_rtol * emax:
-            status = SINGULAR
-            message = f"Hessian numerically singular (min eig {hmin:.3e}, max eig {emax:.3e})"
-            break
-        d = evecs @ ((evecs.T @ G) / evals)
-        slope = float(G @ d)
-        step = 1.0
-        accepted = None
-        for _ in range(max_halvings + 1):
-            trial = problem.evaluate(pt.beta - step * d)
-            if trial.ok and problem.margin_ok(pt, trial, margin_shrink):
-                Ft = trial.loss + pen_val(trial.beta)
-                Gt = trial.grad + pen_grad(trial.beta)
-                if _accept_newton(F, Ft, slope, step, armijo, gnorm,
-                                  float(np.max(np.abs(Gt)))):
-                    accepted = trial
-                    break
-            step *= 0.5
-        it += 1
-        if accepted is None:
-            status = LINESEARCH
-            message = f"no acceptable step after {max_halvings} halvings"
-            break
-        pt = accepted
+    def gradient(z):
+        g = jac(z[:p] - z[p:])
+        return np.concatenate((g + weights, -g + weights))
 
-    G = pt.grad + pen_grad(pt.beta)
-    return SolverResult(
-        beta=pt.beta,
-        status=status,
-        n_iter=it,
-        message=message,
-        objective=float(pt.loss + pen_val(pt.beta)),
-        gradient=pt.imbalance,
-        kkt_residual=float(np.max(np.abs(G))) if G.size else 0.0,
-        alpha=pt.alpha,
-        v=pt.v,
-        n_boundary=int(np.sum(problem.at_boundary(pt, boundary_tol))),
-        hessian_min_eig=hmin,
+    constraints = () if radius is None else (
+        optimize.LinearConstraint(np.ones((1, 2 * p)), -np.inf, radius),
     )
+    res = optimize.minimize(value, z0, jac=gradient, bounds=[(0.0, None)] * (2 * p),
+                            constraints=constraints, tol=tol, options=opts)
+    res.split_x = res.x.copy()
+    res.x = res.x[:p] - res.x[p:]
+    return res
 
 
-def _polish_on_support(
-    problem: DualProblem,
-    beta: NDArray[np.float64],
-    *,
-    lam: float,
-    radius: float | None,
-    tol: float,
-    boundary_tol: float,
-    margin_shrink: float,
-    max_iter: int = 50,
-    max_halvings: int = 60,
-) -> NDArray[np.float64] | None:
-    """Newton refinement of a FISTA solution on its support with the signs fixed.
-
-    With ``lam > 0`` or an active ball, the support ``S`` is the set of nonzero
-    coordinates and ``loss(beta_S) + lam sigma' beta_S`` is minimized over it
-    (with ``radius``, subject to ``sigma' beta_S = radius`` by
-    equality-constrained Newton steps). With ``lam = 0`` and an inactive ball,
-    every coordinate is refined. The ridge term of ``problem`` is included.
-    Returns the refined full vector, or ``None`` when the refinement did not
-    reach ``tol``; the caller re-validates it on the full problem.
-    """
-
-    if lam > 0.0 or radius is not None:
-        S = beta != 0.0
-    else:
-        S = np.ones(beta.shape[0], dtype=bool)
-    sigma = np.sign(beta[S])
-    sub = problem.restrict(S, problem.target[S] - lam * sigma)
-    if radius is None:
-        sr = newton_solve(
-            sub, beta0=beta[S], tol=tol, boundary_tol=boundary_tol, margin_shrink=margin_shrink
-        )
-        if sr.status != OK:
-            return None
-        out = np.zeros_like(beta)
-        out[S] = sr.beta
-        return out
-
-    k = int(np.sum(S))
-    pt = sub.evaluate(beta[S])
-    if not pt.ok:
-        return None
-    for _ in range(max_iter):
-        H = sub.hessian(pt)
-        evals = np.linalg.eigvalsh(H)
-        if not np.all(np.isfinite(evals)) or evals.min() <= 1e-13 * max(evals.max(), 0.0):
-            return None
-        K = np.zeros((k + 1, k + 1))
-        K[:k, :k] = H
-        K[:k, k] = sigma
-        K[k, :k] = sigma
-        rhs = np.concatenate([-pt.grad, [radius - float(sigma @ pt.beta)]])
-        sol = np.linalg.solve(K, rhs)
-        d, nu = sol[:k], float(sol[k])
-        if float(np.max(np.abs(pt.grad + nu * sigma))) <= tol and abs(rhs[-1]) <= 1e-14 * radius:
-            out = np.zeros_like(beta)
-            out[S] = pt.beta
-            return out
-        step = 1.0
-        accepted = None
-        for _ in range(max_halvings + 1):
-            trial = sub.evaluate(pt.beta + step * d)
-            if trial.ok and sub.margin_ok(pt, trial, margin_shrink):
-                if trial.loss <= pt.loss + 1e-4 * step * float(pt.grad @ d) + 8.0 * _EPS * max(
-                    1.0, abs(pt.loss)
-                ):
-                    accepted = trial
-                    break
-            step *= 0.5
-        if accepted is None:
-            return None
-        pt = accepted
-    return None
+def scipy_status(res):
+    """Translate SciPy termination without imposing a separate convergence test."""
+    if res.success:
+        return OK
+    if ("iteration" in str(res.message).lower() and "limit" in str(res.message).lower()
+            or "maximum number of iterations" in str(res.message).lower()):
+        return MAXIT
+    return OPTIMIZER_FAILURE
 
 
-# ---------------------------------------------------------------------------
-# Projected proximal gradient with acceleration (FISTA)
-# ---------------------------------------------------------------------------
-def fista_solve(
-    problem: DualProblem,
-    *,
-    beta0: NDArray[np.float64],
-    lam: float,
-    q: float = 1.0,
-    radius: float | None = None,
-    max_iter: int = 100_000,
-    max_backtracks: int = 60,
-    tol: float = 1e-8,
-    boundary_tol: float = 1e-8,
-    lipschitz_decrease: float = 0.9,
-    polish: bool = True,
-    polish_tol: float = 1e-12,
-    margin_shrink: float = 0.01,
-) -> SolverResult:
-    """Projected FISTA for ``f + h``, ``f`` = smooth part of ``problem`` (incl. ridge).
-
-    ``h = lam ||.||_1 + I{||.||_1 <= radius}`` for ``q = 1`` (``lam = 0``: the
-    projection onto the ball; ``radius=None``: no ball), or
-    ``(lam/q)||.||_q^q`` for ``1 < q < 2`` (no ball). Stops with ``"ok"`` when the
-    proximal residual ``rho`` (see the module docstring) is ``<= tol`` at a
-    feasible point. The registered tolerances are ``1e-6 * lam`` for ``l1`` and
-    ``1e-8`` for ridge or ball only.
-
-    With ``polish=True`` and ``q = 1``, an ``"ok"`` solution is refined by
-    Newton on its support with the signs fixed (equality-constrained to the
-    sphere ``||beta||_1 = R`` when the ball is active), toward ``polish_tol``.
-    The refinement is kept only if it is feasible, stays in the ball, keeps the
-    signs, and does not increase the proximal residual; ``polished`` records
-    whether it was kept.
-    """
-
-    q = float(q)
+def _solve(problem, *, beta0, lam=0.0, q=None, radius=None,
+           max_iter=None, tol=None, boundary_tol=None, options=None):
+    q = 1.0 if q is None else float(q)
     if q < 1.0:
         raise ValueError("q must be >= 1")
-    if q != 1.0 and radius is not None:
-        raise ValueError("an l1-ball restriction is supported only with the l1 penalty")
-    lam = float(lam)
+    if radius is not None and q != 1.0:
+        raise ValueError("an l1-ball restriction requires q=1")
+    beta0 = np.asarray(beta0, dtype=float).reshape(-1)
 
-    def penalty(b: NDArray[np.float64]) -> float:
+    def value(b):
+        pt = problem.evaluate(b)
+        if not pt.ok:
+            return np.inf
+        penalty = 0.0 if q == 1.0 else (lam / q) * float(np.sum(np.abs(b) ** q))
+        return pt.loss + penalty
+
+    def gradient(b):
+        pt = problem.evaluate(b)
+        if not pt.ok:
+            return np.full_like(b, np.nan)
+        return pt.grad + (0.0 if q == 1.0 else lam * np.sign(b) * np.abs(b) ** (q - 1.0))
+
+    res = minimize_coefficients(value, gradient, beta0, l1=lam if q == 1.0 else 0.0,
+                                radius=radius, max_iter=max_iter, tol=tol, options=options)
+    pt = problem.evaluate(res.x)
+    status = scipy_status(res)
+    in_ball = radius is None or float(np.sum(np.abs(res.x))) <= radius
+    if not np.all(np.isfinite(res.x)):
+        status = NONFINITE
+    elif not pt.feasible or not in_ball:
+        status = INFEASIBLE_START if not problem.evaluate(beta0).feasible else OPTIMIZER_FAILURE
+    elif not pt.finite or not np.isfinite(res.fun) or not np.all(np.isfinite(res.jac)):
+        status = NONFINITE
+    residual, active, mu = float("nan"), False, 0.0
+    if pt.ok:
         if q == 1.0:
-            return lam * float(np.sum(np.abs(b)))
-        return (lam / q) * float(np.sum(np.abs(b) ** q))
-
-    def prox(z: NDArray[np.float64], step: float) -> NDArray[np.float64]:
-        if q == 1.0:
-            return prox_l1_ball(z, step, lam, radius)
-        return prox_lq(z, step, lam, q)
-
-    def prox_residual(p: _Point, Lc: float) -> float:
-        assert p.grad is not None
-        if p.beta.size == 0:
-            return 0.0
-        return float(Lc * np.max(np.abs(p.beta - prox(p.beta - p.grad / Lc, 1.0 / Lc))))
-
-    def subgrad_residual(p: _Point) -> tuple[float, bool, float]:
-        assert p.grad is not None
-        if q == 1.0:
-            return l1_kkt_residual(p.grad, p.beta, lam, radius)
-        return lq_residual(p.grad, p.beta, lam, q), False, 0.0
-
-    beta = np.asarray(beta0, dtype=float).reshape(-1).copy()
-    if radius is not None and float(np.sum(np.abs(beta))) > radius:
-        return SolverResult(beta=beta, status=INFEASIBLE_START, n_iter=0,
-                            message="beta0 lies outside the l1 ball")
-    pt = problem.evaluate(beta)
-    if not pt.feasible:
-        return SolverResult(
-            beta=beta,
-            status=INFEASIBLE_START,
-            n_iter=0,
-            message="the starting point is outside the domain of the generator at a "
-            "fitting row or at an evaluation point required by the problem",
-        )
-    if not pt.finite:
-        return SolverResult(beta=beta, status=NONFINITE, n_iter=0,
-                            message="non-finite objective at the starting point")
-
-    # Initial Lipschitz estimate from the curvature at the start.
-    H0 = problem.hessian(pt)
-    L = float(np.linalg.eigvalsh(H0).max()) if H0.size else 1.0
-    if not np.isfinite(L) or L <= 0.0:
-        L = 1.0
-
-    y_pt = pt
-    t = 1.0
-    status = MAXIT
-    message = f"reached max_iter={max_iter}"
-    it = 0
-    n_restarts = 0
-    n_extrapolation_resets = 0
-    rho = prox_residual(pt, L)
-    while it < max_iter:
-        if rho <= tol and subgrad_residual(pt)[0] <= tol:
-            status, message = OK, ""
-            break
-        L = L * lipschitz_decrease
-        new = None
-        for _ in range(max_backtracks + 1):
-            b_new = prox(y_pt.beta - y_pt.grad / L, 1.0 / L)
-            cand = problem.evaluate(b_new)
-            if cand.ok and problem.margin_ok(y_pt, cand, margin_shrink):
-                d = b_new - y_pt.beta
-                bound = y_pt.loss + float(y_pt.grad @ d) + 0.5 * L * float(d @ d)
-                if cand.loss <= bound + 8.0 * _EPS * max(1.0, abs(y_pt.loss)):
-                    new = cand
-                    break
-            L *= 2.0
-        it += 1
-        if new is None:
-            status = LINESEARCH
-            message = f"no acceptable step after {max_backtracks} backtracking doublings"
-            break
-        if y_pt is not pt and float((y_pt.beta - new.beta) @ (new.beta - pt.beta)) > 0.0:
-            # Adaptive restart (gradient-mapping test; see the module docstring
-            # for the deviation from the registered test): y = beta_k, t = 1,
-            # and the step is recomputed from beta_k.
-            y_pt, t = pt, 1.0
-            n_restarts += 1
-            continue
-        t_new = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t * t))
-        y_cand = problem.evaluate(new.beta + ((t - 1.0) / t_new) * (new.beta - pt.beta))
-        if not y_cand.ok:
-            # Registered: an infeasible extrapolated point is discarded.
-            y_cand, t_new = new, 1.0
-            n_extrapolation_resets += 1
-        pt, y_pt, t = new, y_cand, t_new
-        rho = prox_residual(pt, L)
-
-    polished = False
-    if status == OK and polish and q == 1.0 and np.any(pt.beta != 0.0):
-        _, active0, _ = subgrad_residual(pt)
-        b_pol = _polish_on_support(
-            problem,
-            pt.beta,
-            lam=lam,
-            radius=radius if active0 else None,
-            tol=polish_tol,
-            boundary_tol=boundary_tol,
-            margin_shrink=margin_shrink,
-        )
-        if b_pol is not None:
-            cand = problem.evaluate(b_pol)
-            same_signs = bool(np.all(np.sign(b_pol)[pt.beta != 0.0] == np.sign(pt.beta)[
-                pt.beta != 0.0]))
-            in_ball = radius is None or float(np.sum(np.abs(b_pol))) <= radius * (1.0 + 1e-12)
-            if cand.ok and same_signs and in_ball:
-                rho_pol = prox_residual(cand, L)
-                if rho_pol <= rho and subgrad_residual(cand)[0] <= tol:
-                    pt, rho = cand, rho_pol
-                    polished = True
-
-    res_sub, active, mu = subgrad_residual(pt)
+            residual, active, mu = l1_kkt_residual(pt.grad, pt.beta, lam, radius)
+        else:
+            residual = lq_residual(pt.grad, pt.beta, lam, q)
+    if pt.ok and hasattr(res, "split_x"):
+        if radius is not None:
+            mu = float(res.multipliers[0]) if hasattr(res, "multipliers") else float("nan")
+            active = bool(mu > 0.0)
+        split_grad = np.asarray(res.jac) + mu
+        residual = float(np.max(np.abs(np.minimum(res.split_x, split_grad))))
     return SolverResult(
-        beta=pt.beta,
-        status=status,
-        n_iter=it,
-        message=message,
-        objective=float(pt.loss + penalty(pt.beta)),
-        gradient=pt.imbalance,
-        kkt_residual=float(res_sub),
-        prox_residual=float(rho),
-        alpha=pt.alpha,
-        v=pt.v,
-        n_boundary=int(np.sum(problem.at_boundary(pt, boundary_tol))),
-        l1_ball_active=bool(active),
-        ball_multiplier=float(mu),
-        polished=polished,
-        extra={
-            "n_restarts": n_restarts,
-            "n_extrapolation_resets": n_extrapolation_resets,
-            "lipschitz": L,
-        },
+        beta=res.x, status=status, n_iter=int(getattr(res, "nit", 0)),
+        message=str(res.message),
+        objective=(float(pt.loss + (lam / q) * np.sum(np.abs(pt.beta) ** q))
+                   if pt.ok else float(res.fun)), gradient=pt.imbalance,
+        kkt_residual=residual, alpha=pt.alpha, v=pt.v,
+        n_boundary=(int(np.sum(problem.at_boundary(pt, boundary_tol)))
+                    if pt.ok and boundary_tol is not None else 0),
+        l1_ball_active=active, ball_multiplier=mu,
+        extra={"scipy_status": int(res.status), "scipy_success": bool(res.success)},
     )
+
+
+def newton_solve(problem, *, beta0, lam=0.0, q=None, max_iter=None, tol=None,
+                 boundary_tol=None, options=None):
+    """Smooth coefficient objective using SciPy's default unconstrained method.
+
+    ``options`` is passed to SciPy unchanged, except an explicit ``max_iter``.
+    """
+    if q is not None and q < 2.0:
+        raise ValueError("newton_solve requires q >= 2")
+    return _solve(problem, beta0=beta0, lam=0.0 if q is None else lam, q=q,
+                  max_iter=max_iter, tol=tol,
+                  boundary_tol=boundary_tol, options=options)
+
+
+def fista_solve(problem, *, beta0, lam, q=1.0, radius=None, max_iter=None, tol=None,
+                boundary_tol=None, options=None):
+    """Exact l1 or differentiable lq objective using SciPy's default method.
+
+    The l1 ball and penalty apply to deviations from the offset.
+    """
+    return _solve(problem, beta0=beta0, lam=lam, q=q, radius=radius,
+                  max_iter=max_iter, tol=tol, boundary_tol=boundary_tol, options=options)

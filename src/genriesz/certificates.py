@@ -254,7 +254,7 @@ def _solve_cvxpy(Phi, b, u0, s, generator, kind, lam, solver_options=None):
     return np.asarray(t.value, dtype=float).reshape(-1), beta, status
 
 
-def _solve_scipy(Phi, b, u0, s, generator, kind, lam, X, margin_tol):
+def _solve_scipy(Phi, b, u0, s, generator, kind, lam, X, margin_tol, solver_options):
     n, p = Phi.shape
     C = float(generator.C)
 
@@ -297,9 +297,10 @@ def _solve_scipy(Phi, b, u0, s, generator, kind, lam, X, margin_tol):
         t0 = np.ones(n)
     res = optimize.minimize(
         fun, t0, jac=jac, method="SLSQP", bounds=bounds, constraints=cons,
-        options={"maxiter": 1000, "ftol": 1e-15},
+        options=solver_options,
     )
-    if not res.success:
+    if (not res.success or not np.isfinite(res.fun)
+            or not np.all(np.isfinite(res.x)) or not np.all(np.isfinite(res.jac))):
         return None, None, f"slsqp: {res.message}"
     t = _project_t(np.asarray(res.x, dtype=float), kind)
     a = alpha_of(t)
@@ -342,8 +343,8 @@ def weight_program_certificate(
         Thresholds of the verdict (registration §1.3 A-6: ``1e-7`` and ``1e-9``).
     solver_options:
         Keyword settings passed to Clarabel through cvxpy (for example
-        ``{"tol_gap_abs": 1e-12}``); ``None`` keeps Clarabel's defaults. Only the
-        ``"cvxpy"`` backend accepts them.
+        ``{"tol_gap_abs": 1e-12}``); ``None`` keeps library defaults. The
+        SciPy backend accepts a SciPy options dictionary.
 
     Returns
     -------
@@ -367,12 +368,12 @@ def weight_program_certificate(
     backend_ = str(backend).lower()
     if backend_ == "auto":
         backend_ = "cvxpy" if importlib.util.find_spec("cvxpy") is not None else "scipy"
-    if solver_options and backend_ != "cvxpy":
-        raise ValueError("solver_options apply only to the 'cvxpy' backend")
     if backend_ == "cvxpy":
         t, beta, status = _solve_cvxpy(Phi, b, u0, s, generator, kind, lam, solver_options)
     elif backend_ == "scipy":
-        t, beta, status = _solve_scipy(Phi, b, u0, s, generator, kind, lam, X_, margin_tol)
+        t, beta, status = _solve_scipy(
+            Phi, b, u0, s, generator, kind, lam, X_, margin_tol, solver_options
+        )
     else:
         raise ValueError("backend must be 'auto', 'cvxpy' or 'scipy'")
 

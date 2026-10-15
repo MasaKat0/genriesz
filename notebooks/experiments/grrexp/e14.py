@@ -21,7 +21,7 @@ offset), l1 ball of radius ``R1``. The population minimizer is the planted
 ``beta*`` (treated 0; control ``(c - u_ref_c, k b, 0, ...)``, ``s = 5``).
 
 Penalties: SN (self-normalised, main), TH (the theorem's), LTH (the two-step rule
-of E-15). Every fit is the projected FISTA of genriesz with ``tol = 1e-6 lam``.
+of E-15). Every fit uses the SciPy default routine and settings for the coefficient restrictions.
 """
 
 from __future__ import annotations
@@ -53,7 +53,6 @@ EPS_THEOREM = 0.05  # epsilon of the theorem's lambda (not fixed by the design d
 SN_FACTOR = 1.1
 SN_ALPHA = 0.05
 LTH_ALPHA = 0.05  # E-15: sqrt(2 log(2p / 0.05) / n)
-FISTA_REL_TOL = 1e-6  # §1.3 C, l1: rho <= 1e-6 lam
 N_EVAL = 10**6
 N_REEVAL = 10**7
 REEVAL_BLOCK = 998
@@ -166,11 +165,11 @@ def planted_u(name, Z4):
     return p["c"] + p["k"] * (np.asarray(Z4)[:, :4] @ B_VEC)
 
 
-def solve_pi1(a0, w):
-    """Root of ``E[a0 / (1 + pi1 a0)] = 1`` (Brent, xtol 1e-15)."""
+def solve_pi1(a0, w, *, options=None):
+    """Root of ``E[a0 / (1 + pi1 a0)] = 1`` (Brent, library defaults)."""
     return float(
         optimize.brentq(lambda q: float(np.sum(w * a0 / (1.0 + q * a0))) - 1.0, 1e-9, 1 - 1e-12,
-                        xtol=1e-15)
+                        **({} if options is None else options))
     )  # fmt: skip
 
 
@@ -470,8 +469,7 @@ def fit(des, gen, D, Phi, b, lam, beta0=None):
     offset = np.where(D == 1.0, des.uref_t, des.uref_c)
     prob = g.solvers.DualProblem(generator=gen, X=D[:, None], Phi=Phi, offset=offset, target=b)
     beta0 = np.zeros(Phi.shape[1]) if beta0 is None else beta0
-    return g.solvers.fista_solve(prob, beta0=beta0, lam=lam, radius=des.R1,
-                                 tol=FISTA_REL_TOL * lam)  # fmt: skip
+    return g.solvers.fista_solve(prob, beta0=beta0, lam=lam, radius=des.R1)  # fmt: skip
 
 
 def _eval_columns(entropy, rep, block, cols, N):
@@ -603,8 +601,9 @@ def _replicate(task):
         g = gr()
         prob = g.solvers.DualProblem(generator=gen, X=D[:, None], Phi=Phi,
                                      offset=np.zeros(n), target=b)  # fmt: skip
-        z = g.solvers.fista_solve(prob, beta0=np.zeros(p), lam=out["SN"]["lam"], radius=des.R1,
-                                  tol=FISTA_REL_TOL * out["SN"]["lam"])  # fmt: skip
+        z = g.solvers.fista_solve(
+            prob, beta0=np.zeros(p), lam=out["SN"]["lam"], radius=des.R1
+        )
         out["BKL_zero_offset_status"] = z.status
     return out
 

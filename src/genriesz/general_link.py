@@ -34,10 +34,10 @@ The objective is in general not convex, and its sample version need not be
 bounded below (for example, SQ with the exponential link when a control unit lies
 outside the convex hull of the treated units' regressors); the iterates then
 diverge and the status is not ``"ok"``. :class:`GRRGeneralLink` minimizes it by
-a damped (modified) Newton method that keeps every training row and every row
-evaluated by ``m`` inside the domain of ``g``, and reports a stationary point
-with an explicit status; ``"ok"`` additionally requires a positive-definite
-Hessian at the solution.
+SciPy's default BFGS routine. Infeasible trial points have objective value
++inf. Library success at a finite, feasible solution determines the status;
+Hessian eigenvalues are diagnostics.
+
 
 Only functionals that evaluate their argument at points (ATE, ATT, DID, callable
 functionals) are supported; derivative functionals (AME) are not.
@@ -50,17 +50,16 @@ from dataclasses import dataclass, field
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from scipy import optimize
 
 from .basis import Basis
 from .functionals import LinearFunctional
 from .generators import BregmanGenerator, DomainError
 from .glm import OffsetSpec, _ensure_basis_fitted, evaluate_offset
-from .solvers import INFEASIBLE_START, LINESEARCH, MAXIT, NONFINITE, OK, SINGULAR
+from .solvers import INFEASIBLE_START, NONFINITE, OK, scipy_status
 from .utils import as_2d
 
 LinkFn = Callable[[NDArray[np.float64], NDArray[np.float64]], ArrayLike]
-
-_EPS = float(np.finfo(float).eps)
 
 
 class _FunctionBasis:
@@ -113,7 +112,7 @@ class GeneralLinkFitResult:
     ----------
     beta, status, success, message, n_iter:
         Last iterate, status (one of :data:`genriesz.solvers.STATUSES`), whether
-        ``status == "ok"``, a message, and the number of Newton iterations.
+        ``status == "ok"``, a message, and the number of library iterations.
     objective_value:
         Penalized objective at ``beta``.
     tangent_imbalance:
@@ -127,7 +126,7 @@ class GeneralLinkFitResult:
     hessian_min_eig:
         Smallest eigenvalue of the Hessian at ``beta``.
     n_hessian_shifts:
-        Newton steps whose Hessian had to be shifted to be positive definite.
+        Zero for the SciPy routine.
     n_boundary:
         Training rows numerically at the boundary of the domain of ``g``.
     """
@@ -200,7 +199,7 @@ class GRRGeneralLink:
         functional: LinearFunctional,
         penalty: str | None = None,
         lam: float = 0.0,
-        boundary_tol: float = 1e-8,
+        boundary_tol: float | None = None,
         index_offset: OffsetSpec = None,
     ):
         if penalty not in (None, "l2"):
@@ -214,7 +213,7 @@ class GRRGeneralLink:
         self.basis = basis
         self.functional = functional
         self.lam = 0.0 if penalty is None else float(lam)
-        self.boundary_tol = float(boundary_tol)
+        self.boundary_tol = boundary_tol
         self.index_offset = index_offset
         self.beta_: NDArray[np.float64] | None = None
         self.fit_result_: GeneralLinkFitResult | None = None
@@ -370,27 +369,17 @@ class GRRGeneralLink:
         X: ArrayLike,
         *,
         beta0: ArrayLike | None = None,
-        max_iter: int = 500,
-        max_halvings: int = 60,
-        tol: float = 1e-10,
-        armijo: float = 1e-4,
-        margin_shrink: float = 0.01,
+        max_iter: int | None = None,
+        tol: float | None = None,
+        options: dict | None = None,
         sample_weight: ArrayLike | None = None,
     ) -> GeneralLinkFitResult:
-        """Damped (modified) Newton from ``beta0`` (default zeros).
+        """Minimize the unchanged arbitrary-link objective with SciPy's default BFGS.
 
-        ``sample_weight`` (non-negative, normalized to sum to one) replaces the
-        sample mean by a weighted mean in the objective, gradient and Hessian:
-        a quadrature or finite-support population is a set of rows with
-        probabilities (registration §1.9, E-13 Stage 0). ``None`` is the sample
-        mean.
-
-        Stops with ``"ok"`` when ``max_j |dF/dbeta_j| <= tol`` at an interior
-        point with a positive-definite Hessian (``"singular"`` if the Hessian is
-        not positive definite there). Indefinite Hessians along the way are
-        shifted to positive definiteness (counted in ``n_hessian_shifts``).
-        Backtracking keeps the training rows and every row evaluated by ``m``
-        in the domain of ``g``.
+        ``sample_weight`` replaces the sample mean by normalized weighted means.
+        ``max_iter``, ``tol`` and ``options`` are optional SciPy settings; ``None``
+        uses library defaults. Success is the library's success at a finite,
+        feasible point; Hessian eigenvalues are diagnostics only.
         """
 
         X_ = as_2d(X)
@@ -401,77 +390,41 @@ class GRRGeneralLink:
         if beta.shape != (p,):
             raise ValueError(f"beta0 must have length {p}.")
 
-        def margin(ev: _Eval) -> NDArray[np.float64]:
-            fn = getattr(self.generator, "boundary_margin", None)
-            if not callable(fn):
-                return np.full(len(X_), np.inf)
-            return np.asarray(fn(X_, ev.alpha), dtype=float)
+        def value(b):
+            ev = self._evaluate(X_, b, w)
+            return ev.F if ev.feasible and ev.finite else np.inf
 
-        ev = self._evaluate(X_, beta, w)
-        if not ev.feasible:
-            return self._finish(X_, w, ev, beta, INFEASIBLE_START,
-                                "the starting point is outside the domain", 0, 0, float("nan"))
-        if not ev.finite:
-            return self._finish(X_, w, ev, beta, NONFINITE, "non-finite objective at the start",
-                                0, 0, float("nan"))
+        def gradient(b):
+            ev = self._evaluate(X_, b, w)
+            return ev.grad if ev.feasible and ev.finite else np.full_like(b, np.nan)
 
-        it = 0
-        shifts = 0
+        opts = {} if options is None else dict(options)
+        if max_iter is not None:
+            opts["maxiter"] = int(max_iter)
+        res = optimize.minimize(value, beta, jac=gradient, tol=tol, options=opts)
+        ev = self._evaluate(X_, res.x, w)
+        status = scipy_status(res)
+        if not np.all(np.isfinite(res.x)):
+            status = NONFINITE
+        elif not ev.feasible:
+            status = (INFEASIBLE_START if not self._evaluate(X_, beta, w).feasible
+                      else "optimizer_failure")
+        elif not ev.finite or not np.isfinite(res.fun) or not np.all(np.isfinite(res.jac)):
+            status = NONFINITE
         hmin = float("nan")
-        while True:
-            assert ev.grad is not None and ev.alpha is not None and ev.u is not None
-            with np.errstate(over="ignore", invalid="ignore"):
-                H = self._hessian(X_, ev.beta, w)
-            if not np.all(np.isfinite(H)):
-                return self._finish(X_, w, ev, ev.beta, NONFINITE, "non-finite Hessian", it,
-                                    shifts, hmin)
-            evals, evecs = np.linalg.eigh(H)
-            hmin = float(evals.min())
-            emax = float(np.abs(evals).max())
-            gnorm = float(np.max(np.abs(ev.grad)))
-            if gnorm <= tol:
-                if hmin > 1e-12 * max(1.0, emax):
-                    return self._finish(X_, w, ev, ev.beta, OK, "", it, shifts, hmin)
-                return self._finish(X_, w, ev, ev.beta, SINGULAR,
-                                    f"stationary point with Hessian min eig {hmin:.3e}",
-                                    it, shifts, hmin)
-            if it >= max_iter:
-                return self._finish(X_, w, ev, ev.beta, MAXIT, f"reached max_iter={max_iter}",
-                                    it, shifts, hmin)
-            floor = 1e-8 * max(1.0, emax)
-            if hmin <= floor:
-                evals = evals + (floor - hmin)
-                shifts += 1
-            d = evecs @ ((evecs.T @ ev.grad) / evals)
-            slope = float(ev.grad @ d)
-            step = 1.0
-            accepted = None
-            m0 = margin(ev)
-            fin = np.isfinite(m0)
-            for _ in range(max_halvings + 1):
-                trial = self._evaluate(X_, ev.beta - step * d, w)
-                if trial.feasible and trial.finite:
-                    m1 = margin(trial)
-                    ok_margin = bool(np.all(m1[fin] >= margin_shrink * m0[fin]))
-                    decrease = trial.F <= ev.F - armijo * step * slope
-                    assert trial.grad is not None
-                    roundoff = (abs(trial.F - ev.F) <= 8.0 * _EPS * max(1.0, abs(ev.F))
-                                and float(np.max(np.abs(trial.grad))) < gnorm)
-                    if ok_margin and (decrease or roundoff):
-                        accepted = trial
-                        break
-                step *= 0.5
-            it += 1
-            if accepted is None:
-                return self._finish(X_, w, ev, ev.beta, LINESEARCH,
-                                    f"no acceptable step after {max_halvings} halvings",
-                                    it, shifts, hmin)
-            ev = accepted
+        if ev.feasible and ev.finite:
+            H = self._hessian(X_, res.x, w)
+            if np.all(np.isfinite(H)):
+                hmin = float(np.linalg.eigvalsh(H).min())
+            else:
+                status = NONFINITE
+        return self._finish(X_, w, ev, res.x, status, str(res.message),
+                            int(getattr(res, "nit", 0)), 0, hmin)
 
     def _finish(self, X_, w, ev: _Eval, beta, status: str, message: str, it: int, shifts: int,
                 hmin: float) -> GeneralLinkFitResult:
         beta = np.asarray(beta, dtype=float)
-        if ev.feasible and ev.grad is not None:
+        if ev.feasible and ev.finite and ev.grad is not None:
             tang = ev.grad - self.lam * beta
             res = GeneralLinkFitResult(
                 beta=beta,
@@ -486,7 +439,8 @@ class GRRGeneralLink:
                 hessian_min_eig=hmin,
                 n_hessian_shifts=shifts,
                 n_boundary=int(np.sum(self.generator.boundary_mask(
-                    X_, ev.u, ev.alpha, tol=self.boundary_tol))),
+                    X_, ev.u, ev.alpha, tol=self.boundary_tol)))
+                    if self.boundary_tol is not None else 0,
                 gradient=ev.grad,
             )
         else:

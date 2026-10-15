@@ -161,7 +161,7 @@ def test_kkt_residual_equals_working_span_imbalance_unpenalized(name, make_gen):
     gen = make_gen()
 
     model = GRRGLM(basis=basis, generator=gen, functional=m, penalty=None, lam=0.0)
-    fr = model.fit(X, max_iter=2000, tol=1e-12)
+    fr = model.fit(X)
     assert fr.success
 
     delta = _imbalance(gen, X, Phi, M, model.beta_)
@@ -178,7 +178,7 @@ def test_l2_penalty_shifts_the_balance_by_exactly_the_penalty_gradient(name, mak
     lam = 1e-2
 
     model = GRRGLM(basis=basis, generator=gen, functional=m, penalty="l2", lam=lam)
-    fr = model.fit(X, max_iter=2000, tol=1e-12)
+    fr = model.fit(X)
     assert fr.success
 
     delta = _imbalance(gen, X, Phi, M, model.beta_)
@@ -201,7 +201,7 @@ def test_balancing_conditions_are_generator_independent():
     for _, make_gen in BALANCING_GENERATORS:
         gen = make_gen()
         model = GRRGLM(basis=basis, generator=gen, functional=m, penalty=None, lam=0.0)
-        fr = model.fit(X, max_iter=2000, tol=1e-12)
+        fr = model.fit(X)
         assert fr.success
         # Same (Phi, M), same balance conditions, different link: all reach zero.
         delta = _imbalance(gen, X, Phi, M, model.beta_)

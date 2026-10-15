@@ -133,7 +133,7 @@ def recorded_statuses() -> tuple[str, ...]:
 
     from .baselines import BASELINE_STATUSES
 
-    outcome = tuple(f"outcome_{s}" for s in (*STATUSES, "optimizer_failure") if s != "ok")
+    outcome = tuple(f"outcome_{s}" for s in STATUSES if s != "ok")
     return (*STATUSES, *outcome, *BASELINE_STATUSES)
 
 

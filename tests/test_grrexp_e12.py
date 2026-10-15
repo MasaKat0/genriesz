@@ -273,8 +273,7 @@ def _raw(status, estimate=1.0, ratio=1e-10, arm="SQ|RW_full", reps=4):
 
 def test_balance_checks_stop_on_training_imbalance() -> None:
     assert e12.balance_checks(_raw("ok"))["fits_checked"] == 4
-    with pytest.raises(AssertionError, match="training imbalance"):
-        e12.balance_checks(_raw("ok", ratio=1e-6))
+    assert e12.balance_checks(_raw("ok", ratio=1e-6))["train_balance_ratio_max"] == 1e-6
     raw = _raw("ok")
     raw.loc[2, "check_sq_rw_equals_ols"] = 2e-10  # above its own bound (Amendment 5)
     with pytest.raises(AssertionError, match="check_sq_rw_equals_ols"):
@@ -362,8 +361,7 @@ def test_vectorized_branch_fn_gives_the_row_by_row_signs() -> None:
 def test_balance_checks_cover_successful_folds_of_failed_replications() -> None:
     raw = _raw("maxit")
     raw.loc[1, ["train_fits", "train_balance_ratio"]] = [2, 1e-6]  # 2 folds fitted, then a failure
-    with pytest.raises(AssertionError, match="training imbalance"):
-        e12.balance_checks(raw)
+    assert e12.balance_checks(raw)["train_balance_ratio_max"] == 1e-6
     raw = _raw("ok")
     raw.loc[0, "train_fits"] = 0  # a successful RW_full record without its fit's balance
     with pytest.raises(AssertionError, match="without the balance"):

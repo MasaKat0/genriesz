@@ -38,9 +38,9 @@ Notes
 -----
 - By default (``solver="auto"``) the objective -- the empirical
   ``eq:cs_bd_empirical`` of the paper -- is solved for every generator by the
-  strict solvers of :mod:`genriesz.solvers` (damped Newton, or FISTA for
-  ``l1``). They keep every iterate in the generator's domain and return an
-  explicit ``status`` on the result instead of raising; nothing is clipped.
+  SciPy routines of :mod:`genriesz.solvers` (smooth minimization, or a reformulation for
+  ``l1``). Infeasible trial points have infinite objective value. The returned
+  result carries an explicit ``status``; nothing is clipped.
 - ``solver="legacy"`` keeps the three routes of releases <= 0.2.6: a closed-form
   ridge solve for SQ, a logistic classifier for BKL
   (``route="logistic_classification"``), and L-BFGS-B otherwise. They raise on
@@ -301,8 +301,8 @@ def _fit_bkl_classification(
     Phi_num: NDArray[np.float64],
     Phi_den: NDArray[np.float64],
     penalty: _Penalty,
-    max_iter: int,
-    tol: float,
+    max_iter: int | None,
+    tol: float | None,
     verbose: bool,
 ) -> NDArray[np.float64]:
     """Fit the probabilistic classification model for BKL density-ratio estimation."""
@@ -329,12 +329,17 @@ def _fit_bkl_classification(
         grad = (Phi.T @ (phat - y)) / n
         return grad + penalty.grad(beta)
 
-    opts_bkl: dict = {'maxiter': int(max_iter), 'ftol': float(tol)}
+    opts_bkl: dict = {}
+    if max_iter is not None:
+        opts_bkl['maxiter'] = int(max_iter)
     if verbose:
         opts_bkl['iprint'] = 1
-    res = optimize.minimize(fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_bkl)
+    res = optimize.minimize(
+        fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', tol=tol, options=opts_bkl
+    )
 
-    if not bool(res.success):
+    if (not res.success or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x))
+            or not np.all(np.isfinite(res.jac))):
         raise RuntimeError(f"Density-ratio optimization failed: {res.message}")
 
     return np.asarray(res.x, dtype=float)
@@ -348,8 +353,8 @@ def _fit_numeric(
     Phi_den: NDArray[np.float64],
     generator: BregmanGenerator,
     penalty: _Penalty,
-    max_iter: int,
-    tol: float,
+    max_iter: int | None,
+    tol: float | None,
     verbose: bool,
 ) -> NDArray[np.float64]:
     """Solve the general density-ratio objective by L-BFGS-B."""
@@ -392,19 +397,22 @@ def _fit_numeric(
         grad = (alpha_den[:, None] * Phi_den).mean(axis=0) - Phi_num_mean
         return grad + penalty.grad(beta)
 
-    opts_num: dict = {'maxiter': int(max_iter), 'ftol': float(tol)}
+    opts_num: dict = {}
+    if max_iter is not None:
+        opts_num['maxiter'] = int(max_iter)
     if verbose:
         opts_num['iprint'] = 1
     try:
         # Branch signs depend on X_den only; fun/jac re-evaluate them every step.
         with _branch_cache_of(generator):
             res = optimize.minimize(
-                fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', options=opts_num
+                fun=fun, x0=beta0, jac=jac, method='L-BFGS-B', tol=tol, options=opts_num
             )
     except DomainError as exc:
         raise RuntimeError(f"Density-ratio optimization failed: {exc}") from exc
 
-    if not bool(res.success):
+    if (not res.success or not np.isfinite(res.fun) or not np.all(np.isfinite(res.x))
+            or not np.all(np.isfinite(res.jac))):
         raise RuntimeError(f"Density-ratio optimization failed: {res.message}")
 
     return np.asarray(res.x, dtype=float)
@@ -453,7 +461,7 @@ def _fit_strict(
             beta0=beta0,
             max_iter=max_iter,
             tol=tol,
-            boundary_tol=1e-8,
+            boundary_tol=None,
             check_X=X_num,
             check_Phi=Phi_num,
             check_offset=u_num,
@@ -487,8 +495,8 @@ def fit_density_ratio(
     lam_grid: Iterable[float] | None = None,
     random_state: int | None = 0,
     # Optimizer
-    max_iter: int = 500,
-    tol: float = 1e-8,
+    max_iter: int | None = None,
+    tol: float | None = None,
     verbose: bool = False,
     # Strict solver (registration §1.3 A-5)
     offset: OffsetSpec = None,
@@ -751,6 +759,7 @@ def fit_density_ratio(
     best_score = float('inf')
     n_failed_fits = 0
     last_failure: str | None = None
+    failure_messages: set[str] = set()
 
     for sig in sigma_grid:
         for lam_ in lam_grid:
@@ -781,6 +790,7 @@ def fit_density_ratio(
                     if fit_res.status != OK:
                         n_failed_fits += 1
                         last_failure = f"status {fit_res.status}: {fit_res.message}"
+                        failure_messages.add(last_failure)
                     else:
                         Xd_te = Xd[te_d]
                         v_d = evaluate_offset(offset, Xd_te) + np.asarray(
@@ -795,6 +805,7 @@ def fit_density_ratio(
                         else:
                             n_failed_fits += 1
                             last_failure = "validation rows outside the domain"
+                            failure_messages.add(last_failure)
                     scores.append(score if np.isfinite(score) else float('inf'))
                     continue
 
@@ -815,6 +826,7 @@ def fit_density_ratio(
                 except (RuntimeError, np.linalg.LinAlgError) as exc:
                     n_failed_fits += 1
                     last_failure = str(exc)
+                    failure_messages.add(last_failure)
                     scores.append(float('inf'))
                     continue
 
@@ -830,7 +842,7 @@ def fit_density_ratio(
     if n_failed_fits > 0:
         warnings.warn(
             f"{n_failed_fits} candidate fit(s) failed during density-ratio CV "
-            f"and were excluded (last failure: {last_failure}).",
+            f"and were excluded (failures: {sorted(failure_messages)}).",
             UserWarning,
             stacklevel=2,
         )

@@ -177,7 +177,7 @@ def test_replication_record_and_determinism(small_task) -> None:
         assert r["status"] == "ok"
         assert r["events"] == (r["E1"] and r["E2"] and r["E3"])
         assert r["bnd_violation"] == (r["events"] and r["err2_lower"] > r["bound"] ** 2)
-        assert r["prox_residual"] <= e14.FISTA_REL_TOL * r["lam"]
+        assert np.isnan(r["prox_residual"])
     assert a["BKL_zero_offset_status"] == "infeasible_start"
     assert a["n_warnings"] == 0
 

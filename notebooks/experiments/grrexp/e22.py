@@ -23,7 +23,7 @@ Arms (each cross-fitted with ``K = 5`` folds on every one of the 100 fold splits
   arms with suffix ``_clip`` clip the dual coordinate to its fitting-sample range
   on each branch before the inverse link, at every representer evaluation.
   ARW and TMLE per arm. UKL (C=0) x D1 is entropy balancing for the ATT (reported as the
-  EB row and checked against an independent dual Newton).
+  EB row and checked against an independent SciPy dual fit).
 - LogitAIPW (logistic MLE on the D2 features) and DML-GBM (gradient boosting with nested
   CV), both with the same control-arm outcome regression as the GRR arms in LogitAIPW.
 - The outcome regression of every GRR arm and of LogitAIPW: OLS on D2, per arm.
@@ -65,8 +65,6 @@ BP_OMEGA = 0.5
 #: offset of the GRR fits: alpha_ref = 3 (treated), -1 (control), as E-21 for the ATT;
 #: every arm has an intercept, so it only fixes the starting point
 ALPHA_REF_TREATED, ALPHA_REF_CONTROL = 3.0, -1.0
-#: §1.3 C (lambda = 0, no constraint), as E-12: genriesz scales the tolerance
-SAMPLE_TOL = 1e-8
 #: D3: Gaussian RKHS with 100 centers and the median-heuristic bandwidth of the
 #: training sample; ridge penalty chosen from LAMBDA_GRID by the held-out squared
 #: Riesz (LSIF) criterion with inner 3-fold CV (the rule of E-21)
@@ -316,7 +314,7 @@ def _grr_arm(arm, X, Y, D, Zs, folds, inner_seed, center_seed):
             riesz_admissibility_thresholds=admissibility_thresholds(),
         )  # fmt: skip
     else:
-        kwargs.update(riesz_penalty=None, riesz_lam=0.0, riesz_tol=SAMPLE_TOL)
+        kwargs.update(riesz_penalty=None, riesz_lam=0.0)
     res, warns, converged = baselines.run_recording_warnings(lambda: g.grr_att(**kwargs))
     common = {
         "fold_status": json.dumps([[str(v) for v in f] for f in res.fold_status]),
@@ -372,14 +370,15 @@ def _ols_mu0(F, D, Y, folds):
     return mu0
 
 
-def logit_aipw(D, Y, F2, folds):
+def logit_aipw(D, Y, F2, folds, *, max_iter=None, tol=None):
     from sklearn.linear_model import LogisticRegression
 
     def fit():
         e = np.empty(len(Y))
         for k in np.unique(folds):
             tr, te = folds != k, folds == k
-            clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=10000, tol=1e-10)
+            clf = LogisticRegression(penalty=None, solver="lbfgs",
+                                     **baselines.solver_parameters(max_iter, tol))
             clf.fit(F2[tr], D[tr])
             e[te] = clf.predict_proba(F2[te])[:, 1]
         return e
@@ -527,7 +526,7 @@ def full_sample(entropy):
                          offset=g.offset_from_alpha(gen, alpha_ref),
                          clip_dual=arm in CLIP_ARMS)  # fmt: skip
         fr, warns, converged = baselines.run_recording_warnings(
-            lambda: model.fit(X, tol=SAMPLE_TOL) if penalty is None else model.fit(X)
+            lambda model=model: model.fit(X)
         )
         n_warn_total += int(sum(warns.values()))
         if fr.status != "ok" or not converged:
@@ -541,7 +540,7 @@ def full_sample(entropy):
                      **weight_summaries(D, Zs, X, a, basis)}  # fmt: skip
     c, t = D == 0, D == 1
     unweighted = _smd(Zs[t], Zs[c], np.full(int(c.sum()), 1.0 / c.sum()))
-    # EB check: UKL (C=0) x D1, lambda = 0, against an independent ebal-type dual Newton
+    # EB check: UKL (C=0) x D1, lambda = 0, against an independent entropy-balancing dual fit
     F = np.column_stack([np.ones(n), Zs])
     w_eb = baselines.eb_dual_newton(F[c], n * F[t].mean(axis=0), n)
     eb = {"converged": w_eb is not None}
@@ -568,10 +567,12 @@ def full_sample(entropy):
             "admissibility": diag, "pi1": pi1, "n_warnings": n_warn_total}  # fmt: skip
 
 
-def _logistic_full(F2, D):
+def _logistic_full(F2, D, *, max_iter=None, tol=None):
     from sklearn.linear_model import LogisticRegression
 
-    clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=10000, tol=1e-10).fit(F2, D)
+    clf = LogisticRegression(
+        penalty=None, solver="lbfgs", **baselines.solver_parameters(max_iter, tol)
+    ).fit(F2, D)
     return clf.predict_proba(F2)[:, 1]
 
 
@@ -793,7 +794,7 @@ def tables(S):
     eb = json.loads(S["eb_check"].iloc[0])
     ad = json.loads(S["admissibility"].iloc[0])
     lines = ["\\begin{tabular}{lr}", "\\hline", "Diagnostic & Value" + END, "\\hline",
-             f"EB vs.\\ independent dual Newton (max.\\ relative difference) & {_sci(eb.get('max_rel_diff'))}" + END,
+             f"EB vs.\\ independent SciPy dual fit (max.\\ relative difference) & {_sci(eb.get('max_rel_diff'))}" + END,
              f"BKL ($C=0.05$) threshold for $\\widehat e$ & {_fmt(ad['bkl_threshold'], 5)}" + END,
              f"Min.\\ logistic $\\widehat e$ (all units) & {_fmt(ad.get('logit_e_min_all'), 5)}" + END,
              f"Min.\\ logistic $\\widehat e$ among controls & {_fmt(ad.get('logit_e_min_controls'), 5)}" + END,

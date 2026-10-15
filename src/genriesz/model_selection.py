@@ -442,8 +442,8 @@ def score_grr_candidate(
     outcome_link: str,
     outcome_penalty: str | None,
     outcome_lam: float,
-    max_iter: int,
-    tol: float,
+    max_iter: int | None,
+    tol: float | None,
     want_kernel: bool,
     want_squared_loss: bool = False,
     riesz_offset: OffsetSpec = None,
@@ -488,6 +488,7 @@ def score_grr_candidate(
     bindings: list[float] = []
     eff_ranks: list[float] = []
     kernel_medians: list[float] = []
+    solver_messages: list[tuple[int, str, str]] = []
     all_success = True
 
     for fi, fold in enumerate(inner_folds):
@@ -519,6 +520,7 @@ def score_grr_candidate(
             fr = grr.fit(X_itr, max_iter=max_iter, tol=tol)
         else:
             fr = grr.fit(X_itr, max_iter=riesz_max_iter, tol=riesz_tol)
+        solver_messages.append((fi, "riesz", str(fr.message)))
         if not fr.success or grr.beta_ is None:
             all_success = False
             continue
@@ -620,6 +622,7 @@ def score_grr_candidate(
             basis=cb, link=outcome_link, penalty=outcome_penalty, lam=outcome_lam
         )
         out_fr = out.fit(X_itr, y_itr, max_iter=max_iter, tol=tol)
+        solver_messages.append((fi, "outcome", str(out_fr.message)))
         if out.theta_ is not None and out_fr.success:
             coef_norms.append(float(np.linalg.norm(out.theta_)))
             try:
@@ -681,6 +684,7 @@ def score_grr_candidate(
         "lam": float(lam),
         "n_centers": rep_ncenters,
         "success": bool(all_success and imbalances),
+        "solver_messages": solver_messages,
         "modifies_estimand": bool(getattr(generator, "modifies_estimand", False)),
         "bregman_validation": _nanmean(risks),
         "squared_loss_validation": sq_val,
@@ -825,8 +829,8 @@ def select_grr_hyperparams(
     outcome_link: str = "identity",
     outcome_penalty: str | None = "l2",
     outcome_lam: float = 1e-3,
-    max_iter: int = 500,
-    tol: float = 1e-8,
+    max_iter: int | None = None,
+    tol: float | None = None,
     riesz_offset: OffsetSpec = None,
     riesz_alpha_ref=None,
     riesz_solver: str = "auto",

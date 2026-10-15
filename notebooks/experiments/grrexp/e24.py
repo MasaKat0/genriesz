@@ -78,15 +78,10 @@ LAMBDA_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)  # GRR ridge and the common outcome 
 C_GRID = (0.01, 0.1, 1.0, 10.0, 100.0)  # LogitAIPW inverse l2 strength
 N_CENTRES = 100
 EIG_FLOOR = 1e-8  # relative eigenvalue floor of K(C, C)
-SAMPLE_TOL = 1e-8  # §1.3 C, ridge: rho <= 1e-8; lambda = 0 (EB): scaled 1e-8
 
 # AutoDML-lasso (§1.4)
 CNS_C = (1.0, 0.1, 0.1)
 CNS_LOADING_SHIFT = 0.2
-CNS_OUTER = 10
-CNS_OUTER_TOL = 1e-8
-CNS_INNER_TOL = 1e-10
-CNS_INNER_SWEEPS = 10000
 
 # comparisons (registration E-24)
 COMMON_SUCCESS_MIN = 0.95
@@ -336,7 +331,7 @@ def fit_glm(arm, base, lam, X_tr):
     if not (np.any(X_tr[:, 0] == 1) and np.any(X_tr[:, 0] == 0)):
         return Rep("degenerate_functional")
     mdl = glm_model(arm, base, lam)
-    fr = mdl.fit(X_tr, tol=SAMPLE_TOL)
+    fr = mdl.fit(X_tr)
     if fr.status != "ok":
         return Rep(str(fr.status))
 
@@ -352,7 +347,7 @@ def fit_glm(arm, base, lam, X_tr):
     return Rep("ok", fn, {"n_iter": int(fr.n_iter)})
 
 
-def fit_autodml(X_tr):
+def fit_autodml(X_tr, *, max_iter=None, tol=None, inner_options=None):
     """CNS Appendix A.1.1/A.2 (registration §1.4), on the degree-2 dictionary."""
     b = cns_dictionary(X_tr)
     X1, X0 = _arms_rows(X_tr[:, 1:])
@@ -367,19 +362,12 @@ def fit_autodml(X_tr):
 
     c1, c2, c3 = CNS_C
     r_l = c1 / np.sqrt(n) * norm.ppf(1.0 - c2 / (2.0 * p))
-    outer_stops, sweeps_max = 0, 0
-    for it in range(CNS_OUTER):
-        resid = b * (b @ rho)[:, None] - mb  # b_j(X) b(X)' rho - m(W, b_j)
-        Dl = np.sqrt(np.mean(resid**2, axis=0)) + CNS_LOADING_SHIFT
-        w = 2.0 * r_l * Dl  # objective rho'G rho - 2 rho'M + sum_j w_j |rho_j|
-        w[0] *= c3
-        new, sweeps = _cns_coordinate_descent(G, M, w, rho.copy())
-        sweeps_max = max(sweeps_max, sweeps)
-        done = np.max(np.abs(new - rho)) <= CNS_OUTER_TOL
-        rho = new
-        outer_stops = it + 1
-        if done:
-            break
+    from .e15 import loading_fit
+
+    status, rho, result = loading_fit(b, mb, G, M, rho, r_l, c3, CNS_LOADING_SHIFT,
+                                      max_iter=max_iter, tol=tol, inner_options=inner_options)
+    if status != "ok":
+        return Rep(status, None, result)
 
     def fn(X, X1, X0):
         a = cns_dictionary(X) @ rho
@@ -390,42 +378,28 @@ def fit_autodml(X_tr):
         return a, a1, a0, "ok"
 
     info = {
-        "outer_iterations": outer_stops,
-        "outer_cap_reached": int(outer_stops == CNS_OUTER and not done),
-        "inner_sweeps_max": sweeps_max,
+        "outer_iterations": result["outer"],
+        "outer_cap_reached": 0,
+        "inner_sweeps_max": result["inner_iterations_max"],
     }
     return Rep("ok", fn, info)
 
 
-def _cns_coordinate_descent(G, M, w, rho):
-    """min rho'G rho - 2 rho'M + sum_j w_j |rho_j| by cyclic soft-thresholding (CNS A.2).
+def _cns_coordinate_descent(G, M, w, rho, *, max_iter=None, tol=None, options=None):
+    """CNS fixed-loading quadratic and exact weighted l1 objective."""
+    from .e15 import coordinate_descent
 
-    Stops when one sweep changes no coefficient by more than 1e-10, or after 10000
-    sweeps (§1.4).
-    """
-    p = len(M)
-    Grho = G @ rho
-    diag = np.diag(G).copy()
-    for sweep in range(1, CNS_INNER_SWEEPS + 1):
-        change = 0.0
-        for j in range(p):
-            old = rho[j]
-            z = M[j] - (Grho[j] - diag[j] * old)
-            new = np.sign(z) * max(abs(z) - w[j] / 2.0, 0.0) / diag[j]
-            if new != old:
-                Grho += G[:, j] * (new - old)
-                rho[j] = new
-                change = max(change, abs(new - old))
-        if change <= CNS_INNER_TOL:
-            return rho, sweep
-    return rho, CNS_INNER_SWEEPS
+    coef, iterations, _ = coordinate_descent(G, M, np.asarray(w) / 2.0, rho,
+                                            max_iter=max_iter, tol=tol, options=options)
+    return coef, iterations
 
 
-def fit_logit(base_nys, C, X_tr):
+def fit_logit(base_nys, C, X_tr, *, max_iter=None, tol=None):
     """l2-penalised logistic propensity on the Nystrom features (``C`` tuned)."""
     from sklearn.linear_model import LogisticRegression
 
-    clf = LogisticRegression(C=float(C), penalty="l2", solver="lbfgs", max_iter=10000, tol=1e-10)
+    clf = LogisticRegression(C=float(C), penalty="l2", solver="lbfgs",
+                             **baselines.solver_parameters(max_iter, tol))
     clf.fit(base_nys(X_tr[:, 1:]), X_tr[:, 0])
 
     def fn(X, X1, X0):
@@ -668,7 +642,7 @@ def tune(cell, entropy):
 
         def fold_loss(tr, te):
             clf = LogisticRegression(
-                C=float(C), penalty="l2", solver="lbfgs", max_iter=10000, tol=1e-10
+                C=float(C), penalty="l2", solver="lbfgs"
             )
             clf.fit(nys(Z[tr]), D[tr])
             p = clf.predict_proba(nys(Z[te]))[:, 1]

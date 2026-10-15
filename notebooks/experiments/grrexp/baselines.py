@@ -4,14 +4,14 @@ Every estimator is cross-fitted with the registered fold ids and returns a dict
 with ``estimate``, ``se`` and ``status``; a failure is a status with NaN values,
 never an exception that is caught (registration §1.1).
 
-- :func:`logit_aipw`: logistic MLE (no penalty, lbfgs, max_iter 10000, tol 1e-10)
+- :func:`logit_aipw`: logistic MLE (no penalty, lbfgs, library solver defaults)
   for the propensity score, OLS for the outcome on the treatment-interaction
   span, no clipping. A ConvergenceWarning or a fitted propensity outside
   ``(1e-12, 1 - 1e-12)`` is a failure.
 - :func:`dml_gbm`: HistGradientBoosting for the propensity (features Z) and the
   outcome (features D, Z), no clipping, hyper-parameters chosen beforehand by
   :func:`tune_gbm` on pilot data.
-- :func:`eb_dual_newton`: an independently written Newton solver of the
+- :func:`eb_dual_newton`: an independent SciPy minimization of the
   entropy-balancing dual of the ATE (each arm reweighted to the full-sample mean
   of the regressors), used to check the EB row (= UKL with C = 0).
 - :func:`run_recording_warnings`: runs one fit and records its warnings
@@ -25,6 +25,7 @@ import itertools
 import warnings
 
 import numpy as np
+from scipy import optimize
 
 GBM_GRID = list(itertools.product((0.05, 0.1), (7, 15, 31), (100, 300)))  # lr, leaves, iters (E-12)
 FAILED = {"estimate": float("nan"), "se": float("nan")}
@@ -56,6 +57,12 @@ def run_recording_warnings(fit):
     return result, dict(sorted(counts.items())), converged
 
 
+def solver_parameters(max_iter=None, tol=None):
+    """Only pass explicit overrides to a scikit-learn estimator."""
+    return {key: value for key, value in (("max_iter", max_iter), ("tol", tol))
+            if value is not None}
+
+
 def _aipw(D, Y, e, mu1, mu0):
     psi = mu1 - mu0 + D / e * (Y - mu1) - (1 - D) / (1 - e) * (Y - mu0)
     theta = float(np.mean(psi))
@@ -67,7 +74,7 @@ def _ols(F, y):
     return coef
 
 
-def logit_aipw(D, Z_feats, Y, fold_ids):
+def logit_aipw(D, Z_feats, Y, fold_ids, *, max_iter=None, tol=None):
     """``Z_feats``: the non-constant regressors (n x q). Outcome OLS on (1, Z_feats) per arm.
 
     Run it through :func:`run_recording_warnings`: a ConvergenceWarning of the
@@ -82,7 +89,7 @@ def logit_aipw(D, Z_feats, Y, fold_ids):
     F = np.column_stack([np.ones(n), Z_feats])
     for k in np.unique(fold_ids):
         tr, te = fold_ids != k, fold_ids == k
-        clf = LogisticRegression(penalty=None, solver="lbfgs", max_iter=10000, tol=1e-10)
+        clf = LogisticRegression(penalty=None, solver="lbfgs", **solver_parameters(max_iter, tol))
         clf.fit(Z_feats[tr], D[tr])
         e[te] = clf.predict_proba(Z_feats[te])[:, 1]
         for d, mu in ((1, mu1), (0, mu0)):
@@ -159,34 +166,28 @@ def dml_gbm(D, Z, Y, fold_ids, prop_params, out_params, seed):
     return {"estimate": theta, "se": se, "status": "ok"}
 
 
-def eb_dual_newton(Phi_arm, target, n, tol=1e-8, max_iter=200):
-    """Weights ``exp(Phi_arm c)`` with ``sum_i exp(Phi_i c) Phi_i = target`` (the EB dual).
+def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None):
+    """Entropy-balancing weights from SciPy's default unconstrained BFGS.
 
-    Damped Newton on the convex ``f(c) = sum exp(Phi c) - c' target``; returns the
-    weights, or ``None`` if it does not converge. Convergence is the criterion of
-    registration §1.3 C on the sample-mean scale of the GRR fit it checks:
-    ``max_j |g_j| / n <= tol * max(1, max_j |target_j| / n)``.
+    The objective remains ``sum exp(Phi c) - c' target``. ``n`` is retained for
+    callers; no sample-dependent convergence threshold is applied. Failures
+    raise with the library message, so no failed fit supplies weights.
     """
-    c = np.zeros(Phi_arm.shape[1])
+    Phi_arm, target = np.asarray(Phi_arm, float), np.asarray(target, float)
 
-    def f(c_):
-        return float(np.sum(np.exp(Phi_arm @ c_)) - c_ @ target)
+    def value(c):
+        return float(np.sum(np.exp(Phi_arm @ c)) - c @ target)
 
-    for _ in range(max_iter):
-        w = np.exp(Phi_arm @ c)
-        g = Phi_arm.T @ w - target
-        if np.max(np.abs(g)) / n <= tol * max(1.0, np.max(np.abs(target)) / n):
-            return w
-        H = Phi_arm.T @ (Phi_arm * w[:, None])
-        step = -np.linalg.solve(H, g)
-        f0, gnorm, t = f(c), float(np.max(np.abs(g))), 1.0
-        while t > 1e-12:
-            cand = c + t * step
-            f1 = f(cand)
-            g1 = float(np.max(np.abs(Phi_arm.T @ np.exp(Phi_arm @ cand) - target)))
-            rounding = abs(f1 - f0) <= 8 * np.finfo(float).eps * max(1.0, abs(f0))
-            if f1 <= f0 + 1e-4 * t * (g @ step) or (rounding and g1 < gnorm):
-                break
-            t /= 2.0
-        c = c + t * step
-    return None
+    def gradient(c):
+        return Phi_arm.T @ np.exp(Phi_arm @ c) - target
+
+    opts = {} if options is None else dict(options)
+    if max_iter is not None:
+        opts["maxiter"] = int(max_iter)
+    res = optimize.minimize(value, np.zeros(Phi_arm.shape[1]), jac=gradient,
+                            tol=tol, options=opts)
+    weights = np.exp(Phi_arm @ res.x)
+    if (not res.success or not np.isfinite(res.fun) or not np.all(np.isfinite(weights))
+            or not np.all(np.isfinite(res.jac)) or not np.all(weights > 0)):
+        raise RuntimeError(f"Entropy-balancing optimization failed: {res.message}")
+    return weights

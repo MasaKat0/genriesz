@@ -130,7 +130,7 @@ def test_fit_density_ratio_reports_route():
     )
     # No interior minimizer: the solver no longer stops at the boundary (U43) and
     # reports the iteration limit; the fit still fails.
-    assert res_c1.status == "maxit" and not res_c1.success
+    assert res_c1.status == "optimizer_failure" and not res_c1.success
 
 
 def test_fit_density_ratio_cv_handles_more_centers_than_fold_size():

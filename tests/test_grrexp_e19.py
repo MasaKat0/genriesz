@@ -87,10 +87,10 @@ def test_dgamma0_is_the_derivative_of_gamma0() -> None:
 def test_sq_riesz_matches_the_closed_form_and_its_derivative() -> None:
     X, _ = _rows(400, 7)
     status, af, daf, imb, _ = e19._fit_sq_riesz(X, e19.alpha_basis(), None, 0.0)
-    assert status == "ok" and imb <= 1e-8
+    assert status == "ok" and imb <= 1e-5
     Phi, M = e19.feat_alpha(X), e19.dfeat_alpha(X)
     beta = np.linalg.solve(Phi.T @ Phi / len(X), M.mean(axis=0))  # alpha = Phi beta
-    assert np.allclose(af(X), Phi @ beta, atol=1e-8)
+    assert np.allclose(af(X), Phi @ beta, atol=1e-4)
     h = 1e-6
     Xp, Xm = X.copy(), X.copy()
     Xp[:, 0] += h

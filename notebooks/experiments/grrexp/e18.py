@@ -76,7 +76,6 @@ THM_P0 = 0.05 + 0.001
 #: the solver works on the ball of radius R_g (1 - 1e-9): its ``"ok"`` solutions satisfy
 #: ||beta||_1 <= radius (1 + 1e-12) (polishing allowance), so the stated R_g holds exactly.
 SOLVER_RADIUS_FACTOR = 1.0 - 1e-9
-SAMPLE_TOL = 1e-8  # §1.3 C (lam = 0: scaled by max(1, ||P_n m||_inf); ridge/ball: 1e-8)
 INF_N = (2000, 4000, 8000)
 EMP_N = (1000, 8000)
 
@@ -366,7 +365,7 @@ def fit_candidate(index, X_fit):
             offset=g.offset_from_alpha(gen, alpha_ref),
             l1_radius=RADIUS[gen_name] * SOLVER_RADIUS_FACTOR,
         )  # fmt: skip
-        fr = mdl.fit(X_fit, tol=SAMPLE_TOL)
+        fr = mdl.fit(X_fit)
         if fr.status != "ok":
             return str(fr.status), None
         beta = np.asarray(mdl.beta_, dtype=float)

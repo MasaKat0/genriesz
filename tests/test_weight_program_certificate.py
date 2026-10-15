@@ -143,7 +143,7 @@ def test_branchwise_generator_needs_branch_fn():
 @pytest.mark.skipif(not HAS_CVXPY, reason="cvxpy not installed")
 @pytest.mark.parametrize(
     "C, grr_status, verdict",
-    [(1.0, "maxit", "uncertified_boundary"), (0.0, "ok", "interior")],
+    [(1.0, "optimizer_failure", "uncertified_boundary"), (0.0, "ok", "interior")],
 )
 def test_solver_status_and_weight_program_agree_on_the_probe_design(C, grr_status, verdict):
     """BP(C=1) under weak overlap: the GRR solver stops at the boundary and the
@@ -196,8 +196,9 @@ def test_solver_options_reach_clarabel_and_default_is_unchanged() -> None:
         gr.weight_program_certificate(
             X=X, basis=ident, functional=fn, generator=bp, solver_options={"no_such_setting": 1}
         )
-    with pytest.raises(ValueError, match="only to the 'cvxpy' backend"):
-        gr.weight_program_certificate(
-            X=X, basis=ident, functional=fn, generator=bp, backend="scipy",
-            solver_options={"tol_gap_abs": 1e-12},
-        )
+    limited = gr.weight_program_certificate(
+        X=X, basis=ident, functional=fn, generator=bp, backend="scipy",
+        solver_options={"maxiter": 0},
+    )
+    assert limited.verdict == "inconclusive"
+    assert "iteration limit" in limited.solver_status.lower()

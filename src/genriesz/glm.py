@@ -17,10 +17,9 @@ in ``v``.
 With an offset ``u_ref`` (a fixed function, never fitted on the estimation
 sample) the dual coordinate is ``v(x) = u_ref(x) + phi(x)^T beta``.
 
-By default the problem is solved by the strict solvers of
-:mod:`genriesz.solvers` (damped Newton for smooth penalties, FISTA for ``l1``),
-which keep every iterate in the domain of the generator and report an explicit
-status. ``solver="lbfgs"`` selects the L-BFGS-B path of releases <= 0.2.6.
+Coefficient optimization uses SciPy's standard routines with library defaults.
+The ``newton`` and ``fista`` options are entry points
+for smooth objectives and exact l1 reformulations, respectively.
 """
 
 from __future__ import annotations
@@ -191,75 +190,31 @@ def run_strict_solver(
     beta0: NDArray[np.float64],
     max_iter: int | None,
     tol: float | None,
-    boundary_tol: float,
+    boundary_tol: float | None,
     check_X: NDArray[np.float64] | None = None,
     check_Phi: NDArray[np.float64] | None = None,
     check_offset: NDArray[np.float64] | None = None,
 ) -> tuple[SolverResult, str]:
-    """Dispatch a strict solve (registration §1.3 A-2/A-3); returns ``(result, solver)``.
-
-    - Smooth penalty (none, ``l2``, ``l_q`` with ``q >= 2``) without a ball:
-      damped Newton.
-    - ``l1`` (or ``l_q`` with ``1 < q < 2``): FISTA.
-    - Smooth penalty (none or ``l2``) with a ball: damped Newton on the
-      unrestricted problem; if it does not end ``"ok"`` strictly inside the
-      ball, projected FISTA with the ridge in the smooth part (the registered
-      deterministic switch).
-    """
-
+    """Dispatch to a SciPy coefficient solve, without retries."""
     lam = 0.0 if penalty.penalty is None else float(penalty.lam)
     q = None if lam == 0.0 else float(penalty.p_norm)
     if l1_radius is not None and q is not None and q not in (1.0, 2.0):
         raise ValueError("l1_radius is supported with no penalty, 'l1' or 'l2'.")
     smooth = q is None or q >= 2.0
     if solver == "newton" and (not smooth or l1_radius is not None):
-        raise ValueError(
-            "solver='newton' needs a twice-differentiable penalty (none, l2, or lp with "
-            "p >= 2) and no l1_radius."
-        )
+        raise ValueError("solver='newton' requires a smooth penalty and no l1_radius.")
     if solver == "fista" and q is not None and q > 2.0:
-        raise ValueError("solver='fista' supports no penalty, l1, l2 and l_q with 1 < q < 2.")
-
-    def _problem(ridge: float) -> DualProblem:
-        return DualProblem(
-            generator=generator, X=X, Phi=Phi, offset=offset, target=target, ridge=ridge,
-            check_X=check_X, check_Phi=check_Phi, check_offset=check_offset,
-        )
-
-    use_newton = solver == "newton" or (solver == "auto" and smooth)
-    if use_newton:
-        scale = max(1.0, float(np.max(np.abs(target)))) if (q is None and target.size) else 1.0
-        res = newton_solve(
-            _problem(0.0),
-            beta0=beta0,
-            lam=lam,
-            q=q,
-            max_iter=500 if max_iter is None else int(max_iter),
-            tol=1e-10 if tol is None else float(tol),
-            tol_scale=scale,
-            boundary_tol=boundary_tol,
-        )
-        if l1_radius is None or (
-            res.status == OK and float(np.sum(np.abs(res.beta))) < l1_radius
-        ):
-            return res, "newton"
-
-    if q is None or q == 2.0:
-        ridge, lam1, qf = (0.0 if q is None else lam), 0.0, 1.0
-    else:
-        ridge, lam1, qf = 0.0, lam, q
-    default_tol = 1e-6 * lam1 if (qf == 1.0 and lam1 > 0.0) else 1e-8
-    res = fista_solve(
-        _problem(ridge),
-        beta0=beta0,
-        lam=lam1,
-        q=qf,
-        radius=l1_radius,
-        max_iter=100_000 if max_iter is None else int(max_iter),
-        tol=default_tol if tol is None else float(tol),
-        boundary_tol=boundary_tol,
-    )
-    return res, "fista"
+        raise ValueError("solver='fista' supports no penalty, l1, l2, or lq with q < 2.")
+    ridge = lam if l1_radius is not None and q == 2.0 else 0.0
+    problem = DualProblem(generator=generator, X=X, Phi=Phi, offset=offset, target=target,
+                          ridge=ridge, check_X=check_X, check_Phi=check_Phi,
+                          check_offset=check_offset)
+    if smooth and l1_radius is None and solver != "fista":
+        return newton_solve(problem, beta0=beta0, lam=lam, q=q, max_iter=max_iter,
+                            tol=tol, boundary_tol=boundary_tol), "newton"
+    return fista_solve(problem, beta0=beta0, lam=0.0 if ridge else lam,
+                       q=1.0 if l1_radius is not None or q is None else q, radius=l1_radius,
+                       max_iter=max_iter, tol=tol, boundary_tol=boundary_tol), "fista"
 
 
 def _branch_cache_of(generator: object) -> AbstractContextManager[None]:
@@ -304,7 +259,7 @@ class FitResult:
         Strict solvers (``solver`` in ``{"auto", "newton", "fista"}``): one of
         :data:`genriesz.solvers.STATUSES` -- ``"ok"``, ``"uncertified_numerical_boundary"``,
         ``"maxit"``, ``"linesearch"``, ``"singular"``, ``"infeasible_start"``,
-        ``"nonfinite"``, ``"degenerate_functional"``. Only ``"ok"`` is a
+        ``"nonfinite"``, ``"degenerate_functional"``, ``"optimizer_failure"``. Only ``"ok"`` is a
         success. Legacy ``solver="lbfgs"``:
         one of ``"closed_form"``, ``"converged"``, ``"optimizer_failure"``,
         ``"domain_error"``, ``"domain_error_at_solution"``,
@@ -333,8 +288,7 @@ class FitResult:
     solver:
         ``"newton"``, ``"fista"``, ``"lbfgs"`` or ``"closed_form"``.
     prox_residual:
-        FISTA's registered stopping quantity
-        ``L ||beta - prox_{h/L}(beta - grad f(beta)/L)||_inf`` (NaN for Newton).
+        Unavailable for the SciPy routines (NaN).
     max_abs_imbalance:
         ``max_j |Delta_j|`` on the fitting sample, where ``Delta`` is the loss
         gradient (the empirical Riesz imbalance of the regressors).
@@ -344,9 +298,9 @@ class FitResult:
         Whether the ``l1``-ball restriction is active at the solution and the
         multiplier of its normal cone used in ``kkt_residual``.
     polished:
-        Whether a FISTA solution was refined by Newton on its support.
+        False for the SciPy routines.
     hessian_min_eig:
-        Smallest eigenvalue of the Hessian at the last Newton iterate.
+        Hessian diagnostic, when available.
     """
 
     beta: NDArray[np.float64]
@@ -448,21 +402,17 @@ class GRRGLM:
         shrinks; see :func:`offset_from_alpha`. BKL requires an offset (or a
         starting point) with ``s * u_ref < 0``.
     solver:
-        ``"auto"`` (default): damped Newton for no penalty, ``l2`` and
-        ``l_q`` with ``q >= 2``; FISTA for ``l1`` and ``l_q`` with ``1 < q < 2``.
-        ``"newton"``/``"fista"`` force a solver. ``"lbfgs"``: the L-BFGS-B path
-        of releases <= 0.2.6 (closed form for SQ with ``l2``), kept for old
-        notebooks; it does not keep iterates in the domain and reports the
-        legacy statuses.
+        ``"auto"`` (default) selects the SciPy solve for the penalty and
+        coefficient restriction. ``"newton"`` selects smooth unconstrained
+        minimization; ``"fista"`` selects the l1 or differentiable lq entry point.
+        ``"lbfgs"`` uses the legacy L-BFGS-B path.
     l1_radius:
         Optional coefficient restriction ``||beta||_1 <= l1_radius`` with no
-        penalty, ``l1`` or ``l2`` (see :func:`run_strict_solver` for the
-        Newton/FISTA rule). FISTA judges convergence by the proximal residual
-        of ``0 in grad f + lam subdiff||beta||_1 + N_B(beta)`` (ridge in ``f``).
+        penalty, l1 or l2, imposed by a linear constraint on nonnegative parts.
     check_counterfactuals:
         If True (default), the rows returned by
         ``functional.evaluation_points`` (the counterfactual rows at which ``m``
-        evaluates the dual coordinate) must stay in the domain during the solve.
+        evaluates the dual coordinate) are required for feasibility.
     boundary_tol:
         Rows with a distance to the domain boundary at most ``boundary_tol``
         (``|alpha| - C`` for UKL/BP/BKL, also ``s v >= -1e-12`` for BKL; never
@@ -486,7 +436,7 @@ class GRRGLM:
         offset: OffsetSpec = None,
         solver: str = "auto",
         l1_radius: float | None = None,
-        boundary_tol: float = 1e-8,
+        boundary_tol: float | None = None,
         check_counterfactuals: bool = True,
         clip_dual: bool = False,
     ):
@@ -514,7 +464,7 @@ class GRRGLM:
             if solver_ in {"newton", "lbfgs"}:
                 raise ValueError("l1_radius needs solver='auto' or 'fista'.")
         self.l1_radius = l1_radius
-        self.boundary_tol = float(boundary_tol)
+        self.boundary_tol = boundary_tol
 
         self._Phi: NDArray[np.float64] | None = None
         self._M: NDArray[np.float64] | None = None
@@ -532,10 +482,7 @@ class GRRGLM:
     ) -> FitResult:
         """Fit coefficients and set dual ranges from fitting rows when ``clip_dual=True``.
 
-        ``max_iter`` and ``tol`` use the existing solver defaults when omitted:
-        Newton 500 iterations and KKT tolerance ``1e-10`` (scaled without a
-        penalty); FISTA 100000 iterations and tolerance ``1e-6 * lam``
-        (``1e-10`` when ``lam = 0``); L-BFGS-B 500 iterations and ``ftol = 1e-8``.
+        ``max_iter=None`` and ``tol=None`` leave SciPy settings at their defaults.
         """
         self.dual_bounds_ = None
         X_ = as_2d(X)
@@ -565,11 +512,7 @@ class GRRGLM:
     ) -> FitResult:
         """Fit ``beta`` on the rows of ``X``.
 
-        ``max_iter`` and ``tol`` default to the solver's registered values:
-        Newton 500 iterations and ``max_j |dF/dbeta_j| <= 1e-10`` (scaled by
-        ``max(1, max_j |mean m(W, phi_j)|)`` without a penalty); FISTA 100000
-        iterations and a residual ``<= 1e-6 * lam`` (``1e-10`` when ``lam = 0``);
-        L-BFGS-B 500 iterations and ``ftol = 1e-8``.
+        ``max_iter=None`` and ``tol=None`` leave SciPy settings at their defaults.
         """
 
         t0 = time.perf_counter()
@@ -623,8 +566,6 @@ class GRRGLM:
             return self._fit_strict(
                 X_, Phi, M, u0, beta0_, max_iter=max_iter, tol=tol, t0=t0
             )
-        max_iter = 500 if max_iter is None else int(max_iter)
-        tol = 1e-8 if tol is None else float(tol)
 
         # Closed form for the squared generator with an L2 (or no) penalty.
         # g(alpha) = (alpha - C)^2 gives g*(v) = C v + v^2/4, so the objective
@@ -699,7 +640,9 @@ class GRRGLM:
             grad = (alpha[:, None] * Phi - M).mean(axis=0)
             return grad + self.penalty.grad(beta)
 
-        opts: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
+        opts: dict = {}
+        if max_iter is not None:
+            opts["maxiter"] = int(max_iter)
         if verbose:
             opts["iprint"] = 1
 
@@ -708,7 +651,7 @@ class GRRGLM:
         with _branch_cache_of(self.generator):
             try:
                 res = optimize.minimize(
-                    fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", options=opts
+                    fun=fun, x0=beta0_, jac=jac, method="L-BFGS-B", tol=tol, options=opts
                 )
             except DomainError as exc:
                 out = FitResult(
@@ -779,6 +722,10 @@ class GRRGLM:
             success = False
             status = "domain_error_at_solution"
             message = f"{message} | diagnostics failed at solution: {exc}"
+
+        if not (np.isfinite(objective) and np.isfinite(gradient_norm)
+                and np.all(np.isfinite(beta_hat))):
+            success, status = False, NONFINITE
 
         out = FitResult(
             beta=beta_hat,
@@ -884,7 +831,7 @@ class GRRGLM:
             float(np.max(np.abs(grad_loss))) if grad_loss is not None and grad_loss.size else
             float("nan")
         )
-        if grad_loss is not None and kind == "newton" and lam > 0.0:
+        if grad_loss is not None and pen.p_norm > 1.0 and lam > 0.0:
             gnorm = float(np.max(np.abs(grad_loss + pen.grad(res.beta)))) if grad_loss.size else 0.0
         else:
             gnorm = imbalance
@@ -1056,8 +1003,8 @@ class OutcomeGLM:
         y: ArrayLike,
         *,
         theta0: ArrayLike | None = None,
-        max_iter: int = 500,
-        tol: float = 1e-8,
+        max_iter: int | None = None,
+        tol: float | None = None,
         verbose: bool = False,
     ) -> FitResult:
         X_ = as_2d(X)
@@ -1113,21 +1060,28 @@ class OutcomeGLM:
                 grad = (Phi.T @ (p_hat - y_)) / n
             return grad + self.penalty.grad(theta)
 
-        opts_: dict = {"maxiter": int(max_iter), "ftol": float(tol)}
+        opts_: dict = {}
+        if max_iter is not None:
+            opts_["maxiter"] = int(max_iter)
         if verbose:
             opts_["iprint"] = 1
-        res = optimize.minimize(fun=fun, x0=theta0_, jac=jac, method="L-BFGS-B", options=opts_)
+        res = optimize.minimize(
+            fun=fun, x0=theta0_, jac=jac, method="L-BFGS-B", tol=tol, options=opts_
+        )
 
         theta_hat = np.asarray(res.x, dtype=float)
         # Same contract as GRRGLM (audit P0-07): a failed fit must not leave a
         # predictable state behind. The last iterate stays on the FitResult.
-        self.theta_ = theta_hat if bool(res.success) else None
+        success = bool(res.success) and bool(
+            np.isfinite(res.fun) and np.all(np.isfinite(res.x)) and np.all(np.isfinite(res.jac))
+        )
+        self.theta_ = theta_hat if success else None
         return FitResult(
             beta=theta_hat,
-            success=bool(res.success),
+            success=success,
             message=str(res.message),
             n_iter=int(getattr(res, "nit", -1)),
-            status="converged" if bool(res.success) else "optimizer_failure",
+            status="converged" if success else "optimizer_failure",
         )
 
     def predict_link(self, X: ArrayLike) -> NDArray[np.float64]:

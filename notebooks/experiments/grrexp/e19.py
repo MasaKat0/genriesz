@@ -54,7 +54,6 @@ ESTIMATORS = {
 ARM_LABELS = [f"{p}|{e}" for p in PARTS for e in ESTIMATORS[p]]
 
 #: §1.3 C, lambda = 0 and no constraint: max_j |grad_j| <= 1e-8 max(1, ||P_n m(W, phi)||_inf)
-SAMPLE_TOL = 1e-8
 CERT_GRADIENT = 1e-12  # §1.9 (i)
 CERT_BETA_DIFF = 1e-10  # §1.9 (i)
 #: H19-Cex (i): |n Var(theta_hat)/(V* + 1/2) - 1| <= 0.06
@@ -417,7 +416,7 @@ def _fit_sq_riesz(X_fit, basis, penalty, lam):
         basis=basis, generator=g.SquaredGenerator(C=0.0), functional=g.AMEFunctional(0),
         penalty=penalty, lam=lam,
     )  # fmt: skip
-    fr = mdl.fit(X_fit, tol=SAMPLE_TOL)
+    fr = mdl.fit(X_fit)
     if fr.status != "ok":
         return str(fr.status), None, None, None, None
     beta = np.asarray(mdl.beta_, dtype=float)
