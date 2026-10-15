@@ -1,0 +1,2 @@
+interrupted
+U35 re-pin: re-run after the PR-8 code changes (U43 convergence, clipped arms, LaLonde reporting, E-24 matched comparison, published RieszNet) and the standard-library optimisers with library defaults (U44), precision checks as diagnostics and trust-ncg population solves, 2026-10-15
