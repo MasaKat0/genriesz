@@ -1,0 +1,3 @@
+
+[NbConvertApp] Converting notebook /Users/mkato/Dropbox/研究/一般化リース回帰/genriesz/notebooks/experiments/10_E12_omitted_direction_balance.ipynb to notebook
+[IPKernelApp] WARNING | Parent appears to have exited, shutting down.
