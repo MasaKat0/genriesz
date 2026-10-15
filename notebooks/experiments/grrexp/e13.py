@@ -947,7 +947,8 @@ def tables(S):
                     )
                     + END
                 )  # fmt: skip
-    fam = json.loads(S["family_verdict"].iloc[0]) if "family_verdict" in S else None
+    fam = S["family_verdict"].iloc[0] if "family_verdict" in S else None
+    fam = json.loads(fam) if isinstance(fam, str) else None  # the pilot has no family verdict
     lines += ["\\hline", "\\end{tabular}"]
     status = ["\\begin{tabular}{llrrl}", "\\hline",
               "Pair & Estimator & $n$ & Successes & Statuses" + END, "\\hline"]  # fmt: skip

@@ -645,5 +645,6 @@ def tables(S):
     if not any_failure:
         status.append("\\multicolumn{4}{l}{No replication failed in any arm.}" + END)
     status += ["\\hline", "\\end{tabular}"]
-    fam = json.loads(S["family_verdict"].iloc[0]) if "family_verdict" in S else None
+    fam = S["family_verdict"].iloc[0] if "family_verdict" in S else None
+    fam = json.loads(fam) if isinstance(fam, str) else None  # the pilot has no family verdict
     return {"tab_E20": "\n".join(lines) + "\n", "tab_E20_status": "\n".join(status) + "\n"}, fam
