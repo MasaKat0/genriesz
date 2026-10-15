@@ -628,7 +628,8 @@ def replicate(task):
                                              return_diagnostics=True)
             wc, dc = baselines.eb_dual_newton(Phi[D == 0], Phi.sum(axis=0), n,
                                              return_diagnostics=True)
-            c["eb_fits"] = json.dumps({"treated": dt, "control": dc})
+            # only the library status of the independent EB fits is kept
+            c["eb_fits"] = json.dumps({"treated": dt.get("status"), "control": dc.get("status")})
             c["eb_dual_newton_max_diff"] = (
                 None
                 if wt is None or wc is None
@@ -742,7 +743,7 @@ def _eb_status_counts(records):
         else:
             items = rec if isinstance(rec, list) else [rec]
         for it in items:
-            st = str(it.get("status", "unknown")) if isinstance(it, dict) else str(it)
+            st = str(it.get("status", "unknown")) if isinstance(it, dict) else str(it)  # status strings
             counts[st] = counts.get(st, 0) + 1
     return counts
 

@@ -72,8 +72,7 @@ def test_eb_unexpected_exception_still_propagates(monkeypatch):
 
 
 def test_e12_all_failed_independent_eb_fits_are_recorded():
-    fits = {"treated": {"status": "optimizer_failure", "message": "Library failure."},
-            "control": {"status": "optimizer_failure", "message": "Library failure."}}
+    fits = {"treated": "optimizer_failure", "control": "optimizer_failure"}
     result = {"EB|RW_full": {"status": "ok", "train_fits": 1, "train_balance_ratio": 0.1},
               "_checks": {"eb_dual_newton_max_diff": None, "eb_fits": json.dumps(fits)},
               "_check_warnings": 0}

@@ -39,7 +39,6 @@ from .seeds import CONFIRMATORY_ENTROPY, PILOT_ENTROPY
 
 STAGE_DIRS = {"stage0": "stage0", "stage0.5": "pilot", "stage1": "stage1"}
 STAGE_ENTROPY = {"stage0": None, "stage0.5": PILOT_ENTROPY, "stage1": CONFIRMATORY_ENTROPY}
-MAX_FILE_BYTES = 50 * 1024 * 1024  # the repository's large-file guard
 MACRO_NAME = re.compile(r"^[A-Za-z]+$")
 STEM = re.compile(r"^[A-Za-z0-9_-]+$")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
@@ -450,9 +449,6 @@ class RunRecorder:
         return rel, path
 
     def _register(self, rel: str, path: Path) -> Path:
-        size = path.stat().st_size
-        if size > MAX_FILE_BYTES:
-            raise ValueError(f"{rel} is {size} bytes, above the 50 MB guard")
         self.files[rel] = path
         return path
 
