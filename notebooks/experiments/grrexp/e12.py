@@ -728,6 +728,25 @@ def total_warnings(raw):
     return int(raw["n_warnings"].sum() + per_rep)
 
 
+def _eb_status_counts(records):
+    """Status counts of the independent EB fit records (each a dict or JSON string)."""
+    counts = {}
+    for rec in records:
+        if isinstance(rec, str):
+            try:
+                rec = json.loads(rec)
+            except ValueError:
+                rec = {"status": rec}
+        if isinstance(rec, dict) and "status" not in rec:
+            items = list(rec.values())  # {"treated": fit, "control": fit}
+        else:
+            items = rec if isinstance(rec, list) else [rec]
+        for it in items:
+            st = str(it.get("status", "unknown")) if isinstance(it, dict) else str(it)
+            counts[st] = counts.get(st, 0) + 1
+    return counts
+
+
 def balance_checks(raw):
     """H12-Bal diagnostics; missing balance records still stop the run.
 
@@ -775,8 +794,11 @@ def balance_checks(raw):
         "eb_tolerance": 1e-6,
         "eb_ok": bool(eb is not None and len(eb) and np.all(np.isfinite(eb))
                       and (eb <= 1e-6).all()),
-        "eb_fits": (raw.loc[eb_due, "check_eb_fits"].tolist()
-                    if "check_eb_fits" in raw else []),
+        # per-replication EB fit records stay in raw (column check_eb_fits);
+        # the summary keeps their status counts only (summary.csv size guard)
+        "eb_fit_status_counts": _eb_status_counts(
+            raw.loc[eb_due, "check_eb_fits"] if "check_eb_fits" in raw else []
+        ),
     }
     violations = []
     if missing:

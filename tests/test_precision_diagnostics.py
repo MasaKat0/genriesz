@@ -80,7 +80,9 @@ def test_e12_all_failed_independent_eb_fits_are_recorded():
     raw = e12.raw_frame([(0, 0, 20261008, None)], [result])
     diagnostic = e12.balance_checks(raw)
     assert not diagnostic["eb_ok"] and diagnostic["eb_max"] is None
-    assert json.loads(diagnostic["eb_fits"][0]) == fits
+    assert diagnostic["eb_fit_status_counts"] == {"optimizer_failure": 2}
+    # the per-replication records stay in raw
+    assert json.loads(raw.loc[raw["arm"] == "EB|RW_full", "check_eb_fits"].iloc[0]) == fits
     json.dumps(diagnostic, allow_nan=False)
 
 
