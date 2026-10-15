@@ -1,0 +1,77 @@
+{
+  "counts": {
+    "correctly_specified": {
+      "cells": 16,
+      "judged": 16,
+      "violations": 16
+    },
+    "main": {
+      "cells": 224,
+      "judged": 219,
+      "violations": 219
+    },
+    "sq": {
+      "cells": 48,
+      "judged": 48,
+      "violations": 48
+    }
+  },
+  "negative_result": {
+    "non_sq": true,
+    "sq": true
+  },
+  "not_certified": [
+    {
+      "a0": 0.0,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "optimizer_failure"
+    },
+    {
+      "a0": 0.0,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "quad",
+      "status": "optimizer_failure"
+    },
+    {
+      "a0": 0.5,
+      "a1": 1.5,
+      "a2": 1.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "optimizer_failure"
+    },
+    {
+      "a0": 0.5,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "lin",
+      "status": "optimizer_failure"
+    },
+    {
+      "a0": 0.5,
+      "a1": 1.5,
+      "a2": 2.0,
+      "a3": 1.0,
+      "generator": "BP(0.75,0)",
+      "span": "quad",
+      "status": "optimizer_failure"
+    }
+  ],
+  "unexpected_delta_zero": [],
+  "warnings": {
+    "by_message": {
+      "DeprecationWarning: Conversion of an array with ndim > 0 to a scalar is deprecated, and will error in future. Ensure you extract a single element from your array before performing this operation. (Deprecated NumPy 1.25.)": 5232102
+    },
+    "total": 5232102
+  }
+}
