@@ -1,0 +1,154 @@
+
+[NbConvertApp] Converting notebook /Users/mkato/Dropbox/研究/一般化リース回帰/genriesz/notebooks/experiments/11_E13_compatibility_tangent_balance.ipynb to notebook
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/__main__.py", line 5, in <module>
+    main()
+    ~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/jupyter_core/application.py", line 284, in launch_instance
+    super().launch_instance(argv=argv, **kwargs)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/traitlets/config/application.py", line 1080, in launch_instance
+    app.start()
+    ~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 420, in start
+    self.convert_notebooks()
+    ~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 597, in convert_notebooks
+    self.convert_single_notebook(notebook_filename)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 563, in convert_single_notebook
+    output, resources = self.export_single_notebook(
+                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        notebook_filename, resources, input_buffer=input_buffer
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/nbconvertapp.py", line 487, in export_single_notebook
+    output, resources = self.exporter.from_filename(
+                        ~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+        notebook_filename, resources=resources
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 201, in from_filename
+    return self.from_file(f, resources=resources, **kw)
+           ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 220, in from_file
+    return self.from_notebook_node(
+           ~~~~~~~~~~~~~~~~~~~~~~~^
+        nbformat.read(file_stream, as_version=4), resources=resources, **kw
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/notebook.py", line 36, in from_notebook_node
+    nb_copy, resources = super().from_notebook_node(nb, resources, **kw)
+                         ~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 154, in from_notebook_node
+    nb_copy, resources = self._preprocess(nb_copy, resources)
+                         ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/exporters/exporter.py", line 353, in _preprocess
+    nbc, resc = preprocessor(nbc, resc)
+                ~~~~~~~~~~~~^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/base.py", line 48, in __call__
+    return self.preprocess(nb, resources)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 103, in preprocess
+    self.preprocess_cell(cell, resources, index)
+    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbconvert/preprocessors/execute.py", line 124, in preprocess_cell
+    cell = self.execute_cell(cell, index, store_history=True)
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/jupyter_core/utils/__init__.py", line 165, in wrapped
+    return loop.run_until_complete(inner)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/asyncio/base_events.py", line 725, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbclient/client.py", line 1062, in async_execute_cell
+    await self._check_raise_for_error(cell, cell_index, exec_reply)
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/nbclient/client.py", line 918, in _check_raise_for_error
+    raise CellExecutionError.from_cell_and_msg(cell, exec_reply_content)
+nbclient.exceptions.CellExecutionError: An error occurred while executing the following cell:
+------------------
+if STAGE == "stage0.5":
+    import matplotlib.pyplot as plt
+
+    parallel.configure_worker()
+    pop = load_population()
+    timing, serial, para, all_tasks = [], [], [], []
+    for workers in (1, outputs.PILOT_WORKERS):
+        for ci, cell in enumerate(e13.CELLS):
+            t0 = time.perf_counter()
+            tasks = e13.tasks_for(PILOT_ENTROPY, outputs.PILOT_REPS, cells=[ci])
+            res = parallel.run_tasks(e13.replicate, tasks, workers)
+            aggregate(e13.raw_frame(tasks, res), pop, Seeds(13, entropy=PILOT_ENTROPY))
+            timing.append({"cell": cell, "workers": workers, "seconds": time.perf_counter() - t0})
+            if workers == 1:
+                serial += res
+                all_tasks += tasks
+            else:
+                para += res
+    digest = parallel.assert_bit_identical(serial, para, expected=len(all_tasks))
+    raw = e13.raw_frame(all_tasks, serial)
+    t0 = time.perf_counter()
+    buf = io.StringIO()
+    aggregate(raw, pop, Seeds(13, entropy=PILOT_ENTROPY)).to_csv(buf, index=False)
+    buf.seek(0)
+    S = pd.read_csv(buf)
+    e13.tables(S)
+    plt.close(e13.figure(S))
+    whole_seconds = time.perf_counter() - t0
+    counts = raw.groupby(["cell", "arm", "status"]).size().reset_index(name="count")
+    status_df = pd.DataFrame({"cell": [e13.CELLS[c] for c in counts["cell"]],
+                              "arm": counts["arm"].str.replace("|", "-", regex=False),
+                              "status": counts["status"], "count": counts["count"].astype(int)})
+    rec.write_pilot("timing.csv", pd.DataFrame(timing))
+    rec.write_pilot("status_counts.csv", status_df)
+    rec.record_parallel_identity(cells=e13.CELLS, reps=outputs.PILOT_REPS, n_jobs=outputs.PILOT_WORKERS,
+                                 digest=digest)
+    print(pd.DataFrame(timing).groupby("workers")["seconds"].sum(), whole_seconds)
+    print(status_df.groupby(["arm", "status"])["count"].sum().to_string())
+    rec.finalize(R={"main": outputs.PILOT_REPS}, n={"main": list(e13.N_VALUES)},
+                 warnings=e13.total_warnings(raw), failures=int((raw["status"] != "ok").sum()),
+                 extra={"whole_pilot_aggregation_table_and_figure_seconds": whole_seconds})
+    del raw
+------------------
+
+
+[31m---------------------------------------------------------------------------[39m
+[31mTypeError[39m                                 Traceback (most recent call last)
+[36mCell[39m[36m [39m[32mIn[4][39m[32m, line 26[39m
+[32m     22[39m     buf = io.StringIO()
+[32m     23[39m     aggregate(raw, pop, Seeds([32m13[39m, entropy=PILOT_ENTROPY)).to_csv(buf, index=[38;5;28;01mFalse[39;00m)
+[32m     24[39m     buf.seek([32m0[39m)
+[32m     25[39m     S = pd.read_csv(buf)
+[32m---> [39m[32m26[39m     e13.tables(S)
+[32m     27[39m     plt.close(e13.figure(S))
+[32m     28[39m     whole_seconds = time.perf_counter() - t0
+[32m     29[39m     counts = raw.groupby([[33m"cell"[39m, [33m"arm"[39m, [33m"status"[39m]).size().reset_index(name=[33m"count"[39m)
+
+[36mFile [39m[32m~/Dropbox/研究/一般化リース回帰/genriesz/notebooks/experiments/grrexp/e13.py:950[39m, in [36mtables[39m[34m(S)[39m
+[32m    933[39m             r = S[(S[[33m"[39m[33mpair[39m[33m"[39m] == pair) & (S[[33m"[39m[33mestimator[39m[33m"[39m] == est) & (S[[33m"[39m[33mn[39m[33m"[39m] == n)].iloc[[32m0[39m]
+[32m    934[39m             lines.append(
+[32m    935[39m                 [33m"[39m[33m & [39m[33m"[39m.join(
+[32m    936[39m                     [
+[32m   (...)[39m[32m    948[39m                 + END
+[32m    949[39m             )  [38;5;66;03m# fmt: skip[39;00m
+[32m--> [39m[32m950[39m fam = [30;43mjson[39;49m[30;43m.[39;49m[30;43mloads[39;49m[30;43m([39;49m[30;43mS[39;49m[30;43m[[39;49m[30;43m"[39;49m[30;43mfamily_verdict[39;49m[30;43m"[39;49m[30;43m][39;49m[30;43m.[39;49m[30;43miloc[39;49m[30;43m[[39;49m[30;43m0[39;49m[30;43m][39;49m[30;43m)[39;49m [38;5;28;01mif[39;00m [33m"[39m[33mfamily_verdict[39m[33m"[39m [38;5;129;01min[39;00m S [38;5;28;01melse[39;00m [38;5;28;01mNone[39;00m
+[32m    951[39m lines += [[33m"[39m[38;5;130;01m\\[39;00m[33mhline[39m[33m"[39m, [33m"[39m[38;5;130;01m\\[39;00m[33mend[39m[38;5;132;01m{tabular}[39;00m[33m"[39m]
+[32m    952[39m status = [[33m"[39m[38;5;130;01m\\[39;00m[33mbegin[39m[38;5;132;01m{tabular}[39;00m[38;5;132;01m{llrrl}[39;00m[33m"[39m, [33m"[39m[38;5;130;01m\\[39;00m[33mhline[39m[33m"[39m,
+[32m    953[39m           [33m"[39m[33mPair & Estimator & $n$ & Successes & Statuses[39m[33m"[39m + END, [33m"[39m[38;5;130;01m\\[39;00m[33mhline[39m[33m"[39m]  [38;5;66;03m# fmt: skip[39;00m
+
+[36mFile [39m[32m/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py:339[39m, in [36mloads[39m[34m(s, cls, object_hook, parse_float, parse_int, parse_constant, object_pairs_hook, **kw)[39m
+[32m    337[39m [38;5;28;01melse[39;00m:
+[32m    338[39m     [38;5;28;01mif[39;00m [38;5;129;01mnot[39;00m [38;5;28misinstance[39m(s, ([38;5;28mbytes[39m, [38;5;28mbytearray[39m)):
+[32m--> [39m[32m339[39m         [38;5;28;01mraise[39;00m [38;5;167;01mTypeError[39;00m([33mf[39m[33m'[39m[33mthe JSON object must be str, bytes or bytearray, [39m[33m'[39m
+[32m    340[39m                         [33mf[39m[33m'[39m[33mnot [39m[38;5;132;01m{[39;00ms.[34m__class__[39m.[34m__name__[39m[38;5;132;01m}[39;00m[33m'[39m)
+[32m    341[39m     s = s.decode(detect_encoding(s), [33m'[39m[33msurrogatepass[39m[33m'[39m)
+[32m    343[39m [38;5;28;01mif[39;00m ([38;5;28mcls[39m [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m object_hook [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m
+[32m    344[39m         parse_int [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m parse_float [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m
+[32m    345[39m         parse_constant [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m object_pairs_hook [38;5;129;01mis[39;00m [38;5;28;01mNone[39;00m [38;5;129;01mand[39;00m [38;5;129;01mnot[39;00m kw):
+
+[31mTypeError[39m: the JSON object must be str, bytes or bytearray, not float64
+
