@@ -1,0 +1,2 @@
+interrupted
+interrupted: the driver was terminated externally after about 23 hours (exit 144); orphaned run stopped because the runner could not register it (2026-10-15)
