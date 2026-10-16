@@ -1,0 +1,2 @@
+finished
+U35 re-pin: re-run after the PR-8 code changes (U43, clipped arms, LaLonde reporting, E-24 matched comparison, published RieszNet), standard-library optimisers with library defaults (U44), precision checks as diagnostics, 2026-10-15/16, up to 4 workers adjustable during the run (2026-10-17)
