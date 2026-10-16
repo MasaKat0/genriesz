@@ -11,6 +11,14 @@ thread before each task.
 ``run_tasks`` returns results in the order of ``tasks`` whatever the completion
 order, so a run with 1 worker and a run with several workers can be compared bit for
 bit (Stage 0.5, :func:`verify_parallel_identity`).
+
+The number of workers can be lowered or raised while a run is going on: when the
+environment variable ``GRREXP_MAX_WORKERS_FILE`` names a file holding an integer,
+the parent reads it each time a task finishes and keeps at most that many tasks
+(and worker processes) running, never more than ``n_jobs``. A worker that is no
+longer needed finishes its current task and exits; nothing is cut short, so the
+results do not depend on it (author, 2026-10-17: reduce load one or two processes
+at a time instead of stopping a run).
 """
 
 from __future__ import annotations
@@ -19,12 +27,27 @@ import hashlib
 import multiprocessing as mp
 import os
 import pickle
+import queue
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from typing import Any
 
 THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS")
+MAX_WORKERS_FILE_ENV = "GRREXP_MAX_WORKERS_FILE"
+
+
+def desired_workers(n_jobs: int) -> int:
+    """The number of workers to keep running: ``n_jobs``, or the integer in the control file
+    named by ``GRREXP_MAX_WORKERS_FILE`` (clamped to ``1..n_jobs``) when it can be read."""
+    path = os.environ.get(MAX_WORKERS_FILE_ENV)
+    if not path:
+        return n_jobs
+    try:
+        with open(path, encoding="utf-8") as f:
+            value = int(f.read().strip())
+    except (OSError, ValueError):
+        return n_jobs
+    return max(1, min(n_jobs, value))
 
 
 @contextmanager
@@ -92,12 +115,92 @@ def run_tasks(fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int) -> li
         configure_worker()
         return [_call(fn, t) for t in tasks]
     with _single_thread_environment():
-        ctx = mp.get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=n_jobs, mp_context=ctx, initializer=configure_worker
-        ) as pool:
-            futures = [pool.submit(_call, fn, t) for t in tasks]
-            return [f.result() for f in futures]
+        return _run_elastic(fn, tasks, n_jobs, mp.get_context("spawn"))
+
+
+def _worker_loop(fn, task_q, result_q, wid: int) -> None:
+    configure_worker()
+    while True:
+        item = task_q.get()
+        if item is None:
+            return
+        i, task = item
+        try:
+            result_q.put((i, True, _call(fn, task), wid))
+        except BaseException as e:  # sent to the parent, which re-raises it
+            try:
+                pickle.dumps(e)
+            except Exception:
+                e = RuntimeError(f"{type(e).__name__}: {e}")
+            result_q.put((i, False, e, wid))
+            return
+
+
+def _run_elastic(fn, tasks, n_jobs, ctx):
+    """Dispatch one task at a time to spawned workers; keep ``desired_workers`` running."""
+    result_q = ctx.Queue()
+    workers: dict[int, tuple[Any, Any]] = {}
+    results: list[Any] = [None] * len(tasks)
+    state = {"next": 0, "wid": 0}
+
+    def start() -> int:
+        wid = state["wid"]
+        state["wid"] += 1
+        q = ctx.Queue()
+        proc = ctx.Process(target=_worker_loop, args=(fn, q, result_q, wid), daemon=True)
+        proc.start()
+        workers[wid] = (proc, q)
+        return wid
+
+    def assign(wid: int) -> None:
+        i = state["next"]
+        state["next"] += 1
+        workers[wid][1].put((i, tasks[i]))
+
+    def retire(wid: int) -> None:
+        proc, q = workers.pop(wid)
+        q.put(None)
+        proc.join()
+
+    busy: set[int] = set()
+    done = 0
+    try:
+        for _ in range(min(desired_workers(n_jobs), len(tasks))):
+            w = start()
+            assign(w)
+            busy.add(w)
+        while done < len(tasks):
+            try:
+                i, ok, payload, w = result_q.get(timeout=5)
+            except queue.Empty:
+                dead = [k for k in busy if not workers[k][0].is_alive()]
+                if dead:
+                    raise RuntimeError(f"worker process(es) {dead} exited without returning a result")
+                continue
+            if not ok:
+                raise payload
+            results[i] = payload
+            done += 1
+            busy.discard(w)
+            target = desired_workers(n_jobs)
+            if state["next"] < len(tasks) and len(busy) < target:
+                assign(w)
+                busy.add(w)
+            else:
+                retire(w)
+            while state["next"] < len(tasks) and len(busy) < target:
+                w = start()
+                assign(w)
+                busy.add(w)
+    finally:
+        for proc, q in workers.values():
+            if proc.is_alive():
+                q.put(None)
+        for proc, _ in list(workers.values()):
+            proc.join(timeout=10)
+            if proc.is_alive():
+                proc.terminate()
+    return results
 
 
 def result_digest(results: Iterable[Any]) -> str:

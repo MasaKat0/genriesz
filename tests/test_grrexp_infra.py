@@ -310,7 +310,7 @@ def make_manifest(exp: int, stage: str) -> dict:
     }
     if stage == "stage0.5":
         m["parallel_identity"] = {
-            "cells": cells, "reps": 10, "n_jobs": 12, "tasks": 20, "digest": H64,
+            "cells": cells, "reps": 10, "n_jobs": outputs.PILOT_WORKERS, "tasks": 20, "digest": H64,
         }  # fmt: skip
     return m
 
@@ -609,7 +609,7 @@ def test_pilot_files_carry_no_estimates(pilot_recorder, name, frame) -> None:
 
 
 def test_valid_pilot_files_are_written(pilot_recorder) -> None:
-    timing = pd.DataFrame({"cell": [[0], [1]], "workers": [1, 12], "seconds": [1.0, 0.2]})
+    timing = pd.DataFrame({"cell": [[0], [1]], "workers": [1, outputs.PILOT_WORKERS], "seconds": [1.0, 0.2]})
     pilot_recorder.write_pilot("timing.csv", timing)
     pilot_recorder.write_pilot("status_counts.csv", _counts("SQ", "ok", 10))
 
