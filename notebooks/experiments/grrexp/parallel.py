@@ -9,7 +9,7 @@ verifies with threadpoolctl that every loaded BLAS/OpenMP runtime uses one
 thread before each task.
 
 ``run_tasks`` returns results in the order of ``tasks`` whatever the completion
-order, so a run with 1 worker and a run with 12 workers can be compared bit for
+order, so a run with 1 worker and a run with several workers can be compared bit for
 bit (Stage 0.5, :func:`verify_parallel_identity`).
 """
 
@@ -123,7 +123,7 @@ def assert_bit_identical(serial: Sequence[Any], parallel: Sequence[Any], *, expe
 
 
 def verify_parallel_identity(
-    fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int = 12
+    fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int = 4
 ) -> str:
     """Stage 0.5: run every task with 1 and with ``n_jobs`` workers and compare bytes."""
     tasks = list(tasks)

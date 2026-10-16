@@ -45,7 +45,7 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 RUN_ENV = "GRREXP_RUN"
 PILOT_REPS = 10
-PILOT_WORKERS = 12
+PILOT_WORKERS = 4  # reduced from 12 on 2026-10-17: memory (author: "並列を減らせ")
 RUNNER_FILES = ("RUNNING.json", "kernel.json", "manifest.json", "executed.ipynb", "FAILED.txt")
 
 # §0.2: deterministic experiments are finished at Stage 0.
@@ -331,7 +331,7 @@ def validate_manifest(manifest: dict, exp: int, stage: str) -> None:
     if stage == "stage0.5":
         ident = manifest.get("parallel_identity") or {}
         _require(ident.get("reps") == PILOT_REPS, "pilot must run 10 replications per cell")
-        _require(ident.get("n_jobs") == PILOT_WORKERS, "pilot must compare 1 and 12 workers")
+        _require(ident.get("n_jobs") == PILOT_WORKERS, f"pilot must compare 1 and {PILOT_WORKERS} workers")
         _require(ident.get("cells") == manifest["cells"], "identity check skipped cells")
         _require(
             ident.get("tasks") == PILOT_REPS * len(manifest["cells"]), "identity check incomplete"
@@ -500,7 +500,7 @@ class RunRecorder:
             raise ValueError("the identity check belongs to Stage 0.5")
         cells = [list(c) if isinstance(c, tuple) else c for c in cells]
         if cells != self.cells or reps != PILOT_REPS or n_jobs != PILOT_WORKERS:
-            raise ValueError("the identity check must cover every cell, 10 reps, 1 vs 12 workers")
+            raise ValueError(f"the identity check must cover every cell, {PILOT_REPS} reps, 1 vs {PILOT_WORKERS} workers")
         self.parallel_identity = {
             "cells": cells,
             "reps": reps,
