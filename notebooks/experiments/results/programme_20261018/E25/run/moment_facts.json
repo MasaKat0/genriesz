@@ -1,0 +1,20 @@
+[
+  {
+    "theta0": 1.0,
+    "b0": 0.2,
+    "representer_L2_finite": true,
+    "compatible_score_variance_finite": true,
+    "SQ_score_variance_finite": true,
+    "SQ_stable_index": 2.0,
+    "pi": 0.5490692361337087
+  },
+  {
+    "theta0": 1.0,
+    "b0": 0.6,
+    "representer_L2_finite": true,
+    "compatible_score_variance_finite": true,
+    "SQ_score_variance_finite": false,
+    "SQ_stable_index": 1.3333333333333335,
+    "pi": 0.6322463605428881
+  }
+]
