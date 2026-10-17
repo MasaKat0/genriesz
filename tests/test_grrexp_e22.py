@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks/experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 from grrexp import e22
 from grrexp.seeds import Seeds, fold_ids
 
@@ -55,3 +55,27 @@ def test_actual_sample_weights_and_common_outcome():
         assert record["ess_c"] == diagnostic["ess_c"]
         assert record["smd_raw_max"] == diagnostic["smd_raw_max"]
         assert len(a) == 614 and record["se"] > 0
+
+
+def test_score_concentration_is_preserved_in_primary_and_sensitivity_outputs():
+    concentration = [0.9906, *np.linspace(0.01, 0.99, 19)]
+    raw = pd.DataFrame({
+        "arm": "UKL0-D2",
+        "n": 614,
+        "rep": np.arange(20),
+        "estimate": -26993.0,
+        "se": 28128.0,
+        "status": "ok",
+        "score_concentration": concentration,
+    })
+    summary = e22.summarise(raw)
+    row = summary.iloc[0]
+    assert row.primary_score_concentration == concentration[0]
+    assert row.primary_estimate == -26993.0 and row.sensitivity_failures == 0
+    for q in (5, 50, 95):
+        assert row[f"sensitivity_score_concentration_q{q:02}"] == np.quantile(
+            concentration[1:], q / 100
+        )
+    tables = e22.tables(summary)
+    assert "primary\\_score\\_concentration" in tables["tab_E22"]
+    assert "0.9906" in tables["tab_E22_score_concentration"]

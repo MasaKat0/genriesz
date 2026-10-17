@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 
 from grrexp import e24, riesznet  # noqa: E402
 

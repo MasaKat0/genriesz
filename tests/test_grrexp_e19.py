@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks/experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 from grrexp import e19
 
 
@@ -31,3 +31,26 @@ def test_target_integration_and_procedure():
     rec = result["arms"]["SQ|ARW_cf"]
     assert rec["status"] == "ok" and abs(rec["estimate"] - e19.true_target()) < 0.2
     assert len(rec["fits"]) == 10
+
+
+def test_outcome_regression_recovers_gamma_and_its_derivative(monkeypatch):
+    from genriesz import OutcomeGLM
+
+    fit = OutcomeGLM.fit
+    fitted_bases = []
+
+    def capture(self, *args, **kwargs):
+        result = fit(self, *args, **kwargs)
+        fitted_bases.append(self.basis)
+        return result
+
+    monkeypatch.setattr(OutcomeGLM, "fit", capture)
+    record = e19.replicate((0, 0, 20261007))["arms"]["SQ|ARW_cf"]
+    assert record["status"] == "ok"
+    X, _ = e19.draw_q(np.random.default_rng(0), 100)
+    assert len(fitted_bases) == e19.K
+    for basis in fitted_bases:
+        F = basis(X)
+        coef = np.linalg.lstsq(F, e19.gamma0(X), rcond=None)[0]
+        np.testing.assert_allclose(F @ coef, e19.gamma0(X), atol=1e-12)
+        np.testing.assert_allclose(basis.derivative(X, 0) @ coef, e19.dgamma0(X), atol=1e-12)

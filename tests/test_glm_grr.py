@@ -398,3 +398,55 @@ def test_outcome_glm_optimizer_failure_leaves_the_model_unpredictable():
     assert model.theta_ is None
     with pytest.raises(RuntimeError, match="not fit"):
         model.predict(X)
+
+
+def test_unpenalized_identity_outcome_uses_linear_least_squares(monkeypatch):
+    from genriesz import OutcomeGLM
+    from genriesz import glm as glm_module
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unpenalized linear regression requires no iterative optimizer")
+
+    monkeypatch.setattr(glm_module.optimize, "minimize", forbidden)
+    x = np.linspace(-2.0, 2.0, 80)
+    X = np.column_stack([x, x])
+    y = 1.5 - 0.7 * x + 0.2 * x**2
+    model = OutcomeGLM(
+        basis=PolynomialBasis(degree=2, include_bias=True),
+        link="identity", penalty=None, lam=10.0,
+    )
+    result = model.fit(X, y)
+    assert result.success and result.status == "closed_form"
+    np.testing.assert_allclose(model.predict(X), y, atol=1e-12)
+
+
+def test_unpenalized_identity_outcome_rejects_nonfinite_response():
+    from genriesz import OutcomeGLM
+
+    X = np.arange(3.0)[:, None]
+    model = OutcomeGLM(
+        basis=PolynomialBasis(degree=1, include_bias=True),
+        link="identity", penalty=None,
+    )
+    result = model.fit(X, np.array([0.0, np.nan, 2.0]))
+    assert not result.success and result.status == "nonfinite"
+    assert model.theta_ is None
+    with pytest.raises(RuntimeError, match="not fit"):
+        model.predict(X)
+
+
+def test_unpenalized_identity_outcome_rejects_nonfinite_basis_before_lapack(monkeypatch):
+    from genriesz import OutcomeGLM
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("nonfinite design must be rejected before LAPACK")
+
+    monkeypatch.setattr(np.linalg, "lstsq", forbidden)
+    X = np.array([[0.0], [np.nan], [2.0]])
+    model = OutcomeGLM(
+        basis=PolynomialBasis(degree=1, include_bias=True),
+        link="identity", penalty=None,
+    )
+    result = model.fit(X, np.arange(3.0))
+    assert not result.success and result.status == "nonfinite"
+    assert result.n_iter == 0 and model.theta_ is None

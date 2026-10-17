@@ -1,4 +1,4 @@
-"""Run a paper experiment: python3 notebooks/experiments/run_registered.py E-25 --n-jobs 2."""
+"""Run a paper experiment: uv run python experiments/run_registered.py E-25 --n-jobs 2."""
 
 import sys
 from pathlib import Path

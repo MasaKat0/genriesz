@@ -2,10 +2,11 @@
 
 import sys
 from pathlib import Path
+from queue import Queue
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 
 from grrexp import parallel  # noqa: E402
 
@@ -47,6 +48,20 @@ def test_worker_exception_propagates(monkeypatch):
     monkeypatch.delenv(parallel.MAX_WORKERS_FILE_ENV, raising=False)
     with pytest.raises(ValueError, match="task three failed"):
         parallel.run_tasks(_fail_on_three, list(range(8)), 2)
+
+
+def test_initialization_failure_is_reported_with_traceback(monkeypatch):
+    def fail():
+        raise RuntimeError("thread initialization failed")
+
+    monkeypatch.setattr(parallel, "configure_worker", fail)
+    messages = Queue()
+    parallel._worker_loop(_square, Queue(), messages, 7)
+    index, ok, error, worker = messages.get_nowait()
+    assert index == -1 and not ok and worker == 7
+    assert "worker 7 initialization failed" in str(error)
+    assert "thread initialization failed" in str(error)
+    assert "Traceback" in str(error)
 
 
 @pytest.mark.parametrize("jobs", [0, 5, 1.5, True])

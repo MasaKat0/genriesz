@@ -230,3 +230,5 @@ archive/
 # raw per-replication outputs of the paper programme stay local (GitHub 100 MB limit); summaries, tables, figures and manifests are tracked
 notebooks/experiments/results/programme_*/**/raw.csv
 notebooks/experiments/results/programme_*/**/replications.json
+experiments/results/programme_*/**/raw.csv
+experiments/results/programme_*/**/replications.json

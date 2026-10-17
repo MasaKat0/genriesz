@@ -6,6 +6,7 @@ import multiprocessing as mp
 import os
 import pickle
 import queue
+import traceback
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from typing import Any
@@ -77,7 +78,10 @@ def _call(fn: Callable[[Any], Any], task: Any) -> Any:
     return fn(task)
 
 
-def run_tasks(fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int) -> list[Any]:
+def run_tasks(
+    fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int,
+    *, worker_records: list[dict] | None = None,
+) -> list[Any]:
     """Apply ``fn`` to each task; ``fn`` must be importable (defined in a module).
 
     ``n_jobs=1`` runs in this process after :func:`configure_worker`; the kernel
@@ -90,14 +94,28 @@ def run_tasks(fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int) -> li
     if not tasks:
         raise ValueError("no tasks")
     if n_jobs == 1:
+        variables = {name: os.environ.get(name) for name in THREAD_VARIABLES}
         configure_worker()
+        if worker_records is not None:
+            worker_records.append(_worker_record(0, variables))
         return [_call(fn, t) for t in tasks]
     with _single_thread_environment():
-        return _run_elastic(fn, tasks, n_jobs, mp.get_context("spawn"))
+        return _run_elastic(fn, tasks, n_jobs, mp.get_context("spawn"), worker_records)
 
 
 def _worker_loop(fn, task_q, result_q, wid: int) -> None:
-    configure_worker()
+    try:
+        variables = {name: os.environ.get(name) for name in THREAD_VARIABLES}
+        configure_worker()
+        record = _worker_record(wid, variables)
+    except BaseException:
+        result_q.put((
+            -1, False,
+            RuntimeError(f"worker {wid} initialization failed:\n{traceback.format_exc()}"),
+            wid,
+        ))
+        return
+    result_q.put((-2, True, record, wid))
     while True:
         item = task_q.get()
         if item is None:
@@ -114,7 +132,7 @@ def _worker_loop(fn, task_q, result_q, wid: int) -> None:
             return
 
 
-def _run_elastic(fn, tasks, n_jobs, ctx):
+def _run_elastic(fn, tasks, n_jobs, ctx, worker_records=None):
     """Dispatch one task at a time to spawned workers; keep ``desired_workers`` running."""
     result_q = ctx.Queue()
     workers: dict[int, tuple[Any, Any]] = {}
@@ -153,12 +171,18 @@ def _run_elastic(fn, tasks, n_jobs, ctx):
             except queue.Empty:
                 dead = [k for k in busy if not workers[k][0].is_alive()]
                 if dead:
+                    exits = {k: workers[k][0].exitcode for k in dead}
                     raise RuntimeError(
-                        f"worker process(es) {dead} exited without returning a result"
+                        f"worker process(es) {dead} exited without returning a result; "
+                        f"exit codes: {exits}"
                     ) from None
                 continue
             if not ok:
                 raise payload
+            if i == -2:
+                if worker_records is not None:
+                    worker_records.append(payload)
+                continue
             results[i] = payload
             done += 1
             busy.discard(w)
@@ -181,6 +205,16 @@ def _run_elastic(fn, tasks, n_jobs, ctx):
             if proc.is_alive():
                 proc.terminate()
     return results
+
+
+def _worker_record(wid, variables):
+    return {
+        "worker_id": wid,
+        "pid": os.getpid(),
+        "scope": "replication process initialization",
+        "variables_before_configuration": variables,
+        "threads": thread_record({name: os.environ.get(name) for name in THREAD_VARIABLES}),
+    }
 
 
 def thread_record(variables_at_start: dict[str, str | None]) -> dict:

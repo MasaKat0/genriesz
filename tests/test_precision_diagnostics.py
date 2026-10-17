@@ -7,17 +7,11 @@ from pathlib import Path
 import numpy as np
 from scipy import optimize
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 
 from grrexp import outputs, population  # noqa: E402
 
 import genriesz as gr  # noqa: E402
-
-NOTEBOOKS = Path(__file__).resolve().parents[1] / "notebooks" / "experiments"
-
-
-def cell(name, index):
-    return "".join(json.loads((NOTEBOOKS / name).read_text())["cells"][index]["source"])
 
 
 def test_population_uses_the_analytic_hessian_and_library_defaults(monkeypatch):

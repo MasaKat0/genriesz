@@ -145,7 +145,7 @@ def replicate(task):
         outcome_basis=g.CallableBasis(
             feat_gamma, derivative=lambda X, coordinate=0: dfeat_gamma(X)
         ),
-        outcome_models="shared",
+        outcome_models="separate",
         outcome_link="identity",
         outcome_penalty=None,
         outcome_lam=0.0,
@@ -160,10 +160,10 @@ def replicate(task):
     return {"arms": {ARM_LABELS[0]: record}, "folds": folds.tolist()}
 
 
-def tasks_for(entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+def tasks_for(entropy=CONFIRMATORY_ENTROPY):
     import sys
 
-    return study.tasks_for(sys.modules[__name__], entropy, reps, cells)
+    return study.tasks_for(sys.modules[__name__], entropy)
 
 
 def summarise(raw):

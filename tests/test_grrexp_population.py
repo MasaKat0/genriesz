@@ -11,7 +11,7 @@ from scipy.special import expit
 
 TRUST_GTOL = signature(_minimize_trust_region).parameters["gtol"].default
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks" / "experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from grrexp import population  # noqa: E402

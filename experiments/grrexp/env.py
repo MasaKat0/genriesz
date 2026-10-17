@@ -1,19 +1,4 @@
-"""Provenance of a run (registration §1.7): source, environment and data checks.
-
-The ambient ``python3`` on the author's machine imports genriesz from an
-editable install outside this repository. :func:`use_submodule_genriesz` puts
-this checkout's ``src/`` first on ``sys.path`` and refuses to continue if
-genriesz was already imported from elsewhere.
-
-:func:`checkout_state` ties a registered run to a commit (no change and no
-untracked file outside ``results/``); :mod:`grrexp.runner` checks it before and
-after the run and compares the modules the kernel loaded
-(:func:`loaded_module_blobs`) with the blobs of that commit.
-
-:func:`check_environment` enforces the registered platform and every pin of
-``requirements-lock.txt`` (the registered packages and their dependency
-closure, see :func:`dependency_closure`).
-"""
+"""Source, uv environment and data provenance for the paper experiments."""
 
 from __future__ import annotations
 
@@ -29,13 +14,16 @@ import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
+import tomllib
+
 EXPERIMENTS_DIR = Path(__file__).resolve().parents[1]
-GENRIESZ_ROOT = EXPERIMENTS_DIR.parents[1]
+GENRIESZ_ROOT = EXPERIMENTS_DIR.parent
 GENRIESZ_SRC = GENRIESZ_ROOT / "src"
-DATA_DIR = EXPERIMENTS_DIR / "data"
+DATA_DIR = GENRIESZ_ROOT / "notebooks" / "experiments" / "data"
 RESULTS_DIR = EXPERIMENTS_DIR / "results"
-LOCK_FILE = EXPERIMENTS_DIR / "requirements-lock.txt"
-RESULTS_PREFIX = "notebooks/experiments/results/"
+LEGACY_RESULTS_DIR = GENRIESZ_ROOT / "notebooks" / "experiments" / "results"
+LOCK_FILE = EXPERIMENTS_DIR / "uv.lock"
+RESULTS_PREFIXES = ("experiments/results/", "notebooks/experiments/results/")
 
 # Registration §1.7: snapshots verified before every run that reads them.
 DATA_SHA256 = {
@@ -67,10 +55,7 @@ LOCK_ROOTS = (
     "cvxpy",
     "clarabel",
     "sympy",
-    "nbformat",
-    "nbconvert",
-    "ipykernel",
-    "notebook",
+    "marimo",
 )
 
 
@@ -80,7 +65,7 @@ def use_submodule_genriesz():
     loaded = sys.modules.get("genriesz")
     if loaded is not None and Path(loaded.__file__).resolve().parents[1] != GENRIESZ_SRC:
         raise RuntimeError(
-            f"genriesz was already imported from {loaded.__file__}; restart the kernel"
+            f"genriesz was already imported from {loaded.__file__}; restart the process"
         )
     if sys.path[0] != src:
         sys.path.insert(0, src)
@@ -123,15 +108,22 @@ def dependency_closure(roots=LOCK_ROOTS) -> dict[str, str]:
 
 
 def read_lock(path: Path = LOCK_FILE) -> dict[str, str]:
+    """Read registry package versions selected for this environment in uv.lock."""
+    from packaging.markers import Marker
+
     pins = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if not line:
+    with Path(path).open("rb") as stream:
+        lock = tomllib.load(stream)
+    for package in lock["package"]:
+        if "registry" not in package.get("source", {}):
             continue
-        name, sep, version = line.partition("==")
-        if not sep or not version:
-            raise ValueError(f"lock line is not 'name==version': {line!r}")
-        pins[_canonical(name)] = version.strip()
+        markers = package.get("resolution-markers", [])
+        if markers and not any(Marker(marker).evaluate() for marker in markers):
+            continue
+        name, version = _canonical(package["name"]), package["version"]
+        if name in pins and pins[name] != version:
+            raise ValueError(f"uv.lock selects multiple versions of {name}")
+        pins[name] = version
     if not pins:
         raise ValueError(f"{path} pins nothing")
     return pins
@@ -149,7 +141,12 @@ def check_environment() -> dict:
     missing_roots = {_canonical(r) for r in LOCK_ROOTS} - set(pins)
     if missing_roots:
         problems.append(f"lock lacks registered packages {sorted(missing_roots)}")
-    for name, version in pins.items():
+    installed = dependency_closure()
+    for name in installed:
+        if name not in pins:
+            problems.append(f"uv.lock lacks installed dependency {name}")
+            continue
+        version = pins[name]
         try:
             found = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -162,8 +159,9 @@ def check_environment() -> dict:
     return {
         "platform": list(system),
         "python": platform.python_version(),
+        "executable": sys.executable,
         "lock_sha256": sha256_file(LOCK_FILE),
-        "lock_pins_verified": len(pins),
+        "lock_pins_verified": len(installed),
     }
 
 
@@ -216,50 +214,71 @@ def _head_blobs(root: Path) -> dict[str, str]:
     return out
 
 
-def _code_cells(raw: bytes) -> list[str]:
-    nb = json.loads(raw.decode("utf-8"))
-    out = []
-    for cell in nb["cells"]:
-        if cell["cell_type"] == "code":
-            src = cell["source"]
-            out.append("".join(src) if isinstance(src, list) else src)
-    return out
-
-
 def head_blobs(root: Path | None = None) -> dict[str, str]:
     """``path -> blob SHA-1`` of every file committed at ``HEAD``."""
     return _head_blobs(GENRIESZ_ROOT if root is None else root)
 
 
-def checkout_state(notebook: Path) -> dict:
-    """The commit a registered run starts from; raises unless the checkout is clean.
-
-    Nothing may be modified or untracked outside ``results/`` (the executing
-    notebook included: a registered run executes the committed notebook into
-    its stage directory and never saves into the tracked file).
-    """
+def checkout_state(app_file: Path) -> dict:
+    """Record the actual checkout, or verify an explicitly supplied source snapshot."""
     root = GENRIESZ_ROOT
-    notebook = Path(notebook).resolve()
-    nb_rel = notebook.relative_to(root).as_posix()
+    app_file = Path(app_file).resolve()
+    app_rel = app_file.relative_to(root).as_posix()
+    if not (root / ".git").exists():
+        path, snapshot = _source_snapshot()
+        return {
+            "kind": "source_snapshot",
+            "root": str(root),
+            "sha": None,
+            "source_git_state": snapshot["source_genriesz"],
+            "source_manifest_sha256": sha256_file(path),
+            "app": app_rel,
+            "app_sha256": sha256_file(app_file),
+        }
+    if Path(_git(root, "rev-parse", "--show-toplevel").strip()).resolve() != root:
+        raise RuntimeError(f"{root} is not the root of the genriesz checkout")
     blobs = _head_blobs(root)
-    if nb_rel not in blobs:
-        raise RuntimeError(f"{nb_rel} is not committed at HEAD")
-    dirty = []
-    for line in _git(root, "status", "--porcelain", "--untracked-files=all").splitlines():
-        path = line[3:].strip('"')
-        if not path.startswith(RESULTS_PREFIX):
-            dirty.append(line)
-    if dirty:
-        raise RuntimeError("genriesz checkout is not clean: " + "; ".join(dirty))
-    raw = _git(root, "cat-file", "blob", blobs[nb_rel], text=False)
+    status = _git(root, "status", "--porcelain", "--untracked-files=all")
     return {
+        "kind": "git_checkout",
+        "root": str(root),
         "sha": _git(root, "rev-parse", "HEAD").strip(),
-        "notebook": nb_rel,
-        "notebook_blob": blobs[nb_rel],
-        "notebook_code_cells_sha256": hashlib.sha256(
-            json.dumps(_code_cells(raw)).encode("utf-8")
-        ).hexdigest(),
+        "status_porcelain": status,
+        "dirty": bool(status),
+        "dirty_tracked": bool(_git(root, "status", "--porcelain", "--untracked-files=no")),
+        "app": app_rel,
+        "app_committed_blob": blobs.get(app_rel),
+        "app_sha256": sha256_file(app_file),
     }
+
+
+def _source_snapshot() -> tuple[Path, dict]:
+    path = GENRIESZ_ROOT.parent / "SOURCE_SHA256.json"
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    for name in ("files", "source_genriesz", "source_parent_repository"):
+        if name not in snapshot or not snapshot[name]:
+            raise ValueError(f"{path} lacks {name}")
+    required = (
+        list(GENRIESZ_SRC.rglob("*.py"))
+        + list((EXPERIMENTS_DIR / "grrexp").glob("*.py"))
+        + list((EXPERIMENTS_DIR / "apps").glob("*.py"))
+        + [
+            EXPERIMENTS_DIR / "run_registered.py",
+            EXPERIMENTS_DIR / "pyproject.toml",
+            EXPERIMENTS_DIR / "uv.lock",
+            GENRIESZ_ROOT / "pyproject.toml",
+        ]
+    )
+    missing = {file.relative_to(GENRIESZ_ROOT).as_posix() for file in required} - set(
+        snapshot["files"]
+    )
+    if missing:
+        raise ValueError(f"{path} lacks source files: {sorted(missing)}")
+    for name, digest in snapshot["files"].items():
+        file = (GENRIESZ_ROOT / name).resolve()
+        if not file.is_relative_to(GENRIESZ_ROOT) or sha256_file(file) != digest:
+            raise ValueError(f"source snapshot differs from its manifest: {name}")
+    return path, snapshot
 
 
 def loaded_module_blobs() -> dict[str, str]:
@@ -284,17 +303,16 @@ def check_modules_at_head(loaded: dict[str, str], blobs: dict[str, str]) -> None
         raise RuntimeError("genriesz from this checkout was not loaded")
 
 
-COMPUTATION_TREES = ("src/genriesz", "notebooks/experiments/grrexp")
+COMPUTATION_TREES = ("src/genriesz", "experiments/grrexp")
 
 
-def computation_inputs(commit: str, notebook_rel: str, root: Path | None = None) -> dict:
+def computation_inputs(commit: str, app_rel: str, root: Path | None = None) -> dict:
     """Git object ids of what a run computes with: the genriesz and grrexp trees,
-    the notebook and the lock at ``commit``. Equal ids mean identical code."""
+    the marimo app and the uv environment at ``commit``."""
     root = GENRIESZ_ROOT if root is None else root
-    lock_rel = "notebooks/experiments/requirements-lock.txt"
     out = {t: _git(root, "rev-parse", f"{commit}:{t}").strip() for t in COMPUTATION_TREES}
-    out[notebook_rel] = _git(root, "rev-parse", f"{commit}:{notebook_rel}").strip()
-    out[lock_rel] = _git(root, "rev-parse", f"{commit}:{lock_rel}").strip()
+    for name in (app_rel, "experiments/uv.lock", "experiments/pyproject.toml", "pyproject.toml"):
+        out[name] = _git(root, "rev-parse", f"{commit}:{name}").strip()
     return dict(sorted(out.items()))
 
 
@@ -308,12 +326,31 @@ def parent_state() -> dict:
     parent with ``GRREXP_PARENT_REPO``; its submodule path is then ``genriesz`` and the
     worktree path is recorded.
     """
+    if not (GENRIESZ_ROOT / ".git").exists():
+        path, snapshot = _source_snapshot()
+        return {
+            "kind": "source_snapshot",
+            "sha": None,
+            "gitlink": None,
+            "source_git_state": snapshot["source_parent_repository"],
+            "source_manifest_sha256": sha256_file(path),
+        }
     override = os.environ.get(PARENT_ENV)
     parent = Path(override) if override else GENRIESZ_ROOT.parent
     name = "genriesz" if override else GENRIESZ_ROOT.name
+    if Path(_git(parent, "rev-parse", "--show-toplevel").strip()).resolve() != parent.resolve():
+        raise RuntimeError(f"{parent} is not the root of the parent repository")
+    gitlink = _git(parent, "ls-tree", "HEAD", name).split()
+    if len(gitlink) != 4 or gitlink[:2] != ["160000", "commit"]:
+        raise RuntimeError(f"{name} is not a committed gitlink in {parent}")
+    status = _git(parent, "status", "--porcelain", "--untracked-files=all")
     state = {
+        "kind": "git_checkout",
+        "root": str(parent),
         "sha": _git(parent, "rev-parse", "HEAD").strip(),
-        "gitlink": _git(parent, "ls-tree", "HEAD", name).split()[2],
+        "gitlink": gitlink[2],
+        "status_porcelain": status,
+        "dirty": bool(status),
         "dirty_tracked": bool(
             _git(parent, "status", "--porcelain", "--untracked-files=no").strip()
         ),
@@ -325,7 +362,8 @@ def parent_state() -> dict:
 
 def pip_freeze() -> tuple[str, str]:
     text = subprocess.run(
-        [sys.executable, "-m", "pip", "freeze"], check=True, capture_output=True, text=True
+        ["uv", "--no-cache", "pip", "freeze", "--python", sys.executable],
+        check=True, capture_output=True, text=True,
     ).stdout
     return text, hashlib.sha256(text.encode()).hexdigest()
 
@@ -342,6 +380,7 @@ def blas_config() -> str:
 def cpu_description() -> str:
     if sys.platform == "darwin":
         return subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            check=True, capture_output=True, text=True,
         ).stdout.strip()
     return platform.processor() or platform.machine()

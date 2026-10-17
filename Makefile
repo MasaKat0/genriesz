@@ -1,27 +1,31 @@
-PYTHON ?= python3
+UV ?= uv
+RUN = $(UV) run --locked --project experiments
 
-.PHONY: lint test verify notebooks-strip notebooks-check large-files-check install-hooks
+.PHONY: lint test verify marimo-check notebooks-strip notebooks-check large-files-check install-hooks
 
 lint:
-	ruff check src tests tools
+	$(RUN) ruff check src tests tools experiments/grrexp experiments/apps experiments/run_registered.py
 
 test:
-	$(PYTHON) -m pytest tests/ -q
+	$(RUN) python -m pytest tests/ -q
+
+marimo-check:
+	$(RUN) marimo check experiments/apps/*.py
 
 # Drop the NumPy RuntimeWarning spam that notebook re-runs write into stderr
 # outputs. Run this after re-executing notebooks/experiments/.
 notebooks-strip:
-	$(PYTHON) tools/strip_notebook_stderr.py
+	$(RUN) python tools/strip_notebook_stderr.py
 
 notebooks-check:
-	$(PYTHON) tools/strip_notebook_stderr.py --check
+	$(RUN) python tools/strip_notebook_stderr.py --check
 
 large-files-check:
-	$(PYTHON) tools/check_large_files.py
+	$(RUN) python tools/check_large_files.py
 
 install-hooks:
 	mkdir -p "$$(git rev-parse --git-dir)/hooks"
 	install -m 0755 tools/hooks/pre-commit "$$(git rev-parse --git-dir)/hooks/pre-commit"
 	@echo "pre-commit hook installed"
 
-verify: lint test notebooks-check large-files-check
+verify: lint test marimo-check large-files-check

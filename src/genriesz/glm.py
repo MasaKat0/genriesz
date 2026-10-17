@@ -1020,11 +1020,17 @@ class OutcomeGLM:
             if theta0_.shape[0] != p:
                 raise ValueError(f"theta0 must have length {p}. Got {theta0_.shape}.")
 
+        if not np.all(np.isfinite(Phi)) or not np.all(np.isfinite(y_)):
+            self.theta_ = None
+            return FitResult(
+                beta=np.full(p, np.nan), success=False, message="non-finite regression input",
+                n_iter=0, status=NONFINITE,
+            )
+
         # Closed form for identity + l2 (ridge)
-        if self.link == "identity" and self.penalty.penalty in {"l2", "ridge"}:
-            if self.penalty.lam == 0.0:
-                # Ordinary least squares (with pseudo-inverse)
-                theta = np.linalg.pinv(Phi) @ y_
+        if self.link == "identity" and self.penalty.penalty in {None, "l2", "ridge"}:
+            if self.penalty.penalty is None or self.penalty.lam == 0.0:
+                theta = np.linalg.lstsq(Phi, y_, rcond=None)[0]
             elif p > n:
                 # Dual (kernel ridge / Woodbury) form: O(n^3) instead of O(p^3)
                 K = (Phi @ Phi.T) / n
@@ -1033,10 +1039,14 @@ class OutcomeGLM:
                 A = (Phi.T @ Phi) / n + self.penalty.lam * np.eye(p)
                 b = (Phi.T @ y_) / n
                 theta = np.linalg.solve(A, b)
-            self.theta_ = np.asarray(theta, dtype=float)
+            theta = np.asarray(theta, dtype=float)
+            success = bool(np.all(np.isfinite(y_)) and np.all(np.isfinite(theta))
+                           and np.all(np.isfinite(Phi @ theta)))
+            self.theta_ = theta if success else None
             return FitResult(
-                beta=self.theta_, success=True, message="closed_form", n_iter=1,
-                status="closed_form",
+                beta=theta, success=success,
+                message="closed_form" if success else "non-finite least-squares fit",
+                n_iter=1, status="closed_form" if success else NONFINITE,
             )
 
         def fun(theta: NDArray[np.float64]) -> float:

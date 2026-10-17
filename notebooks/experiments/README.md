@@ -1,8 +1,12 @@
-# GRR publication experiment notebooks
+# Historical GRR experiment notebooks
 
-## Paper experiment programme
+The active experiments have moved to `../../experiments/` and use uv and marimo. See [the current experiment README](../../experiments/README.md). Do not use these Jupyter notebooks as the current execution path. Existing data, results, and `CHANGES_2026-10-*.md` work records remain here so their recorded paths and provenance are preserved.
 
-The active programme consists of E-25 (weak-overlap ATT moments), E-24 (nonlinear ATE),
+The instructions below describe earlier programmes. They do not verify the migrated code, and the historical results are not results from the corrected implementation.
+
+## Previous paper experiment programme
+
+The previous programme consisted of E-25 (weak-overlap ATT moments), E-24 (nonlinear ATE),
 E-12 (balance and omitted directions), E-19 (average marginal effect), and E-22 (LaLonde).
 The exact designs and implementation choices are in [CHANGES_2026-10-18.md](CHANGES_2026-10-18.md).
 

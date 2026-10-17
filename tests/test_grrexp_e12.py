@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "notebooks/experiments"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
 from grrexp import e12, study
 
 

@@ -266,10 +266,10 @@ def replicate(task):
     return {"arms": arms, "folds": folds.tolist()}
 
 
-def tasks_for(entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+def tasks_for(entropy=CONFIRMATORY_ENTROPY):
     import sys
 
-    return study.tasks_for(sys.modules[__name__], entropy, reps, cells)
+    return study.tasks_for(sys.modules[__name__], entropy)
 
 
 def summarise(raw):
@@ -297,13 +297,17 @@ def summarise(raw):
             "smd_raw_max",
             "smd_dict_max",
             "wrong_sign_share",
+            "score_concentration",
         ):
             if field in frame:
                 row["primary_" + field] = primary[field]
                 values = sensitivity.loc[ok, field]
                 for q in (0.05, 0.5, 0.95):
                     row[f"sensitivity_{field}_q{int(q * 100):02}"] = values.quantile(q)
-        for field in ("ess_c", "max_abs_alpha", "smd_raw_max", "smd_dict_max", "wrong_sign_share"):
+        for field in (
+            "ess_c", "max_abs_alpha", "smd_raw_max", "smd_dict_max", "wrong_sign_share",
+            "score_concentration",
+        ):
             row.setdefault("primary_" + field, np.nan)
         rows.append(row)
     return pd.DataFrame(rows)
@@ -319,8 +323,19 @@ def tables(summary):
         "primary_ess_c",
         "primary_max_abs_alpha",
         "primary_smd_raw_max",
+        "primary_score_concentration",
     ]
-    return {"tab_E22": summary[cols].to_latex(index=False, escape=True, float_format="%.3f")}
+    concentration = [
+        "arm",
+        "primary_score_concentration",
+        *[f"sensitivity_score_concentration_q{q:02}" for q in (5, 50, 95)],
+    ]
+    return {
+        "tab_E22": summary[cols].to_latex(index=False, escape=True, float_format="%.3f"),
+        "tab_E22_score_concentration": summary.reindex(columns=concentration).to_latex(
+            index=False, escape=True, float_format="%.4f"
+        ),
+    }
 
 
 def figure(summary):

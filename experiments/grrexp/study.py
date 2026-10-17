@@ -90,11 +90,11 @@ def functional_record(result, log):
     }
 
 
-def tasks_for(module, entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+def tasks_for(module, entropy=CONFIRMATORY_ENTROPY):
     return [
         (c, r, entropy)
-        for c in (range(len(module.CELLS)) if cells is None else cells)
-        for r in range(module.R if reps is None else reps)
+        for c in range(len(module.CELLS))
+        for r in range(module.R)
     ]
 
 

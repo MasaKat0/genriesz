@@ -160,10 +160,10 @@ def replicate(task):
     return {"arms": arms, "folds": folds.tolist()}
 
 
-def tasks_for(entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+def tasks_for(entropy=CONFIRMATORY_ENTROPY):
     import sys
 
-    return study.tasks_for(sys.modules[__name__], entropy, reps, cells)
+    return study.tasks_for(sys.modules[__name__], entropy)
 
 
 def summarise(raw):

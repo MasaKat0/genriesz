@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import itertools
 import json
 
@@ -105,11 +106,33 @@ def representer_l2(coef, b0):
     # Nonfinite L2 for an unrestricted logistic estimate is a result, not a fit failure.
     if 2 * b - b0 >= 1:
         return np.inf
+    if a == 0 and b == b0:
+        return 0.0
 
-    def integrand(u):
-        return (np.exp(a) * u ** (-b) - u ** (-b0)) ** 2 / (1 + u ** (-b0)) / pi**2
+    rate = 1 + b0 - 2 * max(b, b0)
+    magnitude = max(abs(np.expm1(a)), -np.expm1(-abs(b - b0) / rate))
 
-    return float(np.sqrt(integrate.quad(integrand, 0.0, 1.0)[0]))
+    def integrand(v):
+        t = v / rate
+        difference = (
+            np.expm1(a) - np.expm1(-(b - b0) * t)
+            if b >= b0
+            else np.expm1(a + (b - b0) * t)
+        )
+        return np.exp(-v) * (difference / magnitude) ** 2 / (1 + np.exp(-b0 * t))
+
+    # u = exp(-v / rate) removes the endpoint singularity without subtracting moments.
+    # Resolve the transition near zero even when the integrability boundary is close.
+    epsrel = inspect.signature(integrate.quad).parameters["epsrel"].default
+    transition_rate = min(b0, abs(b - b0)) if b != b0 else b0
+    split = min(1.0, -np.log(epsrel) * rate / transition_rate)
+    value = 0.0
+    for lo, hi in ((0.0, split), (split, np.inf)):
+        result = integrate.quad(integrand, lo, hi, full_output=True)
+        if len(result) != 3:
+            raise RuntimeError(f"representer L2 quadrature failed: {result[3]}")
+        value += result[0]
+    return float(magnitude * np.sqrt(value / rate) / pi)
 
 
 def att_record(D, Y, odds, g, g1, g0):
@@ -176,10 +199,10 @@ def replicate(task):
     return {"arms": arms, "folds": folds.tolist()}
 
 
-def tasks_for(entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+def tasks_for(entropy=CONFIRMATORY_ENTROPY):
     import sys
 
-    return study.tasks_for(sys.modules[__name__], entropy, reps, cells)
+    return study.tasks_for(sys.modules[__name__], entropy)
 
 
 def quantile_interval(values, q, level=0.95):
@@ -202,10 +225,13 @@ def summarise(raw):
         summary.loc[idx, "coefficient_returned"] = len(errors)
         facts = moment_facts(b0)
         power = 1 - 1 / facts["SQ_stable_index"]
+        reference_scale = (
+            np.sqrt(n) if facts["SQ_score_variance_finite"] else n**power / np.log(n)
+        )
         for name, values in (
             ("slope_error", errors),
             ("root_n_slope_error", errors * np.sqrt(n)),
-            ("SQ_reference_scaled_error", errors * n**power),
+            ("SQ_reference_scaled_error", errors * reference_scale),
         ):
             for q in (0.05, 0.5, 0.95):
                 key = f"{name}_q{int(q * 100):02}"
@@ -223,7 +249,7 @@ def summarise(raw):
             idx, "median_abs_slope_error"
         ] * np.sqrt(n)
         summary.loc[idx, "SQ_reference_median_abs_slope_error"] = (
-            summary.loc[idx, "median_abs_slope_error"] * n**power
+            summary.loc[idx, "median_abs_slope_error"] * reference_scale
         )
         fits = [json.loads(v) for v in frame.full_fit]
         summary.loc[idx, "optimizer_status_counts"] = json.dumps(
