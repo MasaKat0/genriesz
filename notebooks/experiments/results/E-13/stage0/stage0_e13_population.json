@@ -1,0 +1,617 @@
+{
+  "dgp_check": {
+    "E_alpha0_sq": 5.042322853613284,
+    "E_alpha0_sq_registered": 5.0423229,
+    "e_range_exact": [
+      0.13857657496997675,
+      0.9452440525353897
+    ],
+    "e_range_registered": [
+      0.1385765,
+      0.9452441
+    ],
+    "ok": true,
+    "tolerance": 1e-06
+  },
+  "pairs": [
+    {
+      "E_alpha2": 4.61041636572701,
+      "b": 1.7922982786799935e-07,
+      "b_identity_gap": 5.8597015077882595e-15,
+      "beta": [
+        0.6242925540434509,
+        -1.5313145364002745,
+        0.6512088903898537,
+        -6.452715366705005e-19,
+        -0.5965405135573871,
+        -1.491692154186536,
+        0.8136134543019264,
+        1.6217331798088462e-18
+      ],
+      "beta_diff_48_64": 2.2093438190040615e-14,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": true,
+        "i_gradient": false,
+        "ii_iv_positive_definite": true,
+        "iii_margins": true
+      },
+      "compatible": true,
+      "delta": [
+        -6.005512982147101e-08,
+        2.8737983127604655e-07,
+        9.031859744128483e-07,
+        -1.1668643990494599e-19,
+        -4.015189065768024e-08,
+        -1.3530893161135588e-07,
+        -7.28757846643886e-07,
+        6.181603435670031e-20
+      ],
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_abs_alpha": 4.293336025551757,
+      "max_gradient_48": 9.031859738889525e-07,
+      "max_gradient_64": 9.031859743511776e-07,
+      "max_hessian_eig_64": 0.3431489838765822,
+      "message_48": "Optimization terminated successfully.",
+      "message_64": "Optimization terminated successfully.",
+      "min_hessian_eig_64": 0.15685101612342026,
+      "pair": "C-SQ",
+      "sigma2_se": 4.61041636572701,
+      "sigma2_true_arw": 4.610416701876672,
+      "sigma2_true_rw": 4.610416365727042,
+      "status": "ok",
+      "status_48": "ok",
+      "support_margin_kinds": {
+        "dual": "unbounded"
+      },
+      "support_margins": {
+        "dual": null
+      },
+      "theta_star": 1.0000001792298279
+    },
+    {
+      "E_alpha2": 4.737704906554389,
+      "b": -1.2587592947976844e-06,
+      "b_identity_gap": 5.141652620159476e-15,
+      "beta": [
+        0.010816996977390176,
+        -0.7243880866061636,
+        0.3092927674667977,
+        8.817986836487456e-19,
+        0.011458051266473876,
+        -0.7250340442380776,
+        0.42426508394746276,
+        9.404109667021633e-19
+      ],
+      "beta_diff_48_64": 1.8880730312531568e-14,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": true,
+        "i_gradient": false,
+        "ii_iv_positive_definite": true,
+        "iii_margins": true
+      },
+      "compatible": true,
+      "delta": [
+        -3.861158549619561e-06,
+        5.913622031107334e-06,
+        6.389894328426123e-06,
+        -1.200745716939632e-19,
+        -1.3358046135997956e-06,
+        -2.950526600218388e-06,
+        -7.111286690843567e-06,
+        -2.7307299971906826e-20
+      ],
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_abs_alpha": 8.226848268631821,
+      "max_gradient_48": 7.111286691773796e-06,
+      "max_gradient_64": 7.11128669175759e-06,
+      "max_hessian_eig_64": 0.6990875813958722,
+      "message_48": "Optimization terminated successfully.",
+      "message_64": "Optimization terminated successfully.",
+      "min_hessian_eig_64": 0.30164597180041997,
+      "pair": "C-UKL1",
+      "sigma2_se": 4.737704906554389,
+      "sigma2_true_arw": 4.737722900339609,
+      "sigma2_true_rw": 4.737704906555973,
+      "status": "ok",
+      "status_48": "ok",
+      "support_margin_kinds": {
+        "dual": "unbounded"
+      },
+      "support_margins": {
+        "dual": null
+      },
+      "theta_star": 0.9999987412407052
+    },
+    {
+      "E_alpha2": 5.041514938468541,
+      "b": -4.7127265100366245e-05,
+      "b_identity_gap": 3.923253323774578e-16,
+      "beta": [
+        -0.04916819423784914,
+        -0.4254300111400932,
+        0.16421643344838385,
+        1.0156512846019906e-18,
+        0.06485173263893323,
+        -0.4230847023041751,
+        0.22717652192547372,
+        -1.3450876640776747e-19
+      ],
+      "beta_diff_48_64": 1.0158540675320182e-14,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": true,
+        "i_gradient": false,
+        "ii_iv_positive_definite": true,
+        "iii_margins": true
+      },
+      "compatible": true,
+      "delta": [
+        -2.5046446518747074e-05,
+        3.60088360143025e-05,
+        -2.7378973392904855e-05,
+        2.4584366151989456e-19,
+        -2.6417715231120276e-05,
+        -4.2372623947358685e-05,
+        -4.055087905005768e-06,
+        -2.2055530262807653e-19
+      ],
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_reference": 1.0,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_abs_alpha": 52.691611179262196,
+      "max_gradient_48": 4.2372623948889036e-05,
+      "max_gradient_64": 4.237262394325299e-05,
+      "max_hessian_eig_64": 2.316543626378934,
+      "message_48": "Optimization terminated successfully.",
+      "message_64": "Optimization terminated successfully.",
+      "min_hessian_eig_64": 0.4732142728692838,
+      "pair": "C-BKL1",
+      "sigma2_se": 5.041514938468541,
+      "sigma2_true_arw": 5.041522378077623,
+      "sigma2_true_rw": 5.04151494068952,
+      "status": "ok",
+      "status_48": "ok",
+      "support_margin_kinds": {
+        "dual": "finite"
+      },
+      "support_margins": {
+        "dual": 0.03717854274935317
+      },
+      "theta_star": 0.9999528727348996
+    },
+    {
+      "E_alpha2": 4.728482422821014,
+      "b": 0.049451717967953224,
+      "b_identity_gap": 2.636779683484747e-16,
+      "beta": [
+        0.025543327024764615,
+        -0.7256226395923776,
+        0.24636813290861187,
+        8.486949110722006e-19,
+        0.17908602896878373,
+        -0.7358647566785316,
+        0.7398667626220957,
+        1.3293876158106178e-20
+      ],
+      "beta_diff_48_64": 4.2299497238218464e-14,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": true,
+        "i_gradient": false,
+        "ii_isolated": true,
+        "iii_margins": true,
+        "iv_multistart": false
+      },
+      "compatible": false,
+      "delta": [
+        0.003867223540713821,
+        -0.003611244420439125,
+        -0.03701341225628137,
+        -5.908819949165356e-20,
+        0.03661998083939572,
+        0.015626473367705715,
+        0.10415194321622646,
+        -1.7616692980210282e-19
+      ],
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_abs_alpha": 11.7529442231694,
+      "max_gradient_48": 6.516554764134878e-05,
+      "max_gradient_64": 6.516554761604527e-05,
+      "max_hessian_eig_64": 4.894777660412869,
+      "message_48": "Optimization terminated successfully.",
+      "message_64": "Optimization terminated successfully.",
+      "min_hessian_eig_64": 0.2401634288401622,
+      "multistart": [
+        {
+          "max_abs_diff": 0.00012837674197688914,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014297143804660115,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001604305802185048,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00015204622844646257,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014313887468032221,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001340577791169341,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001407588899183347,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014490887329505348,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014411637326940466,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001438474230491954,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014745498758158768,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 9.872662286589118e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001445929667070224,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0001131915310253126,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014452227334206189,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014385927187662156,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014378376875892607,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014338082685322676,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00015695723700747538,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        }
+      ],
+      "multistart_converged": 20,
+      "pair": "I-SQexp",
+      "sigma2_se": 4.728482422821014,
+      "sigma2_true_arw": 4.80640660879803,
+      "sigma2_true_rw": 7.459556435626754,
+      "status": "ok",
+      "status_48": "ok",
+      "support_margin_kinds": {
+        "alpha": "unbounded",
+        "index": "unbounded"
+      },
+      "support_margins": {
+        "alpha": null,
+        "index": null
+      },
+      "theta_star": 1.0494517179679532
+    },
+    {
+      "E_alpha2": 4.732100117676425,
+      "b": 0.0026319175117059945,
+      "b_identity_gap": 4.6438547451899126e-15,
+      "beta": [
+        0.010103979936640785,
+        -0.7251037705739583,
+        0.342939234161272,
+        -4.2198382885326255e-19,
+        0.010060083543883635,
+        -0.7234180819381444,
+        0.3723529739049028,
+        1.4662123866172002e-20
+      ],
+      "beta_diff_48_64": 6.557254739192331e-15,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": true,
+        "i_gradient": false,
+        "ii_isolated": true,
+        "iii_margins": true,
+        "iv_multistart": false
+      },
+      "compatible": false,
+      "delta": [
+        0.002723832582009593,
+        -0.00030424360594431723,
+        0.02029038068557468,
+        -4.892380412460196e-20,
+        0.0030849324422391943,
+        0.0004427551999369234,
+        -0.020751234014157804,
+        -2.6243711140286143e-19
+      ],
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_abs_alpha": 7.596584899914196,
+      "max_gradient_48": 2.042701821826339e-05,
+      "max_gradient_64": 2.0427018218298075e-05,
+      "max_hessian_eig_64": 0.322643220581159,
+      "message_48": "Optimization terminated successfully.",
+      "message_64": "Optimization terminated successfully.",
+      "min_hessian_eig_64": 0.22934875209869723,
+      "multistart": [
+        {
+          "max_abs_diff": 7.870148737343374e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.0,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 8.339508049975963e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 8.468675936074144e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 9.381825023158097e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 5.9736952647007624e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 9.198975894342265e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 9.616292728892306e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 8.148006953906384e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 3.799054322328743e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 5.963390300783855e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 7.245616916107256e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 8.109013573243118e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 5.548658648252269e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 9.181314187090006e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 0.00014109406015167664,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 7.425306152081257e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 8.215088039864593e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 7.57526187675217e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        },
+        {
+          "max_abs_diff": 4.760626113231581e-05,
+          "message": "Optimization terminated successfully.",
+          "status": "ok"
+        }
+      ],
+      "multistart_converged": 20,
+      "pair": "I-BKLexp",
+      "sigma2_se": 4.732100117676425,
+      "sigma2_true_arw": 4.735637638420804,
+      "sigma2_true_rw": 4.787516832192139,
+      "status": "ok",
+      "status_48": "ok",
+      "support_margin_kinds": {
+        "alpha": "finite",
+        "index": "unbounded"
+      },
+      "support_margins": {
+        "alpha": 0.14837814563154672,
+        "index": null
+      },
+      "theta_star": 1.002631917511706
+    },
+    {
+      "beta": [
+        0.0010944141122234473,
+        -0.3863332871449153,
+        0.1920503032097465,
+        5.368193660130138e-20,
+        -0.007052327024902033,
+        0.38650380524812966,
+        -0.17230419420477702,
+        -4.042315391730785e-20
+      ],
+      "beta_diff_48_64": null,
+      "c_n": null,
+      "certified": false,
+      "checks": {
+        "i_beta_diff": false,
+        "i_gradient": false,
+        "ii_isolated": false,
+        "iii_margins": false,
+        "iv_multistart": false
+      },
+      "compatible": false,
+      "diagnostics_48": {
+        "method": "trust-ncg",
+        "weight_sum": 1.0000000000000002,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "diagnostics_64": {
+        "method": "trust-ncg",
+        "weight_sum": 0.9999999999999999,
+        "weight_sum_ok": true,
+        "weight_sum_tolerance": 1e-14
+      },
+      "max_gradient_48": 0.08366175433873015,
+      "max_gradient_64": 0.08969043214468422,
+      "max_hessian_eig_64": null,
+      "message_48": "Maximum number of iterations has been exceeded.",
+      "message_64": "Maximum number of iterations has been exceeded.",
+      "min_hessian_eig_64": null,
+      "pair": "I-UKLlin",
+      "status": "maxit",
+      "status_48": "maxit",
+      "support_margin_kinds": {},
+      "support_margins": {}
+    }
+  ]
+}
