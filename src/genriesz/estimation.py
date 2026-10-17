@@ -452,6 +452,7 @@ def grr_functional(
     alpha: float = 0.05,
     null: float = 0.0,
     expose_alpha_values: bool = False,
+    evaluate_m_alpha: bool = True,
     # Optimizers
     max_iter: int | None = None,
     tol: float | None = None,
@@ -566,6 +567,12 @@ def grr_functional(
         Useful for loss-agnostic model selection via the out-of-fold SQ risk
         ``mean(alpha_hat(X_i)^2 - 2 m(W_i, alpha_hat))``. Default False, which
         leaves the diagnostics unchanged.
+
+    evaluate_m_alpha:
+        Evaluate the functional on the fitted representer. Default True retains
+        this diagnostic. False avoids this computation for estimators that do not
+        require it and omits ``m_alpha_values`` from exposed diagnostics. TMLE
+        always evaluates it. This does not change observed representer values.
 
     Returns
     -------
@@ -1023,15 +1030,17 @@ def grr_functional(
             # m(alpha) is needed for Gaussian TMLE update for any functional.
             # For AME we need derivatives; others only need predict().
             m_alpha_te: NDArray[np.float64] | None
-            try:
-                m_alpha_te = np.asarray(
-                    m.m_from_function(X_te, predict=rep.predict, derivative=rep.derivative),
-                    dtype=float,
-                )
-            except NotImplementedError:
-                # The functional cannot be applied to alpha: TMLE is unavailable.
+            if evaluate_m_alpha or "tmle" in ests:
+                try:
+                    m_alpha_te = np.asarray(
+                        m.m_from_function(X_te, predict=rep.predict, derivative=rep.derivative),
+                        dtype=float,
+                    )
+                except NotImplementedError:
+                    m_alpha_te = None
+                    m_alpha_unavailable = True
+            else:
                 m_alpha_te = None
-                m_alpha_unavailable = True
 
             # For Bernoulli TMLE with treatment-type functionals, cache cf values.
             if "tmle" in ests and outcome_link_ == "logit" and isinstance(
@@ -1247,6 +1256,7 @@ def grr_functional(
     # ------------------------------------------------------------------
     estimates: dict[str, SingleEstimate] = {}
     nonfinite_scores: list[str] = []
+    score_concentration: dict[str, float] = {}
 
     def _pi_correction(theta: float, psi: NDArray[np.float64]) -> NDArray[np.float64]:
         """First-step correction for the estimated pi in ATT/DID functionals.
@@ -1270,6 +1280,10 @@ def grr_functional(
         if not (np.isfinite(est) and np.all(np.isfinite(psi))):
             nonfinite_scores.append(key)
             return
+        top = float(np.max(np.abs(psi)))
+        scaled = psi / top if top > 0 else np.zeros_like(psi)
+        total = float(scaled @ scaled)
+        score_concentration[key] = float(np.max(scaled**2)/total) if total > 0 else float("nan")
         se, lo, hi, p = se_ci_pvalue(est, psi, alpha=alpha, null=null)
         estimates[key] = SingleEstimate(
             name=name,
@@ -1398,7 +1412,7 @@ def grr_functional(
     # ------------------------------------------------------------------
     # Diagnostics: Love plot and balance table
     # ------------------------------------------------------------------
-    diagnostics: dict[str, object] = {}
+    diagnostics: dict[str, object] = {"score_concentration": score_concentration}
 
     alpha_abs = np.abs(alpha_obs)
     diagnostics["alpha_abs_mean"] = float(np.mean(alpha_abs))
@@ -1411,7 +1425,8 @@ def grr_functional(
         # mean(alpha^2 - 2 m(W, alpha)), which needs m(W_i, alpha_hat) and not
         # only alpha_hat(X_i) because m evaluates alpha at counterfactual rows.
         diagnostics["alpha_values"] = np.asarray(alpha_obs, dtype=float).copy()
-        diagnostics["m_alpha_values"] = np.asarray(m_alpha, dtype=float).copy()
+        if evaluate_m_alpha or "tmle" in ests:
+            diagnostics["m_alpha_values"] = np.asarray(m_alpha, dtype=float).copy()
 
     # Design section 9-4: whether the Riesz generator targets a modified estimand.
     # Read together with `riesz_clip_binding_rate_max`: the flag says the target
@@ -1677,6 +1692,7 @@ def rw_full_inference(
     Y: ArrayLike,
     alpha: float = 0.05,
     null: float = 0.0,
+    evaluate_m_alpha: bool = True,
 ) -> SingleEstimate:
     """In-sample Riesz weighting with the registered influence-function SE.
 
@@ -1690,7 +1706,8 @@ def rw_full_inference(
     fitted Riesz basis ``grr.basis``) on the full sample (registration §1.4,
     RW_full). For ATT/DID functionals with ``pi_is_estimated=True`` the
     influence function gains ``-(theta/pi)(D - pi)``, as in
-    :func:`grr_functional`.
+    :func:`grr_functional`. ``evaluate_m_alpha=False`` omits evaluation of
+    the functional on the representer, which the RW influence function does not use.
 
     This differs from ``grr_functional(..., estimators=("rw",))``, whose RW SE
     uses ``alpha_hat * Y - theta`` with cross-fitted ``alpha_hat``. A representer
@@ -1705,8 +1722,8 @@ def rw_full_inference(
     y_ = as_1d_of_length(Y, n=n, name="Y")
     m = grr.functional
     alpha_hat = grr.predict_alpha(X_)
-    # The functional's counterfactual rows must be in the domain too.
-    m.m_from_function(X_, predict=grr.predict_alpha, derivative=grr.derivative_alpha)
+    if evaluate_m_alpha:
+        m.m_from_function(X_, predict=grr.predict_alpha, derivative=grr.derivative_alpha)
     ols = OutcomeGLM(basis=grr.basis, link="identity", penalty="l2", lam=0.0)
     ols.fit(X_, y_)
     gamma = ols.predict(X_)

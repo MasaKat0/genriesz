@@ -30,7 +30,9 @@ def test_architecture_shapes_seed_and_shared_representation():
     for head in net.regression:
         layers = [m for m in head if isinstance(m, torch.nn.Linear)]
         assert [(m.in_features, m.out_features) for m in layers] == [
-            (200, 100), (100, 100), (100, 1)
+            (200, 100),
+            (100, 100),
+            (100, 1),
         ]
     X, _ = sample()
     a, g = net(torch.tensor(X))
@@ -46,20 +48,21 @@ def test_loss_terms_and_gradients_match_equation_five():
         net.epsilon.fill_(0.3)
     X, Y = (torch.tensor(v) for v in sample())
     X1, X0 = X.clone(), X.clone()
-    X1[:, 0], X0[:, 0] = 1., 0.
+    X1[:, 0], X0[:, 0] = 1.0, 0.0
     a, g = net(X)
     a1, _ = net(X1)
     a0, _ = net(X0)
     terms = riesznet.loss_terms(net, X, Y)
-    assert torch.allclose(terms["regression"], ((Y - g)**2).mean())
+    assert torch.allclose(terms["regression"], ((Y - g) ** 2).mean())
     assert torch.allclose(terms["riesz"], (a**2 - 2 * (a1 - a0)).mean())
-    assert torch.allclose(terms["targeted"], ((Y - g - 0.3 * a)**2).mean())
+    assert torch.allclose(terms["targeted"], ((Y - g - 0.3 * a) ** 2).mean())
     pen = 1e-3 * sum(p.square().sum() for name, p in net.named_parameters() if name != "epsilon")
     assert torch.allclose(terms["l2"], pen)
-    assert torch.allclose(terms["total"], terms["regression"] + 0.1 * terms["riesz"]
-                          + terms["targeted"] + pen)
+    assert torch.allclose(
+        terms["total"], terms["regression"] + 0.1 * terms["riesz"] + terms["targeted"] + pen
+    )
     for name in ("regression", "riesz", "targeted"):
-        grad, = torch.autograd.grad(terms[name], net.shared[0].weight, retain_graph=True)
+        (grad,) = torch.autograd.grad(terms[name], net.shared[0].weight, retain_graph=True)
         assert torch.count_nonzero(grad) > 0
     assert torch.autograd.grad(pen, net.epsilon, allow_unused=True)[0] is None
     terms["total"].backward()
@@ -81,8 +84,10 @@ def test_tiny_training_decreases_loss_and_runs_the_published_schedule():
     assert final_loss < initial_loss
     assert info["train_rows"] == len(tr) == 8 and info["validation_rows"] == len(va) == 32
     assert [r["lr"] for r in info["stages"]] == [1e-4, 1e-5]
-    assert all(1 <= r["epochs"] <= cap for r, (_, cap, _) in
-               zip(info["stages"], riesznet.SCHEDULE, strict=True))
+    assert all(
+        1 <= r["epochs"] <= cap
+        for r, (_, cap, _) in zip(info["stages"], riesznet.SCHEDULE, strict=True)
+    )
     assert all(r["best_validation_loss"] <= r["initial_validation_loss"] for r in info["stages"])
     assert info["settings"]["schedule"] == ((1e-4, 100, 2), (1e-5, 600, 40))
     assert info["settings"]["l2"] == 1e-3
@@ -96,7 +101,7 @@ def test_training_nonfinite_and_degenerate_samples_surface():
     X, Y = sample()
     with pytest.raises(FloatingPointError, match="nonfinite"):
         riesznet.fit(101, X, np.full(len(Y), np.nan))
-    X[:, 0] = 0.
+    X[:, 0] = 0.0
     with pytest.raises(ValueError, match="degenerate_functional"):
         riesznet.fit(101, X, Y)
 
@@ -104,7 +109,7 @@ def test_training_nonfinite_and_degenerate_samples_surface():
 def test_riesznet_rep_returns_both_nuisances(monkeypatch):
     X, Y = sample()
     net = riesznet.RieszNet(7, 101)
-    monkeypatch.setattr(riesznet, "fit", lambda seed, Xt, Yt: (net, {"epsilon": 0.}))
+    monkeypatch.setattr(riesznet, "fit", lambda seed, Xt, Yt: (net, {"epsilon": 0.0}))
     rep = e24.fit_riesznet(101, X, Y)
     a, a1, a0, st = rep.at(X)
     assert st == "ok" and a.shape == a1.shape == a0.shape == (40,)
@@ -116,12 +121,14 @@ def test_dr_estimator_uses_sample_sd_and_the_network_regression():
     net = riesznet.RieszNet(7, 101)
     Xt = torch.tensor(X)
     X1, X0 = Xt.clone(), Xt.clone()
-    X1[:, 0], X0[:, 0] = 1., 0.
+    X1[:, 0], X0[:, 0] = 1.0, 0.0
     with torch.no_grad():
         a, g = (p.numpy() for p in net(Xt))
         a1, g1 = (p.numpy() for p in net(X1))
         a0, g0 = (p.numpy() for p in net(X0))
-    (theta, se), _ = e24._scores(X[:, 0], Y, a, a1, a0, g, g1, g0, ddof=1)
+    from grrexp import study
+
     moment = g1 - g0 + a * (Y - g)
-    assert theta == pytest.approx(moment.mean())
-    assert se == pytest.approx(moment.std(ddof=1) / np.sqrt(len(Y)))
+    result = study.score_record(moment, ddof=1)
+    assert result["estimate"] == pytest.approx(moment.mean())
+    assert result["se"] == pytest.approx(moment.std(ddof=1) / np.sqrt(len(Y)))

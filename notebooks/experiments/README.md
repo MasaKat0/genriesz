@@ -1,14 +1,30 @@
 # GRR publication experiment notebooks
 
-## Registered experiments (E-12 to E-24)
+## Paper experiment programme
 
-The experiments of the revised manuscript are registered, before any confirmatory run, in
-`doc/2026-10-07_experiment_registration.md` of the parent repository. They are run from the
-notebooks `10_E12_*` to `22_E24_*` (one experiment per notebook), with the shared code in
-`grrexp/` (seeds, parallel execution, metrics, tests, bootstrap, outputs and manifest) and
-the estimators in genriesz `src/`. The environment is pinned in `requirements-lock.txt`.
-A registered run is started only by `python3 notebooks/experiments/run_registered.py E-xx <stage> <notebook>`, which executes the committed notebook in a fresh single-thread kernel. Outputs go to `results/E-xx/{stage0,pilot,stage1}/` (one directory per stage, written once) and reach the manuscript only through the parent repository's
-`tools/sync_experiment_outputs.py`, which checks the SHA-256 recorded in each manifest.
+The active programme consists of E-25 (weak-overlap ATT moments), E-24 (nonlinear ATE),
+E-12 (balance and omitted directions), E-19 (average marginal effect), and E-22 (LaLonde).
+The exact designs and implementation choices are in [CHANGES_2026-10-18.md](CHANGES_2026-10-18.md).
+
+Run one experiment from the genriesz root:
+
+```bash
+python3 notebooks/experiments/run_registered.py E-25 --n-jobs 2
+```
+
+Each experiment has one execution stage. The default replication count is 500 for
+simulations and 20 predetermined five-fold partitions for LaLonde. Parallel execution
+uses `grrexp.parallel.run_tasks`, with one to four workers (default two). Set
+`GRREXP_MAX_WORKERS_FILE` to a text file containing the desired worker count to adjust
+concurrency during a run, up to the initial `--n-jobs` limit. Workers finish their current
+task before retiring.
+
+Results are written once to `results/programme_20261018/E<number>/run/`. An existing
+output directory is never replaced; `--output` selects a new destination. Each run saves
+source hashes, package versions, seeds, fold assignments, raw replication records including
+failed fits, a manifest, CSV summaries, LaTeX tables and PDF figures. No pilot, bootstrap,
+population fitting stage, prediction test family or parallel bit-identity prerequisite is run.
+Only local data snapshots are read; no data are downloaded by this programme.
 
 ## Superseded notebooks (E-01 to E-11)
 

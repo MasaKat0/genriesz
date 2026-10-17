@@ -83,9 +83,7 @@ def test_sq_self_balance_identity_in_sample():
     res = _fit(expose=True, cross_fit=False, lam=1e-10)
     alpha_values = res.diagnostics["alpha_values"]
     m_alpha_values = res.diagnostics["m_alpha_values"]
-    assert np.isclose(
-        np.mean(alpha_values**2), np.mean(m_alpha_values), rtol=1e-6, atol=1e-8
-    )
+    assert np.isclose(np.mean(alpha_values**2), np.mean(m_alpha_values), rtol=1e-6, atol=1e-8)
 
 
 def test_flag_on_works_for_att():
@@ -98,3 +96,68 @@ def test_flag_on_works_for_att():
     assert m_alpha_values.shape == (res.n,)
     assert np.all(np.isfinite(alpha_values))
     assert np.all(np.isfinite(m_alpha_values))
+
+
+def test_arw_can_omit_the_unused_representer_functional():
+    class OutcomeOnlyATE(ATEFunctional):
+        def m_from_function(self, X, *, predict, derivative=None):
+            if hasattr(getattr(predict, "__self__", None), "grr"):
+                raise AssertionError("ARW does not need the functional of the representer")
+            return super().m_from_function(X, predict=predict, derivative=derivative)
+
+    X, Y = _make_synthetic_ate()
+    res = grr_functional(
+        X=X,
+        Y=Y,
+        m=OutcomeOnlyATE(0),
+        basis=phi,
+        generator=SquaredGenerator(),
+        estimators=("arw",),
+        expose_alpha_values=True,
+        evaluate_m_alpha=False,
+    )
+    reference = grr_functional(
+        X=X, Y=Y, m=ATEFunctional(0), basis=phi, generator=SquaredGenerator(), estimators=("arw",)
+    )
+    assert res.success and res["arw"].estimate == reference["arw"].estimate
+    assert "alpha_values" in res.diagnostics and "m_alpha_values" not in res.diagnostics
+
+
+def test_score_concentration_uses_the_att_share_correction():
+    X, Y = _make_synthetic_ate()
+    D = X[:, 0]
+    pi = D.mean()
+    res = grr_functional(
+        X=X,
+        Y=Y,
+        m=ATTFunctional(treatment_index=0, pi=pi, pi_is_estimated=True),
+        basis=phi,
+        generator=SquaredGenerator(),
+        estimators=("rw",),
+        expose_alpha_values=True,
+        evaluate_m_alpha=False,
+    )
+    assert res.success
+    theta = res["rw"].estimate
+    psi = res.diagnostics["alpha_values"] * Y - theta - theta / pi * (D - pi)
+    expected = np.max(psi**2) / np.sum(psi**2)
+    assert np.isclose(res.diagnostics["score_concentration"]["rw"], expected)
+
+
+def test_rw_full_can_use_only_observed_representer_values(monkeypatch):
+    from genriesz import GRRGLM, CallableBasis, rw_full_inference
+
+    X, Y = _make_synthetic_ate()
+    model = GRRGLM(
+        basis=CallableBasis(phi), generator=SquaredGenerator(), functional=ATEFunctional(0)
+    )
+    assert model.fit(X).success
+    original = model.predict_alpha
+
+    def observed(rows):
+        assert np.array_equal(rows, X), "unneeded counterfactual representer"
+        return original(rows)
+
+    monkeypatch.setattr(model, "predict_alpha", observed)
+    result = rw_full_inference(grr=model, X=X, Y=Y, evaluate_m_alpha=False)
+    assert np.isfinite([result.estimate, result.se]).all()

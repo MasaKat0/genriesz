@@ -1,92 +1,24 @@
-"""E-24: controlled nonlinear benchmark (B type; H24-Base, H24-GRR; U19).
-
-Design: doc/2026-10-07_experiment_registration.md (parent repository), E-24, §1.2,
-§1.4 (ARW, TMLE, AutoDML-lasso), §1.5 and §1.9 (bootstrap family 7). U28: the
-document is a design, not a binding registration; the choices it leaves open are
-recorded in ``docs/spec/02_data-and-experiments.md`` §2.1 ("E-24 の" rows) and in
-the docstrings below.
-
-There are no Stage 0 predictions (B type). Stage 0 checks the design constants by
-quadrature and records ``E[alpha0^2]`` and the efficiency bound.
-
-Arms (all cross-fitted with ``K = 5``; common outcome except DML-GBM and RieszNet):
-
-- GRR: SQ, UKL(C=1), BKL(C=1), BP(0.5, C=0), offset ``alpha_ref = +-2``, ridge
-  ``lambda`` tuned on pilot data, Nystrom features with treatment interaction;
-- RieszNet: shared representation, RR and regression heads, multitask loss and
-  targeted regularisation (Chernozhukov et al., ICML 2022, §3 and Appendix A.1);
-- AutoDML: the CNS lasso procedure of §1.4 on the degree-2 dictionary (``p = 56``);
-- EB: UKL(C=0), ``lambda = 0``, degree-2 polynomials with treatment interaction;
-- LogitAIPW: l2-penalised logistic propensity on the Nystrom features;
-- DML-GBM: gradient boosting for the propensity (Z) and the outcome (D, Z).
-
-Matched arms use SQ, UKL(C=0), UKL(C=1), BKL(C=1) and BP(C=0): degree-2
-polynomials with lambda=0 or inner-CV ridge, and Nystrom with inner-CV ridge.
-They share the observations, folds, outcome predictions, grid and selection rule.
-Each arm reports cross-fitted ARW (primary) and TMLE (descriptive). RieszNet uses
-its own jointly learned regression for the DR estimator of the cited paper, §5.
-"""
+"""E-24: nonlinear ATE benchmark with nested tuning and published RieszNet."""
 
 from __future__ import annotations
 
-import collections
 import itertools
-import json
 
 import numpy as np
 
-from . import baselines, metrics
-from .seeds import Seeds, fold_ids
+from . import baselines, study
+from .seeds import CONFIRMATORY_ENTROPY, Seeds, fold_ids
 
-EXP = 24
+EXP, R, K, CV_FOLDS = 24, 500, 5, 3
 THETA0 = 1.0
-N_VALUES = (1000, 2000, 4000, 8000)
-CELLS = [[n] for n in N_VALUES]  # registered order
-R = 1000
-K = 5
-CV_FOLDS = 5
-PZ = 6
-SQRT3 = np.sqrt(3.0)
-
-GRR_ARMS = ("SQ", "UKL1", "BKL1", "BP_C0")
-BASELINE_ARMS = ("RieszNet", "AutoDML", "EB", "LogitAIPW", "DML-GBM")
-EXISTING_ARMS = GRR_ARMS + BASELINE_ARMS
-MATCHED_GENERATORS = ("SQ", "UKL0", "UKL1", "BKL1", "BP_C0")
-MATCHED_GROUPS = {
-    "H24-Poly0": tuple(f"{a}_poly_lam0" for a in MATCHED_GENERATORS),
-    "H24-PolyCV": tuple(f"{a}_poly_cv" for a in MATCHED_GENERATORS),
-    "H24-NysCV": tuple(f"{a}_nys_cv" for a in MATCHED_GENERATORS),
-}
-MATCHED_ARMS = tuple(a for group in MATCHED_GROUPS.values() for a in group)
-MATCHED_SPECS = {
-    name: (a, dictionary, tuned)
-    for dictionary, suffix, tuned in (("poly", "lam0", False), ("poly", "cv", True),
-                                      ("nys", "cv", True))
-    for a in MATCHED_GENERATORS for name in (f"{a}_{dictionary}_{suffix}",)
-}
-ARMS = EXISTING_ARMS + MATCHED_ARMS
-ESTIMATORS = ("ARW_cf", "TMLE_cf")
-ARM_LABELS = [f"{a}|{e}" for a in ARMS for e in ESTIMATORS]
-
-#: registered design constants (outward-rounded)
-ETA_BOUND = 3.8784610
-E_RANGE = (0.0202635, 0.9797365)
-ALPHA0_BOUND = 49.349747
-
-# tuning grids (registration E-24)
-LAMBDA_GRID = (1e-4, 1e-3, 1e-2, 1e-1, 1.0)  # GRR ridge and the common outcome ridge
-C_GRID = (0.01, 0.1, 1.0, 10.0, 100.0)  # LogitAIPW inverse l2 strength
-N_CENTRES = 100
-EIG_FLOOR = 1e-8  # relative eigenvalue floor of K(C, C)
-
-# AutoDML-lasso (§1.4)
-CNS_C = (1.0, 0.1, 0.1)
-CNS_LOADING_SHIFT = 0.2
-
-# comparisons (registration E-24)
-COMMON_SUCCESS_MIN = 0.95
-FAMILY_LEVEL = 0.05
-COVERAGE_BAND = 0.0069  # 2 MCSE at c = 0.95 and R = 1000
+N_VALUES = (1000, 4000)
+CELLS = [[n] for n in N_VALUES]
+PZ, SQRT3 = 6, np.sqrt(3.0)
+GRR_ARMS = ("SQ", "UKL1", "UKL0", "BP_C0", "BKL1")
+ARMS = GRR_ARMS + ("LogitAIPW", "DML-GBM", "RieszNet")
+ARM_LABELS = ARMS
+LAMBDA_GRID = (1e-3, 1e-2, 1e-1)
+C_GRID = (0.1, 1.0, 10.0)
 
 
 def gr():
@@ -99,14 +31,8 @@ def sign(A):
     return np.where(np.atleast_2d(A)[:, 0] == 1, 1, -1)
 
 
-sign.vectorized = True
-
-
 def alpha_ref(X):
     return np.where(np.atleast_2d(X)[:, 0] == 1, 2.0, -2.0)
-
-
-# ---------------------------------------------------------------- DGP
 
 
 def eta(Z):
@@ -132,7 +58,6 @@ def gamma0(D, Z):
 
 
 def draw(rng, n):
-    """Z ~ Unif(-sqrt3, sqrt3)^6, D ~ Bern(e(Z)), Y = gamma0(D, Z) + N(0, 1)."""
     Z = rng.uniform(-SQRT3, SQRT3, size=(n, PZ))
     D = (rng.uniform(size=n) < propensity(Z)).astype(float)
     Y = gamma0(D, Z) + rng.standard_normal(n)
@@ -144,63 +69,7 @@ def _arms_rows(Z):
     return np.column_stack([np.ones(n), Z]), np.column_stack([np.zeros(n), Z])
 
 
-# ---------------------------------------------------------------- Stage 0
-
-
-def stage0(points=(48, 64)):
-    """Design checks by tensor Gauss-Legendre quadrature in ``(z1, z2, z3, z4)``.
-
-    ``alpha0`` depends on ``Z`` only through ``eta(z1, ..., z4)``; ``tau`` only
-    through ``z1 + z4``. Returns the quadrature values at both grid sizes, their
-    differences, and the checks of the registered bounds (the bound of ``|eta|``
-    is the exact maximum ``1.2 sqrt3 + 1.8`` of its terms, attained at a vertex).
-    """
-    out = {"points": {}}
-    for m in points:
-        x, w = np.polynomial.legendre.leggauss(m)
-        z, wz = SQRT3 * x, w / 2.0
-        g = np.meshgrid(z, z, z, z, indexing="ij")
-        W = np.einsum("i,j,k,l->ijkl", wz, wz, wz, wz).ravel()
-        Zq = np.zeros((W.size, PZ))
-        for j in range(4):
-            Zq[:, j] = g[j].ravel()
-        e = propensity(Zq)
-        t = tau(Zq)
-        e_alpha2 = float(np.sum(W * (1.0 / e + 1.0 / (1.0 - e))))
-        theta = float(np.sum(W * t))
-        var_tau = float(np.sum(W * (t - theta) ** 2))
-        out["points"][str(m)] = {
-            "E_alpha0_sq": e_alpha2,
-            "theta0": theta,
-            "var_tau": var_tau,
-            # efficiency bound of the ATE with Var(Y | X) = 1
-            "V_star": e_alpha2 + var_tau,
-        }
-    a, b = (out["points"][str(m)] for m in points)
-    out["differences"] = {k: abs(a[k] - b[k]) for k in a}
-    eta_max = 1.2 * SQRT3 + 1.8
-    e_lo = 1.0 / (1.0 + np.exp(eta_max))
-    out["eta_max_exact"] = eta_max
-    out["reference"] = {"eta_bound": ETA_BOUND, "e_range": list(E_RANGE),
-                        "alpha0_bound": ALPHA0_BOUND, "theta0": THETA0}
-    out["tolerances"] = {"eta_bound": 1e-6, "theta0": 1e-10, "quadrature_agreement": 1e-6}
-    out["checks"] = {
-        "eta_bound_outward": bool(ETA_BOUND >= eta_max and ETA_BOUND - eta_max < 1e-6),
-        "e_range_outward": bool(E_RANGE[0] <= e_lo and E_RANGE[1] >= 1.0 - e_lo),
-        "alpha0_bound_outward": bool(ALPHA0_BOUND >= 1.0 / e_lo),
-        "theta0": bool(abs(b["theta0"] - THETA0) <= 1e-10),
-        "quadrature_agreement": bool(all(v <= 1e-6 for v in out["differences"].values())),
-    }
-    out["ok"] = bool(all(out["checks"].values()))
-    return out
-
-
-# ---------------------------------------------------------------- features
-
-
 def poly2(Z):
-    """Non-constant monomials of total degree <= 2 in z1..z6, in degree-then-lexicographic
-    order (z1, ..., z6, z1^2, z1 z2, ..., z6^2): 27 columns (§1.4, E-24 dictionary)."""
     Z = np.atleast_2d(Z)
     cols = [Z[:, j] for j in range(PZ)]
     cols += [Z[:, i] * Z[:, j] for i, j in itertools.combinations_with_replacement(range(PZ), 2)]
@@ -208,62 +77,10 @@ def poly2(Z):
 
 
 def cns_dictionary(X):
-    """b = (1, D, monomials, D x monomials), p = 56 (§1.4)."""
     X = np.atleast_2d(X)
     D, Z = X[:, 0], X[:, 1:]
     mono = poly2(Z)
     return np.column_stack([np.ones(len(X)), D, mono, D[:, None] * mono])
-
-
-class Nystrom:
-    """Nystrom features ``K(z, C) K(C, C)^{-1/2}`` of the Gaussian kernel.
-
-    Fixed per ``n`` from the pilot sample: 100 centres drawn uniformly without
-    replacement, ``Z`` standardised by the pilot mean and SD, bandwidth the median
-    pairwise distance of the standardised pilot ``Z``, kernel
-    ``exp(-|z - z'|^2 / (2 h^2))``; eigenvalues below ``1e-8`` times the largest
-    are dropped (pseudo inverse square root).
-    """
-
-    def __init__(self, Z_pilot, rng):
-        Z_pilot = np.asarray(Z_pilot, dtype=float)
-        self.mean = Z_pilot.mean(axis=0)
-        self.sd = Z_pilot.std(axis=0, ddof=1)
-        S = (Z_pilot - self.mean) / self.sd
-        idx = np.sort(rng.choice(len(S), size=N_CENTRES, replace=False))
-        self.centres = S[idx]
-        self.bandwidth = float(_median_pairwise_distance(S))
-        Kcc = self._kernel(self.centres, self.centres)
-        lam, U = np.linalg.eigh(Kcc)
-        keep = lam >= EIG_FLOOR * lam.max()
-        self.map = U[:, keep] / np.sqrt(lam[keep])
-        self.dim = int(keep.sum())
-
-    def _kernel(self, A, B):
-        d2 = np.sum(A**2, axis=1)[:, None] + np.sum(B**2, axis=1)[None, :] - 2.0 * A @ B.T
-        return np.exp(-np.maximum(d2, 0.0) / (2.0 * self.bandwidth**2))
-
-    def __call__(self, Z):
-        S = (np.atleast_2d(Z) - self.mean) / self.sd
-        return self._kernel(S, self.centres) @ self.map
-
-    def base(self, Z):
-        """(1, Nystrom features): the per-arm features of the GRR and outcome models."""
-        F = self(Z)
-        return np.column_stack([np.ones(len(F)), F])
-
-
-def _median_pairwise_distance(S, chunk=1000):
-    """Exact median of the ``n(n-1)/2`` pairwise Euclidean distances."""
-    n = len(S)
-    parts = []
-    for a in range(0, n, chunk):
-        A = S[a : a + chunk]
-        d2 = np.sum(A**2, 1)[:, None] + np.sum(S**2, 1)[None, :] - 2.0 * A @ S.T
-        rows = np.arange(a, a + len(A))[:, None]
-        mask = np.arange(n)[None, :] > rows
-        parts.append(np.sqrt(np.maximum(d2[mask], 0.0)))
-    return float(np.median(np.concatenate(parts)))
 
 
 def interaction(base, X):
@@ -271,9 +88,6 @@ def interaction(base, X):
     D = X[:, :1]
     B = base(X[:, 1:])
     return np.concatenate([D * B, (1.0 - D) * B], axis=1)
-
-
-# ---------------------------------------------------------------- representers
 
 
 def generator(arm):
@@ -284,26 +98,12 @@ def generator(arm):
         "UKL1": lambda: g.UKLGenerator(C=1.0, branch_fn=sign),
         "BKL1": lambda: g.BKLGenerator(C=1.0, branch_fn=sign),
         "BP_C0": lambda: g.BPGenerator(omega=0.5, C=0.0, branch_fn=sign),
-        "EB": lambda: g.UKLGenerator(C=0.0, branch_fn=sign),
     }[arm]()
 
 
 def glm_model(arm, base, lam):
-    """GRRGLM of a GRR arm (ridge ``lam``) or of EB (``lam = 0``, degree-2 basis)."""
     g = gr()
     gen = generator(arm)
-    # Objective: mean(g*(u_ref + Phi beta)) - mean(m(W, Phi))' beta
-    # + (lambda/2)*sum(beta_j^2), up to the fixed offset moment. All generators
-    # use this sample-mean normalisation, without multiplying a generator's loss.
-    # Offset: u_ref = g'(alpha_ref), alpha_ref = +2 for D=1 and -2 for D=0.
-    # The ridge penalises every dual-coordinate deviation, including both arm
-    # intercepts. The outcome ridge separately leaves its intercepts unpenalised.
-    # Phi = (D*B, (1-D)*B), with B's first column equal to one. Polynomial B is
-    # (1, raw degree-1 and degree-2 monomials), with no centring or rescaling.
-    # This is exactly EB's dictionary and the same span as CNS AutoDML's b;
-    # CNS's lasso and its coefficient coordinates are not a matched ridge arm.
-    # Nystrom uses the same frozen pilot mean, SD, centres and eigenvalue map
-    # for every arm; no additional column scaling is applied.
     basis = g.TreatmentInteractionBasis(base_basis=g.CallableBasis(base))
     return g.GRRGLM(
         basis=basis, generator=gen, functional=g.ATEFunctional(0),
@@ -318,14 +118,10 @@ def poly_base(Z):
 
 
 class Rep:
-    """A fitted representer: ``alpha`` at observed rows and at both counterfactual arms."""
-
     def __init__(self, status, fn=None, info=None):
         self.status, self.fn, self.info = status, fn, info or {}
 
     def at(self, X):
-        """``(alpha(X), alpha(1, Z), alpha(0, Z), status)``; a domain violation or a
-        non-finite value at any of these rows is a failure (§1.3 B)."""
         X1, X0 = _arms_rows(X[:, 1:])
         return self.fn(X, X1, X0)
 
@@ -336,7 +132,7 @@ def fit_glm(arm, base, lam, X_tr):
     mdl = glm_model(arm, base, lam)
     fr = mdl.fit(X_tr)
     if fr.status != "ok":
-        return Rep(str(fr.status))
+        return Rep(str(fr.status), info={"message": str(fr.message), "status": str(fr.status)})
 
     def fn(X, X1, X0):
         a, outside, nonfinite = mdl.classify(np.vstack([X, X1, X0]))
@@ -347,85 +143,19 @@ def fit_glm(arm, base, lam, X_tr):
         n = len(X)
         return a[:n], a[n : 2 * n], a[2 * n :], "ok"
 
-    return Rep("ok", fn, {"n_iter": int(fr.n_iter)})
+    rep = Rep(
+        "ok", fn, {"n_iter": int(fr.n_iter), "message": str(fr.message), "status": str(fr.status)}
+    )
 
+    def observed(X):
+        a, outside, nonfinite = mdl.classify(X)
+        status = (
+            "nonfinite" if np.any(nonfinite) else ("domain_prediction" if np.any(outside) else "ok")
+        )
+        return a, status
 
-def fit_autodml(X_tr, *, max_iter=None, tol=None, inner_options=None):
-    """CNS Appendix A.1.1/A.2 (registration §1.4), on the degree-2 dictionary."""
-    b = cns_dictionary(X_tr)
-    X1, X0 = _arms_rows(X_tr[:, 1:])
-    mb = cns_dictionary(X1) - cns_dictionary(X0)  # m(W, b_j) for the ATE
-    n, p = b.shape
-    G = b.T @ b / n
-    M = mb.mean(axis=0)
-    low = max(2, int(np.ceil(p / 40)))
-    rho = np.zeros(p)
-    rho[:low] = np.linalg.solve(G[:low, :low], M[:low])
-    from scipy.stats import norm
-
-    c1, c2, c3 = CNS_C
-    r_l = c1 / np.sqrt(n) * norm.ppf(1.0 - c2 / (2.0 * p))
-    from .e15 import loading_fit
-
-    status, rho, result = loading_fit(b, mb, G, M, rho, r_l, c3, CNS_LOADING_SHIFT,
-                                      max_iter=max_iter, tol=tol, inner_options=inner_options)
-    if status != "ok":
-        return Rep(status, None, result)
-
-    def fn(X, X1, X0):
-        a = cns_dictionary(X) @ rho
-        a1 = cns_dictionary(X1) @ rho
-        a0 = cns_dictionary(X0) @ rho
-        if not np.all(np.isfinite(np.concatenate([a, a1, a0]))):
-            return None, None, None, "nonfinite"
-        return a, a1, a0, "ok"
-
-    info = {
-        "outer_iterations": result["outer"],
-        "outer_cap_reached": 0,
-        "inner_sweeps_max": result["inner_iterations_max"],
-    }
-    return Rep("ok", fn, info)
-
-
-def _cns_coordinate_descent(G, M, w, rho, *, max_iter=None, tol=None, options=None):
-    """CNS fixed-loading quadratic and exact weighted l1 objective."""
-    from .e15 import coordinate_descent
-
-    coef, iterations, _ = coordinate_descent(G, M, np.asarray(w) / 2.0, rho,
-                                            max_iter=max_iter, tol=tol, options=options)
-    return coef, iterations
-
-
-def fit_logit(base_nys, C, X_tr, *, max_iter=None, tol=None):
-    """l2-penalised logistic propensity on the Nystrom features (``C`` tuned)."""
-    from sklearn.linear_model import LogisticRegression
-
-    clf = LogisticRegression(C=float(C), penalty="l2", solver="lbfgs",
-                             **baselines.solver_parameters(max_iter, tol))
-    clf.fit(base_nys(X_tr[:, 1:]), X_tr[:, 0])
-
-    def fn(X, X1, X0):
-        e = clf.predict_proba(base_nys(X[:, 1:]))[:, 1]
-        if not np.all((e > 1e-12) & (e < 1 - 1e-12)):
-            return None, None, None, "propensity_range"
-        D = X[:, 0]
-        return D / e - (1 - D) / (1 - e), 1.0 / e, -1.0 / (1.0 - e), "ok"
-
-    return Rep("ok", fn)
-
-
-def fit_gbm_propensity(params, seed, X_tr):
-    clf = baselines._gbm_classifier(params, seed).fit(X_tr[:, 1:], X_tr[:, 0])
-
-    def fn(X, X1, X0):
-        e = clf.predict_proba(X[:, 1:])[:, 1]
-        if not np.all((e > 0) & (e < 1)):
-            return None, None, None, "propensity_range"
-        D = X[:, 0]
-        return D / e - (1 - D) / (1 - e), 1.0 / e, -1.0 / (1.0 - e), "ok"
-
-    return Rep("ok", fn)
+    rep.observed = observed
+    return rep
 
 
 def _torch():
@@ -437,7 +167,6 @@ def _torch():
 
 
 def fit_riesznet(seed, X_tr, Y_tr):
-    """RieszNet §3 and Appendix A.1; returns both jointly trained nuisances."""
     from . import riesznet
 
     torch = _torch()
@@ -445,10 +174,7 @@ def fit_riesznet(seed, X_tr, Y_tr):
 
     def fn(Xe, Xe1, Xe0):
         with torch.no_grad():
-            a = [
-                net(torch.as_tensor(r, dtype=torch.float64))[0].numpy()
-                for r in (Xe, Xe1, Xe0)
-            ]
+            a = [net(torch.as_tensor(r, dtype=torch.float64))[0].numpy() for r in (Xe, Xe1, Xe0)]
         if not all(np.all(np.isfinite(v)) for v in a):
             return None, None, None, "nonfinite"
         return a[0], a[1], a[2], "ok"
@@ -457,22 +183,13 @@ def fit_riesznet(seed, X_tr, Y_tr):
 
     def outcome(X):
         with torch.no_grad():
-            # Section 5's DR estimator uses g, not g + epsilon*alpha; epsilon
-            # enters Eq. (5) while fitting. The separately reported E-24 TMLE
-            # still applies the post-fit fluctuation in _scores.
             return net(torch.as_tensor(X, dtype=torch.float64))[1].numpy()
 
     rep.outcome = outcome
     return rep
 
 
-# ---------------------------------------------------------------- outcome models
-
-
 class Ridge:
-    """Least squares on the Nystrom features with treatment interaction, ridge ``lam``
-    on every coefficient except the two arm intercepts: ``mean (y - F b)^2 + lam |b|^2``."""
-
     def __init__(self, base, lam, X_tr, Y_tr):
         F = interaction(base, X_tr)
         n, q = F.shape
@@ -487,764 +204,216 @@ class Ridge:
         return interaction(self.base, X) @ self.coef
 
 
-class GBMOutcome:
-    def __init__(self, params, seed, X_tr, Y_tr):
-        self.reg = baselines._gbm_regressor(params, seed).fit(X_tr, Y_tr)
-
-    def __call__(self, X):
-        return self.reg.predict(X)
-
-
-# ---------------------------------------------------------------- tuning on pilot data
-
-
 def riesz_criterion(a, a1, a0):
-    """Held-out squared Riesz criterion ``sum alpha(X)^2 - 2 m(W, alpha)`` (sum, not mean)."""
     return float(np.sum(a**2 - 2.0 * (a1 - a0)))
 
 
-def _cv_select(grid, score_fn, tie):
-    """``score_fn(value) -> (total held-out loss, failures)``. A value with any failed CV
-    fit or evaluation (a status other than ok, any recorded warning, a domain or
-    non-finite prediction) is not eligible; ``failures`` lists ``[fold, status,
-    warnings]`` of each. ``tie``: ``"larger"`` or ``"smaller"`` grid value wins exact
-    ties. Returns ``(choice or None, record)``."""
-    record = {}
-    for v in grid:
-        score, failures = score_fn(v)
-        record[repr(v)] = {"score": score, "failures": failures}
-    ok = {v: record[repr(v)]["score"] for v in grid if not record[repr(v)]["failures"]}
-    ok = {v: s for v, s in ok.items() if s is not None and np.isfinite(s)}
-    if not ok:
-        return None, record
-    best = min(ok.values())
-    winners = [v for v, s in ok.items() if s == best]
-    return (max(winners) if tie == "larger" else min(winners)), record
+sign.vectorized = True
 
 
-def _cv_failures(record):
-    return sum(len(r["failures"]) for r in record.values())
+def fit_logit(C, X):
+    from sklearn.linear_model import LogisticRegression
 
+    clf = LogisticRegression(C=C)
+    clf.fit(poly2(X[:, 1:]), X[:, 0])
 
-def fit_matched(arm, base_nys, X_tr, cv):
-    """Outer-training-only inner CV, common splits and criterion for matched arms.
+    def predict(A, A1, A0):
+        e = clf.predict_proba(poly2(A[:, 1:]))[:, 1]
+        if not np.all((e > 0) & (e < 1)):
+            return None, None, None, "propensity_range"
+        return A[:, 0] / e - (1 - A[:, 0]) / (1 - e), 1 / e, -1 / (1 - e), "ok"
 
-    The grid is LAMBDA_GRID; the held-out squared Riesz criterion is summed over
-    all inner held-out rows. Exact ties prefer larger lambda, as in tune(). A
-    candidate with a failed or warned fit or evaluation is ineligible. Every
-    candidate's score and failure record, and the choice, are retained per fold.
-    The frozen pilot determines only the Nystrom dictionary, never this lambda.
-    """
-    gen, dictionary, tuned = MATCHED_SPECS[arm]
-    base = poly_base if dictionary == "poly" else base_nys
-    if not tuned:
-        return fit_glm(gen, base, 0.0, X_tr)
-
-    def score(lam):
-        total, failures = 0.0, []
-        for k in range(CV_FOLDS):
-            tr, te = cv != k, cv == k
-
-            def evaluate(tr=tr, te=te):
-                rep = fit_glm(gen, base, lam, X_tr[tr])
-                if rep.status != "ok":
-                    return rep.status, None
-                a, a1, a0, st = rep.at(X_tr[te])
-                return (st, None) if st != "ok" else (st, riesz_criterion(a, a1, a0))
-
-            (st, loss), counts, _ = baselines.run_recording_warnings(evaluate)
-            if st == "ok" and counts:
-                st = "warning"
-            if st == "ok" and not np.isfinite(loss):
-                st = "nonfinite"
-            if st != "ok":
-                failures.append([k, st, counts])
-            else:
-                total += loss
-        return (None if failures else total), failures
-
-    lam, record = _cv_select(LAMBDA_GRID, score, "larger")
-    info = {"lambda": lam, "cv_scores": record, "cv_failures": _cv_failures(record)}
-    if lam is None:
-        return Rep("cv_failed", info=info)
-    rep = fit_glm(gen, base, lam, X_tr)
-    rep.info.update(info)
+    rep = Rep("ok", predict)
+    rep.propensity = lambda Z: clf.predict_proba(poly2(Z))[:, 1]
     return rep
 
 
-def tune(cell, entropy):
-    """Pilot data (stream 5, size ``n``), its 5-fold CV split and the Nystrom centres all
-    come from the stream-5 generator, in that order; the RieszNet and GBM seeds are
-    the next draws of the same generator. Returns the frozen per-``n`` choices with the
-    held-out score and the failed fits of every candidate."""
+def select(grid, evaluate):
+    records = []
+    for value in grid:
+        result, warnings, converged = baselines.run_recording_warnings(
+            lambda value=value: evaluate(value)
+        )
+        score, status = result[:2]
+        if not converged:
+            status = "convergence_warning"
+        if status == "ok" and not np.isfinite(score):
+            status = "nonfinite"
+        records.append(
+            {
+                "value": value,
+                "score": score,
+                "status": status,
+                "warnings": warnings,
+                "fits": result[2] if len(result) > 2 else [],
+            }
+        )
+    # A failed tuning calculation is retained as a failure of this procedure.
+    if any(r["status"] != "ok" for r in records):
+        return None, records
+    return min(records, key=lambda r: (r["score"], -r["value"]))["value"], records
+
+
+def tune_representer(arm, X, cv):
     from sklearn.metrics import log_loss
 
-    (n,) = CELLS[cell]
-    rng = Seeds(EXP, entropy=entropy).pilot(cell)
-    D, Z, Y = draw(rng, n)
-    X = np.column_stack([D, Z])
-    cv = fold_ids(n, CV_FOLDS, rng)
-    nys = Nystrom(Z, rng)
-    nn_seed = int(rng.integers(2**31 - 1))
-    gbm_seed = int(rng.integers(2**31 - 1))
-    base = nys.base
-    folds = [(cv != k, cv == k) for k in range(CV_FOLDS)]
-    warn = collections.Counter()
-
-    def rec(fn):
-        res, counts, _ = baselines.run_recording_warnings(fn)
-        warn.update(counts)
-        return res, counts
-
-    out = {"n": n, "nystrom_dim": nys.dim, "bandwidth": nys.bandwidth, "lambda": {}, "scores": {}}
-
-    def cv_score(fold_loss):
-        """``fold_loss(tr, te) -> (status, loss)``, run under warning recording."""
-        total, failures = 0.0, []
-        for k, (tr, te) in enumerate(folds):
-            (status, loss), counts = rec(lambda tr=tr, te=te: fold_loss(tr, te))
-            if status == "ok" and counts:
-                status = "warning"
-            if status == "ok" and not np.isfinite(loss):
-                status = "nonfinite"
-            if status != "ok":
-                failures.append([k, status, counts])
-                continue
-            total += loss
-        return (None if failures else total), failures
-
-    def riesz_loss(make):
-        def fold_loss(tr, te):
-            rep = make(X[tr])
-            if rep.status != "ok":
-                return rep.status, None
-            a, a1, a0, st = rep.at(X[te])
-            return (st, None) if st != "ok" else ("ok", riesz_criterion(a, a1, a0))
-
-        return cv_score(fold_loss)
-
-    for arm in GRR_ARMS:
-        lam, sc = _cv_select(
-            LAMBDA_GRID,
-            lambda lam, arm=arm: riesz_loss(lambda Xt: fit_glm(arm, base, lam, Xt)),
-            "larger",
-        )
-        out["scores"][arm] = sc
-        if lam is None:
-            raise RuntimeError(f"E-24 tuning: no eligible lambda for {arm} at n = {n}: {sc}")
-        out["lambda"][arm] = lam
-
-    # RieszNet uses Appendix A.1's fixed L2, loss weights and training schedule;
-    # it is not tuned on the pilot or with the representer-only Riesz criterion.
-    from .riesznet import L2
-
-    out["weight_decay"] = L2
-
-    def logit_loss(C):
-        from sklearn.linear_model import LogisticRegression
-
-        def fold_loss(tr, te):
-            clf = LogisticRegression(
-                C=float(C), penalty="l2", solver="lbfgs"
+    def evaluate(value):
+        total, fits = 0.0, []
+        for k in range(CV_FOLDS):
+            tr, va = cv != k, cv == k
+            rep = (
+                fit_logit(value, X[tr])
+                if arm == "LogitAIPW"
+                else fit_glm(arm, poly_base, value, X[tr])
             )
-            clf.fit(nys(Z[tr]), D[tr])
-            p = clf.predict_proba(nys(Z[te]))[:, 1]
-            if not np.all(np.isfinite(p)):
-                return "nonfinite", None
-            return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
+            fits.append({"fold": k, "status": rep.status, **rep.info})
+            if rep.status != "ok":
+                return None, rep.status, fits
+            if arm == "LogitAIPW":
+                total += len(X[va]) * log_loss(X[va, 0], rep.propensity(X[va, 1:]), labels=[0, 1])
+            else:
+                a, a1, a0, status = rep.at(X[va])
+                if status != "ok":
+                    return None, status, fits
+                total += riesz_criterion(a, a1, a0)
+        return total, "ok", fits
 
-        return cv_score(fold_loss)
-
-    c, sc = _cv_select(C_GRID, logit_loss, "smaller")
-    out["scores"]["LogitAIPW"] = sc
-    if c is None:
-        raise RuntimeError(f"E-24 tuning: no eligible C at n = {n}: {sc}")
-    out["logit_C"] = c
-
-    def outcome_loss(lam):
-        def fold_loss(tr, te):
-            pred = Ridge(base, lam, X[tr], Y[tr])(X[te])
-            if not np.all(np.isfinite(pred)):
-                return "nonfinite", None
-            return "ok", float(np.sum((pred - Y[te]) ** 2))
-
-        return cv_score(fold_loss)
-
-    lam, sc = _cv_select(LAMBDA_GRID, outcome_loss, "larger")
-    out["scores"]["outcome"] = sc
-    if lam is None:
-        raise RuntimeError(f"E-24 tuning: no eligible outcome lambda at n = {n}: {sc}")
-    out["outcome_lambda"] = lam
-
-    # GBM (the E-12 grid, ties to the earlier grid point), each model, candidate and fold
-    # under the same rule as above: a warned or failed CV fit makes the candidate ineligible
-    DZ = np.column_stack([D, Z])
-    order = {params: i for i, params in enumerate(baselines.GBM_GRID)}
-
-    def gbm_prop_loss(params):
-        def fold_loss(tr, te):
-            clf = baselines._gbm_classifier(params, gbm_seed).fit(Z[tr], D[tr])
-            p = clf.predict_proba(Z[te])[:, 1]
-            if not np.all(np.isfinite(p)):
-                return "nonfinite", None
-            return "ok", float(log_loss(D[te], p, labels=[0, 1]) * te.sum())
-
-        return cv_score(fold_loss)
-
-    def gbm_out_loss(params):
-        def fold_loss(tr, te):
-            pred = baselines._gbm_regressor(params, gbm_seed).fit(DZ[tr], Y[tr]).predict(DZ[te])
-            if not np.all(np.isfinite(pred)):
-                return "nonfinite", None
-            return "ok", float(np.sum((pred - Y[te]) ** 2))
-
-        return cv_score(fold_loss)
-
-    def earliest(grid, loss):
-        choice, record = _cv_select(grid, loss, "smaller")
-        if choice is None:
-            return None, record
-        best = record[repr(choice)]["score"]
-        tied = [
-            v for v in grid if not record[repr(v)]["failures"] and record[repr(v)]["score"] == best
-        ]
-        return min(tied, key=order.get), record
-
-    prop, sc = earliest(baselines.GBM_GRID, gbm_prop_loss)
-    out["scores"]["GBM-propensity"] = sc
-    outc, sc2 = earliest(baselines.GBM_GRID, gbm_out_loss)
-    out["scores"]["GBM-outcome"] = sc2
-    if prop is None or outc is None:
-        raise RuntimeError(f"E-24 tuning: no eligible GBM candidate at n = {n}")
-    out["gbm"] = {"propensity": list(prop), "outcome": list(outc), "seed": gbm_seed}
-    out["nn_seed"] = nn_seed
-    out["warnings"] = dict(warn)
-    out["cv_failures"] = int(sum(_cv_failures(s) for s in out["scores"].values()))
-    out["nystrom"] = {
-        "mean": nys.mean.tolist(), "sd": nys.sd.tolist(), "centres": nys.centres.tolist(),
-        "bandwidth": nys.bandwidth,
-    }  # fmt: skip
-    return out
+    choice, record = select(C_GRID if arm == "LogitAIPW" else LAMBDA_GRID, evaluate)
+    if choice is None:
+        return Rep("cv_failed", info={"cv": record})
+    rep = fit_logit(choice, X) if arm == "LogitAIPW" else fit_glm(arm, poly_base, choice, X)
+    rep.info.update(choice=choice, cv=record)
+    return rep
 
 
-class Frozen:
-    """The per-``n`` tuning choices, rebuilt in a worker from the JSON of :func:`tune`."""
+def tune_outcome(X, Y, cv):
+    def evaluate(lam):
+        total = 0.0
+        for k in range(CV_FOLDS):
+            tr, va = cv != k, cv == k
+            model = Ridge(poly_base, lam, X[tr], Y[tr])
+            total += float(np.sum((Y[va] - model(X[va])) ** 2))
+        return total, "ok"
 
-    def __init__(self, t):
-        self.t = t
-        nys = Nystrom.__new__(Nystrom)
-        nys.mean = np.asarray(t["nystrom"]["mean"])
-        nys.sd = np.asarray(t["nystrom"]["sd"])
-        nys.centres = np.asarray(t["nystrom"]["centres"])
-        nys.bandwidth = float(t["nystrom"]["bandwidth"])
-        Kcc = nys._kernel(nys.centres, nys.centres)
-        lam, U = np.linalg.eigh(Kcc)
-        keep = lam >= EIG_FLOOR * lam.max()
-        nys.map = U[:, keep] / np.sqrt(lam[keep])
-        nys.dim = int(keep.sum())
-        self.nys = nys
-
-
-# ---------------------------------------------------------------- one replication
-
-
-def _failed(status, **extra):
-    return {"estimate": float("nan"), "se": float("nan"), "status": status, **extra}
-
-
-def _scores(D, Y, a, a1, a0, g, g1, g0, ddof=0):
-    """ARW and TMLE (§1.4) from cross-fitted alpha and gamma (each length n)."""
-    n = len(Y)
-    psi = g1 - g0 + a * (Y - g)
-    theta = float(np.mean(psi))
-    arw = (theta, float(np.std(psi - theta, ddof=ddof) / np.sqrt(n)))
-    eps = float(np.sum(a * (Y - g)) / np.sum(a**2))
-    gs, gs1, gs0 = g + eps * a, g1 + eps * a1, g0 + eps * a0
-    th_t = float(np.mean(gs1 - gs0))
-    psi_t = gs1 - gs0 + a * (Y - gs) - th_t
-    tmle = (th_t, float(np.std(psi_t, ddof=ddof) / np.sqrt(n)))
-    return arw, tmle
+    choice, record = select(LAMBDA_GRID, evaluate)
+    return (None if choice is None else Ridge(poly_base, choice, X, Y)), {
+        "choice": choice,
+        "cv": record,
+    }
 
 
 def replicate(task):
-    """One replication of one cell, every arm. ``task = (cell, rep, entropy, tuning_json)``."""
-    cell, rep, entropy, tj = task
-    (n,) = CELLS[cell]
-    fz = Frozen(json.loads(tj))
-    t = fz.t
-    seeds = Seeds(EXP, entropy=entropy)
+    from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor
+
+    cell, rep, entropy = task
+    n = CELLS[cell][0]
+    seeds = Seeds(EXP, entropy)
     D, Z, Y = draw(seeds.data(cell, rep), n)
     X = np.column_stack([D, Z])
     folds = fold_ids(n, K, seeds.folds(cell, rep))
-    brng = seeds.baseline(cell, rep)
-    nn_seeds = [int(s) for s in brng.integers(2**31 - 1, size=K)]
-    gbm_seed = int(brng.integers(2**31 - 1))
-    # Stream 2 is separate from the original data, outer-fold and baseline streams.
-    # Generate one common inner partition per outer training fold for all matched arms.
-    inner_rng = seeds.inner_cv(cell, rep)
-    inner = [fold_ids(int(np.sum(folds != k)), CV_FOLDS, inner_rng) for k in range(K)]
-    base = fz.nys.base
-    nys = fz.nys
-    gbm_p, gbm_o = tuple(t["gbm"]["propensity"]), tuple(t["gbm"]["outcome"])
-    makers = {
-        **{
-            arm: (lambda Xt, k, arm=arm: fit_glm(arm, base, t["lambda"][arm], Xt))
-            for arm in GRR_ARMS
-        },
-        "RieszNet": lambda Xt, k: fit_riesznet(nn_seeds[k], Xt, Y[folds != k]),
-        "AutoDML": lambda Xt, k: fit_autodml(Xt),
-        "EB": lambda Xt, k: fit_glm("EB", poly_base, 0.0, Xt),
-        "LogitAIPW": lambda Xt, k: fit_logit(nys, t["logit_C"], Xt),
-        "DML-GBM": lambda Xt, k: fit_gbm_propensity(gbm_p, gbm_seed, Xt),
-        **{arm: (lambda Xt, k, arm=arm: fit_matched(arm, base, Xt, inner[k]))
-           for arm in MATCHED_ARMS},
-    }
-    A = {arm: np.full((3, n), np.nan) for arm in ARMS}
-    G = {key: np.full((3, n), np.nan) for key in ("common", "gbm", "RieszNet")}
-    status = {arm: "ok" for arm in ARMS}
-    fold_status = {arm: [] for arm in ARMS}
-    warns = {arm: collections.Counter() for arm in ARMS}
-    info = {arm: collections.defaultdict(int) for arm in ARMS}
-    fold_info = {arm: [] for arm in (*MATCHED_ARMS, "RieszNet")}
-    out_warn = collections.Counter()
-    X1, X0 = _arms_rows(Z)
-    out_status = {"common": "ok", "gbm": "ok"}
+    inner = seeds.inner_cv(cell, rep)
+    learner_seeds = seeds.baseline(cell, rep).integers(0, 2**31 - 1, size=(K, len(ARMS)))
+    psi = {a: np.empty(n) for a in ARMS}
+    alpha = {a: np.empty(n) for a in ARMS}
+    status = dict.fromkeys(ARMS, "ok")
+    info = {a: [] for a in ARMS}
+    inner_folds = []
     for k in range(K):
         tr, te = folds != k, folds == k
-        if not (np.any(D[tr] == 1) and np.any(D[tr] == 0)):
-            for arm in ARMS:
-                if status[arm] == "ok":
-                    fold_status[arm].append([k, "degenerate_functional"])
-                    status[arm] = "degenerate_functional"
-            break
-        for key, make in (
-            ("common", lambda tr=tr: Ridge(base, t["outcome_lambda"], X[tr], Y[tr])),
-            ("gbm", lambda tr=tr: GBMOutcome(gbm_o, gbm_seed, X[tr], Y[tr])),
-        ):
-            if out_status[key] != "ok":
-                continue
+        Xt = X[te]
+        X1, X0 = _arms_rows(Xt[:, 1:])
+        cv = fold_ids(int(tr.sum()), CV_FOLDS, inner)
+        inner_folds.append({"outer_fold": k, "folds": cv.tolist()})
 
-            def predict(make=make, te=te):
-                mdl = make()
-                return [mdl(X[te]), mdl(X1[te]), mdl(X0[te])]
+        def fit_common_outcome(tr=tr, cv=cv):
+            outcome, tuning = tune_outcome(X[tr], Y[tr], cv)
+            return {
+                "estimate": 0.0,
+                "se": 0.0,
+                "status": "ok" if outcome else "cv_failed",
+                "model": outcome,
+                "tuning": tuning,
+            }
 
-            preds, counts, converged = baselines.run_recording_warnings(predict)
-            out_warn.update(counts)
-            if not converged:
-                out_status[key] = "convergence_warning"
-            elif not all(np.all(np.isfinite(p)) for p in preds):
-                out_status[key] = "outcome_nonfinite"
-            else:
-                G[key][:, te] = preds
-                continue
-            for arm in ARMS:
-                if (status[arm] == "ok" and arm != "RieszNet"
-                        and (key == "gbm") == (arm == "DML-GBM")):
-                    fold_status[arm].append([k, f"outcome {out_status[key]}"])
-                    status[arm] = out_status[key]
+        common = study.recorded(fit_common_outcome)
         for arm in ARMS:
             if status[arm] != "ok":
                 continue
-            rep_, counts, converged = baselines.run_recording_warnings(
-                lambda arm=arm, tr=tr, k=k: makers[arm](X[tr], k)
-            )
-            warns[arm].update(counts)
-            if arm in fold_info:
-                fold_info[arm].append({"fold": k, **rep_.info})
-            st = rep_.status
-            if st == "ok" and not converged:
-                st = "convergence_warning"
-            if st == "ok":
-                (a, a1, a0, st), counts, conv2 = baselines.run_recording_warnings(
-                    lambda rep_=rep_, te=te: rep_.at(X[te])
-                )
-                warns[arm].update(counts)
-                if st == "ok" and not conv2:
-                    st = "convergence_warning"
-                if st == "ok":
-                    A[arm][:, te] = [a, a1, a0]
-                    if arm == "RieszNet":
-                        preds, counts, conv = baselines.run_recording_warnings(
-                            lambda rep_=rep_, te=te: [rep_.outcome(rows)
-                                                     for rows in (X[te], X1[te], X0[te])]
-                        )
-                        warns[arm].update(counts)
-                        if not conv:
-                            st = "convergence_warning"
-                        elif not all(np.all(np.isfinite(p)) for p in preds):
-                            st = "outcome_nonfinite"
-                        else:
-                            G["RieszNet"][:, te] = preds
-                for key, v in (rep_.info.items() if arm not in fold_info else ()):
-                    info[arm][key] = (
-                        max(info[arm][key], v) if key != "outer_cap_reached" else info[arm][key] + v
+            seed = int(learner_seeds[k, ARMS.index(arm)])
+
+            def run(arm=arm, common=common, tr=tr, te=te, cv=cv, Xt=Xt, X1=X1, X0=X0, seed=seed):
+                if arm in GRR_ARMS or arm == "LogitAIPW":
+                    if common["status"] != "ok":
+                        return study.failed(common["status"], outcome_tuning=common["tuning"])
+                    representation = tune_representer(arm, X[tr], cv)
+                    if representation.status != "ok":
+                        return study.failed(representation.status, representer=representation.info)
+                    if hasattr(representation, "observed"):
+                        a, st = representation.observed(Xt)
+                    else:
+                        a, _, _, st = representation.at(Xt)
+                    if st != "ok":
+                        return study.failed(st, representer=representation.info)
+                    outcome = common["model"]
+                    details = {
+                        "representer": representation.info,
+                        "outcome_tuning": common["tuning"],
+                    }
+                elif arm == "DML-GBM":
+                    clf = HistGradientBoostingClassifier(random_state=seed).fit(Z[tr], D[tr])
+                    e = clf.predict_proba(Z[te])[:, 1]
+                    if not np.all((e > 0) & (e < 1)):
+                        return study.failed("propensity_range")
+                    a = D[te] / e - (1 - D[te]) / (1 - e)
+                    reg = HistGradientBoostingRegressor(random_state=seed).fit(X[tr], Y[tr])
+                    outcome, details = reg.predict, {"seed": seed}
+                else:
+                    representation = fit_riesznet(seed, X[tr], Y[tr])
+                    a, _, _, st = representation.at(Xt)
+                    if st != "ok":
+                        return study.failed(st, training=representation.info)
+                    outcome, details = (
+                        representation.outcome,
+                        {"training": representation.info, "seed": seed},
                     )
-            fold_status[arm].append([k, st])
-            if st != "ok":
-                status[arm] = st
-    out = {}
-    for arm in ARMS:
-        outcome_warn = {} if arm == "RieszNet" else dict(out_warn)
-        common = {
-            "fold_status": json.dumps(fold_status[arm]),
-            "warnings": json.dumps({"fit": dict(warns[arm]), "outcome": outcome_warn}),
-            "n_warnings": int(sum(warns[arm].values()) + sum(outcome_warn.values())),
-            "info": json.dumps({"folds": fold_info[arm]} if arm in fold_info else dict(info[arm])),
-        }
-        if status[arm] != "ok":
-            for e in ESTIMATORS:
-                out[f"{arm}|{e}"] = _failed(status[arm], **common)
-            continue
-        g = G["gbm" if arm == "DML-GBM" else "RieszNet" if arm == "RieszNet" else "common"]
-        a, a1, a0 = A[arm]
-        (arw, tmle), counts, _ = baselines.run_recording_warnings(
-            lambda a=a, a1=a1, a0=a0, g=g, arm=arm: _scores(
-                D, Y, a, a1, a0, *g, ddof=1 if arm == "RieszNet" else 0
-            )  # RieszNet §5: sample SD of the DR moment divided by sqrt(n).
-        )
-        warns[arm].update(counts)
-        common["warnings"] = json.dumps({"fit": dict(warns[arm]), "outcome": outcome_warn})
-        common["n_warnings"] = int(sum(warns[arm].values()) + sum(outcome_warn.values()))
-        extra = {"max_abs_alpha": float(np.max(np.abs(a))), "ess": metrics.ess(a)}
-        for e, (th, se) in (("ARW_cf", arw), ("TMLE_cf", tmle)):
-            if np.isfinite(th) and np.isfinite(se):
-                out[f"{arm}|{e}"] = {"estimate": th, "se": se, "status": "ok", **extra, **common}
-            else:
-                out[f"{arm}|{e}"] = _failed("nonfinite", **common)
-    return out
-
-
-def tasks_for(entropy, reps, tunings, cells=None):
-    cells = range(len(CELLS)) if cells is None else cells
-    return [(ci, r, entropy, tunings[ci]) for ci in cells for r in range(reps)]
-
-
-# ---------------------------------------------------------------- aggregation
-
-NUMERIC_FIELDS = ("estimate", "se", "max_abs_alpha", "ess", "n_warnings")
-TEXT_FIELDS = ("status", "warnings", "fold_status", "info")
-
-
-def raw_frame(tasks, results):
-    import pandas as pd
-
-    rows = []
-    for (ci, rep, _, _), res in zip(tasks, results, strict=True):
-        (n,) = CELLS[ci]
-        for label in ARM_LABELS:
-            r = res[label]
-            rows.append(
-                {
-                    "cell": ci, "n": n, "rep": rep, "arm": label,
-                    **{k: float(r.get(k, np.nan)) for k in NUMERIC_FIELDS},
-                    **{k: str(r.get(k, "")) for k in TEXT_FIELDS},
+                score = outcome(X1) - outcome(X0) + a * (Y[te] - outcome(Xt))
+                if not np.isfinite(score).all():
+                    return study.failed("nonfinite", **details)
+                return {
+                    "estimate": 0.0,
+                    "se": 0.0,
+                    "status": "ok",
+                    "score": score,
+                    "alpha": a,
+                    **details,
                 }
-            )  # fmt: skip
-    return pd.DataFrame(rows)
+
+            record = study.recorded(run)
+            status[arm] = record["status"]
+            if status[arm] == "ok":
+                psi[arm][te], alpha[arm][te] = record.pop("score"), record.pop("alpha")
+            info[arm].append({"fold": k, **record})
+    arms = {}
+    for arm in ARMS:
+        if status[arm] != "ok":
+            arms[arm] = study.failed(status[arm], fits=info[arm])
+        else:
+            a = alpha[arm]
+            arms[arm] = study.score_record(
+                psi[arm],
+                ddof=1 if arm == "RieszNet" else 0,
+                fits=info[arm],
+                max_abs_alpha=float(np.max(np.abs(a))),
+                ess=float(np.sum(np.abs(a)) ** 2 / np.sum(a**2)),
+            )
+    return {"arms": arms, "folds": folds.tolist(), "inner_folds": inner_folds}
 
 
-def total_warnings(raw):
-    # one count per arm record; the outcome warnings are repeated across arms, so count
-    # them from the ARW rows of one arm per replication only once
-    fit = 0
-    outcome = 0
-    for lab, g in raw.groupby("arm"):
-        if not lab.endswith("ARW_cf"):
-            continue
-        for w in g["warnings"]:
-            d = json.loads(w)
-            fit += sum(d["fit"].values())
-        if lab == f"{ARMS[0]}|ARW_cf":
-            outcome = sum(sum(json.loads(w)["outcome"].values()) for w in g["warnings"])
-    return int(fit + outcome)
+def tasks_for(entropy=CONFIRMATORY_ENTROPY, reps=None, cells=None):
+    import sys
+
+    return study.tasks_for(sys.modules[__name__], entropy, reps, cells)
 
 
 def summarise(raw):
-    """§1.5 metrics per cell x arm|estimator, in the registered order."""
-    import pandas as pd
-
-    from .e12 import POSITIVE_VARIANCE, moment_status
-
-    rows = []
-    for ci, (n,) in enumerate(CELLS):
-        for label in ARM_LABELS:
-            g = raw[(raw["cell"] == ci) & (raw["arm"] == label)].sort_values("rep")
-            if g.empty:
-                continue
-            ok = (g["status"] == "ok").to_numpy()
-            est, se = g["estimate"].to_numpy(), g["se"].to_numpy()
-            arm, _, estimator = label.partition("|")
-            row = {"cell": ci, "n": n, "arm": label, "method": arm, "estimator": estimator}
-            row.update(metrics.failure_rate(ok))
-            row.update(metrics.coverage(est, se, ok, THETA0))
-            row["coverage_close_to_nominal"] = bool(abs(row["coverage"] - 0.95) <= COVERAGE_BAND)
-            row["status_counts"] = json.dumps(
-                dict(sorted(collections.Counter(g["status"]).items()))
-            )
-            infos = [json.loads(s) for s in g["info"] if s]
-            if any("outer_cap_reached" in d for d in infos):
-                row["cns_outer_cap_folds"] = int(sum(d.get("outer_cap_reached", 0) for d in infos))
-                row["cns_inner_sweeps_max"] = int(max(d.get("inner_sweeps_max", 0) for d in infos))
-            if ok.sum() >= 1:
-                row.update(metrics.ci_length(se, ok))
-                row.update(metrics.max_weight_summary(g["max_abs_alpha"].to_numpy(), ok))
-                row["ess_median"] = float(g.loc[ok, "ess"].median())
-            if ok.sum() >= 2:
-                row.update(metrics.bias(est, ok, THETA0))
-                row["rmse"] = metrics.rmse(est, ok, THETA0)
-                row["sd"] = float(est[ok].std(ddof=1))
-                row["root_n_sd"] = float(np.sqrt(n) * row["sd"])
-                ms = row["moment_status"] = moment_status(est[ok])
-                if ms in POSITIVE_VARIANCE:
-                    row["se_ratio"] = metrics.se_ratio(est, se, ok)
-                if ms == "ok":
-                    row.update(metrics.root_n_sd(est, ok, n))
-            rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def comparisons():
-    """The registered comparisons in call order: H24-Base (for each n, GRR arm, baseline),
-    then H24-GRR (for each n, generator pair in GRR order)."""
-    base = [("H24-Base", n, a, b) for n in N_VALUES for a in GRR_ARMS for b in BASELINE_ARMS]
-    pairs = [("H24-GRR", n, a, b) for n in N_VALUES for a, b in itertools.combinations(GRR_ARMS, 2)]
-    matched = [(fam, n, a, b) for fam, arms in MATCHED_GROUPS.items()
-               for n in N_VALUES for a, b in itertools.combinations(arms, 2)]
-    # Append matched comparisons so the original family-7 draw order is retained.
-    return base + pairs + matched
-
-
-def compare(raw, seeds):
-    """Paired bootstrap tests of ``log(RMSE_A / RMSE_B)`` of the ARW estimators (family 7).
-
-    A comparison whose common-success rate is below 95% is not evaluable: it is not
-    tested, consumes no draws, and stays in its family as a non-rejecting entry
-    (``p = 1``) so that the Holm multiplicity does not depend on the outcome.
-    Returns a list of dicts in :func:`comparisons` order.
-    """
-    from .bootstrap import FamilyBootstrap, centred_pvalue, log_rmse_ratio_counts
-
-    boot = FamilyBootstrap(seeds, 7)
-    arw = raw[raw["arm"].str.endswith("|ARW_cf")]
-    present = set(int(v) for v in raw["n"].unique())
-    out = []
-    for fam, n, a, b in comparisons():
-        if n not in present:  # the per-cell aggregation of Stage 0.5
-            continue
-        ga = arw[(arw["n"] == n) & (arw["arm"] == f"{a}|ARW_cf")].sort_values("rep")
-        gb = arw[(arw["n"] == n) & (arw["arm"] == f"{b}|ARW_cf")].sort_values("rep")
-        both = (ga["status"].to_numpy() == "ok") & (gb["status"].to_numpy() == "ok")
-        rate = float(both.mean())
-        rec = {"family": fam, "n": n, "A": a, "B": b, "common_success": rate}
-        if rate < COMMON_SUCCESS_MIN:
-            rec.update({"evaluable": False, "T": float("nan"), "p": 1.0})
-        else:
-            ea = ga["estimate"].to_numpy()[both] - THETA0
-            eb = gb["estimate"].to_numpy()[both] - THETA0
-            t_hat = 0.5 * (np.log(np.sum(ea**2)) - np.log(np.sum(eb**2)))
-            draws = boot.replicate(log_rmse_ratio_counts(ea, eb), len(ea), mode="counts")
-            rec.update(
-                {
-                    "evaluable": True,
-                    "T": float(t_hat),
-                    "rmse_A": float(np.sqrt(np.mean(ea**2))),
-                    "rmse_B": float(np.sqrt(np.mean(eb**2))),
-                    "p": centred_pvalue(draws, t_hat),
-                }
-            )
-        out.append(rec)
-    from .inference import holm
-
-    for fam in ("H24-Base", "H24-GRR", *MATCHED_GROUPS):
-        idx = [i for i, r in enumerate(out) if r["family"] == fam]
-        if not idx:
-            continue
-        rej = holm([out[i]["p"] for i in idx], FAMILY_LEVEL)
-        for i, r in zip(idx, rej, strict=True):
-            out[i]["rejected"] = bool(r)
-    return out
-
-
-def family_sentences(comps):
-    res = {}
-    for fam, none in (
-        ("H24-Base", "no difference from the registered baselines was detected"),
-        ("H24-GRR", "no difference between generators was detected"),
-        *((fam, "no difference between matched generators was detected")
-          for fam in MATCHED_GROUPS),
-    ):
-        rows = [r for r in comps if r["family"] == fam]
-        rej = [r for r in rows if r["rejected"]]
-        res[fam] = {
-            "tests": len(rows),
-            "evaluable": int(sum(r["evaluable"] for r in rows)),
-            "rejected": len(rej),
-            "sentence": none if not rej else f"{len(rej)} of {len(rows)} comparisons rejected",
-        }
-    return res
-
-
-# ---------------------------------------------------------------- outputs
-
-LABEL = {
-    "SQ": "SQ", "UKL1": "UKL ($C=1$)", "BKL1": "BKL ($C=1$)", "BP_C0": "BP ($C=0$)",
-    "UKL0": "UKL ($C=0$)",
-    "RieszNet": "RieszNet", "AutoDML": "AutoDML-lasso", "EB": "EB",
-    "LogitAIPW": "LogitAIPW", "DML-GBM": "DML-GBM",
-}  # fmt: skip
-LABEL.update({name: f"{LABEL[gen]} ({dictionary}, " + ("CV)" if tuned else "$\\lambda=0$)")
-              for name, (gen, dictionary, tuned) in MATCHED_SPECS.items()})
-END = " \\\\"
-
-
-def _fmt(x, d=3):
-    return "--" if x is None or x != x else f"{float(x):.{d}f}"
-
-
-def _metrics_table(S, arms):
-    """Metrics table with the supplied arm order."""
-    heads = [
-        "Method",
-        "Estimator",
-        "$n$",
-        "Bias",
-        "SD",
-        "RMSE",
-        "Coverage",
-        "CI length",
-        "Fail \\%",
-    ]
-    head = ["\\hline", " & ".join(heads) + END, "\\hline"]
-    lines = ["\\begin{tabular}{llrrrrrrr}", *head, "\\endfirsthead", *head, "\\endhead"]
-    for arm in arms:
-        for e in ESTIMATORS:
-            for n in N_VALUES:
-                r = S[(S["arm"] == f"{arm}|{e}") & (S["n"] == n)].iloc[0]
-                lines.append(
-                    " & ".join(
-                        [
-                            LABEL[arm], "ARW" if e == "ARW_cf" else "TMLE", str(n),
-                            _fmt(r.get("bias")), _fmt(r.get("sd")), _fmt(r.get("rmse")),
-                            _fmt(r.get("coverage")), _fmt(r.get("ci_length_mean")),
-                            f"{100 * r['failure_rate']:.1f}",
-                        ]
-                    )
-                    + END
-                )  # fmt: skip
-    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
-
-
-def _comparisons_table(comps):
-    """Paired RMSE comparisons, with a separate family per matched condition."""
-    heads = ["Family", "$n$", "A", "B", "Common success", "RMSE$_A$/RMSE$_B$", "$p$", "Rejected"]
-    head = ["\\hline", " & ".join(heads) + END, "\\hline"]
-    lines = ["\\begin{tabular}{lrllrrrl}", *head, "\\endfirsthead", *head, "\\endhead"]
-    for r in comps:
-        ratio = np.exp(r["T"]) if r["evaluable"] else float("nan")
-        lines.append(
-            " & ".join(
-                [
-                    r["family"], str(r["n"]), LABEL[r["A"]], LABEL[r["B"]],
-                    _fmt(r["common_success"]), _fmt(ratio),
-                    "--" if not r["evaluable"] else f"{r['p']:.2e}",
-                    "yes" if r["rejected"] else ("not evaluable" if not r["evaluable"] else "no"),
-                ]
-            )
-            + END
-        )  # fmt: skip
-    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
-
-
-def tables(S, comps):
-    """Keep existing comparisons and dictionary-and-ridge-matched ones in separate tables.
-
-    The matched polynomial lambda=0 UKL0 arm is EB; SQ is unpenalised linear
-    Riesz regression. The CV block compares ridge linear Riesz regression to
-    ridge UKL and the other generators. AutoDML-lasso remains in the existing
-    table: its lasso penalty is not the ridge or lambda=0 condition.
-    """
-    out = {
-        "tab_E24": _metrics_table(S, EXISTING_ARMS),
-        "tab_E24_comparisons": _comparisons_table(
-            [r for r in comps if r["family"] not in MATCHED_GROUPS]
-        ),
-        "tab_E24_matched": _metrics_table(S, MATCHED_ARMS),
-        "tab_E24_matched_comparisons": _comparisons_table(
-            [r for r in comps if r["family"] in MATCHED_GROUPS]
-        ),
-    }
-    if "cns_outer_cap_folds" in S:
-        out["tab_E24_autodml"] = autodml_table(S)
-    return out
-
-
-def autodml_table(S):
-    """``tab_E24_autodml``: AutoDML-lasso stopping (design §1.4), one count per fitted
-    training fold; the ARW and TMLE rows share the same fits, so the ARW rows are used."""
-    r = S[(S["arm"] == "AutoDML|ARW_cf") & S["cns_outer_cap_folds"].notna()]
-    lines = ["\\begin{tabular}{rrr}", "\\hline",
-             "$n$ & Folds at the outer cap & Largest number of sweeps" + END, "\\hline"]
-    for x in r.itertuples():
-        lines.append(f"{int(x.n)} & {int(x.cns_outer_cap_folds)} of {int(x.R) * K} & "
-                     f"{int(x.cns_inner_sweeps_max)}" + END)
-    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
-
-
-def macros(S, comps):
-    fam = family_sentences(comps)
-    return {
-        "EXXIVR": str(R),
-        "EXXIVBaseTests": str(fam["H24-Base"]["tests"]),
-        "EXXIVBaseEvaluable": str(fam["H24-Base"]["evaluable"]),
-        "EXXIVBaseRejected": str(fam["H24-Base"]["rejected"]),
-        "EXXIVGRRTests": str(fam["H24-GRR"]["tests"]),
-        "EXXIVGRREvaluable": str(fam["H24-GRR"]["evaluable"]),
-        "EXXIVGRRRejected": str(fam["H24-GRR"]["rejected"]),
-    }
-
-
-def figure(S):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(figsize=(5.5, 3.6))
-    for arm in EXISTING_ARMS:
-        g = S[S["arm"] == f"{arm}|ARW_cf"].sort_values("n")
-        ax.plot(g["n"], g["rmse"], marker="o", label=LABEL[arm].replace("$", ""),
-                linestyle="-" if arm in GRR_ARMS else "--")  # fmt: skip
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-    ax.set_xticks(list(N_VALUES))
-    ax.set_xticklabels([str(n) for n in N_VALUES])
-    ax.set_xlabel("$n$")
-    ax.set_ylabel("RMSE of the ARW estimator")
-    ax.legend(fontsize=7, ncol=2, frameon=False)
-    fig.tight_layout()
-    return fig
-
-
-def tune_task(task):
-    """``(cell, entropy)`` -> the JSON of :func:`tune` (importable for process parallelism)."""
-    cell, entropy = task
-    return json.dumps(tune(cell, entropy), sort_keys=True)
-
-
-def tuning_table(tunings):
-    """Pilot choices and fixed RieszNet L2; matched lambdas are recorded per outer fold."""
-    from .riesznet import L2
-
-    heads = ["$n$"] + [f"$\\lambda$ {LABEL[a]}" for a in GRR_ARMS] + [
-        "RieszNet L2", "LogitAIPW $C$", "Outcome $\\lambda$", "Nystr\\\"om dim.",
-    ]  # fmt: skip
-    spec = "r" * len(heads)
-    lines = ["\\begin{tabular}{" + spec + "}", "\\hline", " & ".join(heads) + END, "\\hline"]
-    for tj in tunings:
-        t = json.loads(tj)
-        cells = [str(t["n"])] + [f"{t['lambda'][a]:g}" for a in GRR_ARMS] + [
-            f"{L2:g}", f"{t['logit_C']:g}", f"{t['outcome_lambda']:g}",
-            str(t["nystrom_dim"]),
-        ]  # fmt: skip
-        lines.append(" & ".join(cells) + END)
-    return "\n".join(lines + ["\\hline", "\\end{tabular}"]) + "\n"
+    return study.summarise(raw, THETA0)

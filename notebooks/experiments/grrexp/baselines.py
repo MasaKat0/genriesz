@@ -6,8 +6,7 @@ never an exception that is caught (registration §1.1).
 
 - :func:`logit_aipw`: logistic MLE (no penalty, lbfgs, library solver defaults)
   for the propensity score, OLS for the outcome on the treatment-interaction
-  span, no clipping. A ConvergenceWarning or a fitted propensity outside
-  ``(1e-12, 1 - 1e-12)`` is a failure.
+  span, no clipping. A ConvergenceWarning or an undefined inverse propensity is a failure.
 - :func:`dml_gbm`: HistGradientBoosting for the propensity (features Z) and the
   outcome (features D, Z), no clipping, hyper-parameters chosen beforehand by
   :func:`tune_gbm` on pilot data.
@@ -59,8 +58,9 @@ def run_recording_warnings(fit):
 
 def solver_parameters(max_iter=None, tol=None):
     """Only pass explicit overrides to a scikit-learn estimator."""
-    return {key: value for key, value in (("max_iter", max_iter), ("tol", tol))
-            if value is not None}
+    return {
+        key: value for key, value in (("max_iter", max_iter), ("tol", tol)) if value is not None
+    }
 
 
 def _aipw(D, Y, e, mu1, mu0):
@@ -95,12 +95,24 @@ def logit_aipw(D, Z_feats, Y, fold_ids, *, max_iter=None, tol=None):
         for d, mu in ((1, mu1), (0, mu0)):
             rows = tr & (D == d)
             mu[te] = F[te] @ _ols(F[rows], Y[rows])
-    if not np.all((e > 1e-12) & (e < 1 - 1e-12)):
+    if not np.all((e > 0) & (e < 1)):
         return {**FAILED, "status": "propensity_range"}
     theta, se = _aipw(D, Y, e, mu1, mu0)
     if not (np.isfinite(theta) and np.isfinite(se)):
         return {**FAILED, "status": "nonfinite"}
-    return {"estimate": theta, "se": se, "status": "ok"}
+    alpha = D / e - (1 - D) / (1 - e)
+    psi = mu1 - mu0 + alpha * (Y - np.where(D == 1, mu1, mu0)) - theta
+    top = float(np.max(np.abs(psi)))
+    scaled = psi / top if top > 0 else np.zeros_like(psi)
+    mass = float(scaled @ scaled)
+    return {
+        "estimate": theta,
+        "se": se,
+        "status": "ok",
+        "max_abs_alpha": float(np.max(np.abs(alpha))),
+        "ess": float(np.sum(np.abs(alpha)) ** 2 / (alpha @ alpha)),
+        "score_concentration": float(np.max(scaled**2) / mass) if mass > 0 else np.nan,
+    }
 
 
 def _gbm_classifier(params, seed):
@@ -166,8 +178,9 @@ def dml_gbm(D, Z, Y, fold_ids, prop_params, out_params, seed):
     return {"estimate": theta, "se": se, "status": "ok"}
 
 
-def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None,
-                   return_diagnostics=False):
+def eb_dual_newton(
+    Phi_arm, target, n, tol=None, max_iter=None, options=None, return_diagnostics=False
+):
     """Entropy-balancing weights from SciPy's default unconstrained BFGS.
 
     The objective remains ``sum exp(Phi c) - c' target``. ``n`` is retained for
@@ -185,17 +198,23 @@ def eb_dual_newton(Phi_arm, target, n, tol=None, max_iter=None, options=None,
     opts = {} if options is None else dict(options)
     if max_iter is not None:
         opts["maxiter"] = int(max_iter)
-    res = optimize.minimize(value, np.zeros(Phi_arm.shape[1]), jac=gradient,
-                            tol=tol, options=opts)
+    res = optimize.minimize(value, np.zeros(Phi_arm.shape[1]), jac=gradient, tol=tol, options=opts)
     weights = np.exp(Phi_arm @ res.x)
     from genriesz.solvers import scipy_status
 
-    finite = bool(np.isfinite(res.fun) and np.all(np.isfinite(weights))
-                  and np.all(np.isfinite(res.jac)) and np.all(weights > 0))
+    finite = bool(
+        np.isfinite(res.fun)
+        and np.all(np.isfinite(weights))
+        and np.all(np.isfinite(res.jac))
+        and np.all(weights > 0)
+    )
     status = scipy_status(res) if finite else "nonfinite"
     result = weights if status == "ok" else None
-    diagnostic = {"status": status, "message": str(res.message),
-                  "max_gradient": (float(np.max(np.abs(res.jac)))
-                                   if np.all(np.isfinite(res.jac)) else None),
-                  "finite": finite, "library_success": bool(res.success)}
+    diagnostic = {
+        "status": status,
+        "message": str(res.message),
+        "max_gradient": (float(np.max(np.abs(res.jac))) if np.all(np.isfinite(res.jac)) else None),
+        "finite": finite,
+        "library_success": bool(res.success),
+    }
     return (result, diagnostic) if return_diagnostics else result

@@ -52,3 +52,8 @@ def test_fold_ids_balanced_partition() -> None:
     assert counts.tolist() == [101, 101, 101, 100, 100]
     again = seeds.fold_ids(503, 5, seeds.Seeds(12).folds(0, 0))
     assert np.array_equal(ids, again)
+
+
+def test_e25_stream_key():
+    expected = np.random.default_rng(np.random.SeedSequence(20261007, spawn_key=(25, 5, 499, 0)))
+    np.testing.assert_array_equal(seeds.Seeds(25).data(5, 499).random(5), expected.random(5))

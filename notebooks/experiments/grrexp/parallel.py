@@ -1,34 +1,12 @@
-"""Process-level parallelism of registration §1.2.
-
-Workers are spawned (not forked) with ``OMP_NUM_THREADS``,
-``OPENBLAS_NUM_THREADS`` and ``VECLIB_MAXIMUM_THREADS`` set to 1 in their
-environment before Python starts, so the BLAS of every worker is single-threaded
-from its first import. Every worker, and a serial run, then sets
-``torch.set_num_threads(1)`` and ``torch.use_deterministic_algorithms(True)`` and
-verifies with threadpoolctl that every loaded BLAS/OpenMP runtime uses one
-thread before each task.
-
-``run_tasks`` returns results in the order of ``tasks`` whatever the completion
-order, so a run with 1 worker and a run with several workers can be compared bit for
-bit (Stage 0.5, :func:`verify_parallel_identity`).
-
-The number of workers can be lowered or raised while a run is going on: when the
-environment variable ``GRREXP_MAX_WORKERS_FILE`` names a file holding an integer,
-the parent reads it each time a task finishes and keeps at most that many tasks
-(and worker processes) running, never more than ``n_jobs``. A worker that is no
-longer needed finishes its current task and exits; nothing is cut short, so the
-results do not depend on it (author, 2026-10-17: reduce load one or two processes
-at a time instead of stopping a run).
-"""
+"""Elastic process execution with at most four single-threaded workers."""
 
 from __future__ import annotations
 
-import hashlib
 import multiprocessing as mp
 import os
 import pickle
 import queue
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -107,8 +85,8 @@ def run_tasks(fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int) -> li
     loaded BLAS runtime fails. Exceptions propagate and stop the run.
     """
     tasks = list(tasks)
-    if n_jobs < 1:
-        raise ValueError("n_jobs must be >= 1")
+    if not isinstance(n_jobs, int) or isinstance(n_jobs, bool) or not 1 <= n_jobs <= 4:
+        raise ValueError("n_jobs must be an integer in 1..4")
     if not tasks:
         raise ValueError("no tasks")
     if n_jobs == 1:
@@ -175,7 +153,9 @@ def _run_elastic(fn, tasks, n_jobs, ctx):
             except queue.Empty:
                 dead = [k for k in busy if not workers[k][0].is_alive()]
                 if dead:
-                    raise RuntimeError(f"worker process(es) {dead} exited without returning a result")
+                    raise RuntimeError(
+                        f"worker process(es) {dead} exited without returning a result"
+                    ) from None
                 continue
             if not ok:
                 raise payload
@@ -201,38 +181,6 @@ def _run_elastic(fn, tasks, n_jobs, ctx):
             if proc.is_alive():
                 proc.terminate()
     return results
-
-
-def result_digest(results: Iterable[Any]) -> str:
-    """SHA-256 of the pickled results (protocol 5); equal digests mean equal bytes."""
-    h = hashlib.sha256()
-    for r in results:
-        h.update(pickle.dumps(r, protocol=5))
-    return h.hexdigest()
-
-
-def assert_bit_identical(serial: Sequence[Any], parallel: Sequence[Any], *, expected: int) -> str:
-    """Raise unless both runs returned ``expected`` (> 0) results with equal bytes."""
-    if expected < 1:
-        raise ValueError("expected must be positive")
-    if len(serial) != expected or len(parallel) != expected:
-        raise AssertionError(
-            f"expected {expected} results, got {len(serial)} serial and {len(parallel)} parallel"
-        )
-    a, b = result_digest(serial), result_digest(parallel)
-    if a != b:
-        raise AssertionError(f"serial and parallel runs differ: {a} != {b}")
-    return a
-
-
-def verify_parallel_identity(
-    fn: Callable[[Any], Any], tasks: Sequence[Any], n_jobs: int = 4
-) -> str:
-    """Stage 0.5: run every task with 1 and with ``n_jobs`` workers and compare bytes."""
-    tasks = list(tasks)
-    serial = run_tasks(fn, tasks, 1)
-    parallel = run_tasks(fn, tasks, n_jobs)
-    return assert_bit_identical(serial, parallel, expected=len(tasks))
 
 
 def thread_record(variables_at_start: dict[str, str | None]) -> dict:

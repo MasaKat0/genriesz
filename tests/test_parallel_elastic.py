@@ -23,7 +23,7 @@ def _fail_on_three(x):
 def test_results_keep_task_order_and_match_serial(monkeypatch):
     monkeypatch.delenv(parallel.MAX_WORKERS_FILE_ENV, raising=False)
     tasks = list(range(20))
-    assert parallel.run_tasks(_square, tasks, 3) == [t * t for t in tasks]
+    assert parallel.run_tasks(_square, tasks, 2) == [t * t for t in tasks]
 
 
 def test_control_file_lowers_and_clamps(tmp_path, monkeypatch):
@@ -47,3 +47,9 @@ def test_worker_exception_propagates(monkeypatch):
     monkeypatch.delenv(parallel.MAX_WORKERS_FILE_ENV, raising=False)
     with pytest.raises(ValueError, match="task three failed"):
         parallel.run_tasks(_fail_on_three, list(range(8)), 2)
+
+
+@pytest.mark.parametrize("jobs", [0, 5, 1.5, True])
+def test_worker_limit(jobs):
+    with pytest.raises(ValueError, match="1..4"):
+        parallel.run_tasks(_square, [1], jobs)

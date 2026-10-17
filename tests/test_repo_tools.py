@@ -8,6 +8,7 @@ history.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,6 +49,8 @@ def _write(path: Path, nb: nbformat.NotebookNode) -> None:
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     """A throwaway git repo, with cwd inside it."""
+    if os.environ.get("GRREXP_NO_GIT") == "1":
+        pytest.skip("git operations disabled for this task")
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.email", "t@t"], cwd=tmp_path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=tmp_path, check=True)
