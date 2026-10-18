@@ -1,0 +1,10 @@
+"""Run a paper experiment: uv run python experiments/run_registered_v2.py E-25 --n-jobs 2."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from grrexp.runner_v2 import main  # noqa: E402
+
+if __name__ == "__main__":
+    sys.exit(main())
