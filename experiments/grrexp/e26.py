@@ -244,7 +244,7 @@ def _quantiles(row, name, values):
     row[name + "_count"] = len(values)
     row[name + "_nonfinite"] = int((~np.isfinite(values)).sum())
     values = values[np.isfinite(values)]
-    for q in (0.05, 0.5, 0.95):
+    for q in (0.05, 0.25, 0.5, 0.75, 0.95):
         key = f"{name}_q{int(100 * q):02}"
         row[key] = float(np.quantile(values, q)) if len(values) else np.nan
         row[key + "_mc_lo"], row[key + "_mc_hi"] = quantile_interval(values, q)

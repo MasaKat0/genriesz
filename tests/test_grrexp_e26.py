@@ -218,15 +218,24 @@ def synthetic_raw():
 
 
 def test_summary_denominators_and_outputs():
+    known = {}
+    e26._quantiles(known, "known", np.arange(101, dtype=float))
+    assert known["known_q05"] == 5 and known["known_q25"] == 25
+    assert known["known_q50"] == 50 and known["known_q75"] == 75
+    assert known["known_q95"] == 95
+    assert known["known_q25_mc_lo"] <= 25 <= known["known_q25_mc_hi"]
+    assert known["known_q75_mc_lo"] <= 75 <= known["known_q75_mc_hi"]
     raw = synthetic_raw()
     result = e26.summarise(raw)
     one_failure = result[(result.cell == 0) & result.arm.eq("SQ")].iloc[0]
     assert one_failure.R == 1000 and one_failure.returned == 999
     assert one_failure.coverage == 0.999 and one_failure.coverage_conditional == 1
     assert one_failure.oracle_coverage == 1 and one_failure.coefficient_fits == 2000
+    assert one_failure.variance_ratio_q25 == 1 and one_failure.variance_ratio_q75 == 1
     no_success = result[(result.cell == 1) & result.arm.eq("SQ")].iloc[0]
     assert no_success.coverage == 0 and no_success.failure_rate == 1
     assert np.isnan(no_success.variance_ratio_q50)
+    assert np.isnan(no_success.variance_ratio_q25) and np.isnan(no_success.variance_ratio_q75)
     assert len(e26.tables(result)) == 3
     assert "0.999" in e26.tables(result)["tab_E26"]
     with pytest.raises(ValueError, match="exactly replications"):
