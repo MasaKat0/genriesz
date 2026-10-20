@@ -58,8 +58,10 @@ def _manifest(exp):
 
 def test_one_stage_manifest_and_source_provenance():
     assert outputs.STAGE_DIRS == {"run": "run"}
-    assert set(outputs.APP_FILES) == {12, 24, 25}
-    assert outputs.MODULES == {12: "grrexp.e12", 24: "grrexp.e24_v2", 25: "grrexp.e25"}
+    assert set(outputs.APP_FILES) == {12, 24, 25, 26}
+    assert outputs.MODULES == {
+        12: "grrexp.e12", 24: "grrexp.e24_v2", 25: "grrexp.e25", 26: "grrexp.e26"
+    }
     manifest = _manifest(25)
     outputs.validate_manifest(manifest, 25)
     with pytest.raises(ValueError):
@@ -210,9 +212,9 @@ def test_runner_records_process_interruption(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("exp", [19, 22])
 def test_inactive_experiments_are_not_execution_choices(exp, tmp_path):
-    with pytest.raises(ValueError, match="choose E-12, E-24 or E-25"):
+    with pytest.raises(ValueError, match="choose E-12, E-24, E-25 or E-26"):
         runner.run(exp, directory=tmp_path / "run")
-    with pytest.raises(ValueError, match="choose E-12, E-24 or E-25"):
+    with pytest.raises(ValueError, match="choose E-12, E-24, E-25 or E-26"):
         outputs.execute(exp, tmp_path / "run")
     with pytest.raises(SystemExit):
         runner.main([f"E-{exp}"])
@@ -237,7 +239,7 @@ def test_marimo_request_only_executes_full_design(tmp_path, monkeypatch):
         outputs.execute_app(19)
 
 
-@pytest.mark.parametrize("exp", [12, 24, 25])
+@pytest.mark.parametrize("exp", [12, 24, 25, 26])
 def test_marimo_apps_open_without_executing_experiments(exp, monkeypatch):
     import importlib.util
 
@@ -444,3 +446,47 @@ def test_installed_freeze_uses_current_uv_python_and_propagates_failure(monkeypa
     monkeypatch.setattr(subprocess, "run", fail)
     with pytest.raises(subprocess.CalledProcessError):
         env.pip_freeze()
+
+
+def test_e26_initializes_every_registered_task_before_computation(tmp_path, monkeypatch):
+    from grrexp import e26
+
+    def inspect_tasks(function, tasks, n_jobs, *, worker_records):
+        assert function is e26.replicate
+        assert len(tasks) == 12000 == len(e26.CELLS) * e26.R
+        assert n_jobs == 4
+        assert len(e26.CELLS) == 12 and e26.R == 1000
+        raise RuntimeError("complete E-26 design reached the computation boundary")
+
+    monkeypatch.setattr(parallel, "run_tasks", inspect_tasks)
+    destination = tmp_path / "e26"
+    with pytest.raises(RuntimeError, match="complete E-26 design"):
+        outputs.execute(26, destination, n_jobs=4)
+    record = json.loads((destination / "RUNNING.json").read_text())
+    assert record["R"] == 1000 and record["cells"] == e26.CELLS
+    assert record["app"] == "apps/e26.py"
+    assert record["source_sha256"]["src/genriesz/att_histogram.py"]
+    assert outputs.stage_dir(26).parts[-3:] == ("threshold_20261020_v15", "E26", "run")
+    assert outputs.APP_FILES[12] == "apps/e12_v2.py"
+    assert outputs.APP_FILES[24] == "apps/e24_v2.py"
+    assert outputs.APP_FILES[25] == "apps/e25_v2.py"
+
+
+def test_e26_cli_and_request_have_only_complete_design(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        runner, "run",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or tmp_path / "manifest.json"
+    )
+    assert runner.main(["E-26", "--n-jobs", "4"]) == 0
+    assert calls == [((26,), {"directory": None, "n_jobs": 4})]
+    for flag in ("--reps", "--cells"):
+        with pytest.raises(SystemExit):
+            runner.main(["E-26", flag, "2"])
+    request = {"experiment": 26, "directory": str(tmp_path / "run"), "n_jobs": 4, "reps": 2}
+    monkeypatch.setenv(outputs.RUN_ENV, json.dumps(request))
+    monkeypatch.setattr(
+        outputs, "execute", lambda *args, **kwargs: pytest.fail("partial request executed")
+    )
+    with pytest.raises(ValueError, match="full paper design"):
+        outputs.execute_app(26)

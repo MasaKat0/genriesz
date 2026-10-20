@@ -41,7 +41,7 @@ STREAMS = {
 
 BOOTSTRAP_CELL = 9999
 EVALUATION_CELL = 999
-REGISTERED_EXPERIMENTS = range(12, 26)
+REGISTERED_EXPERIMENTS = range(12, 27)
 
 
 def _check_key(exp: int, cell: int, rep: int, stream: int) -> None:
@@ -49,7 +49,7 @@ def _check_key(exp: int, cell: int, rep: int, stream: int) -> None:
         if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value < 0:
             raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
     if exp not in REGISTERED_EXPERIMENTS:
-        raise ValueError(f"EXP must be in 12..25, got {exp}")
+        raise ValueError(f"EXP must be in 12..26, got {exp}")
     if stream not in STREAMS.values():
         raise ValueError(f"stream must be one of {sorted(STREAMS.values())}, got {stream}")
 

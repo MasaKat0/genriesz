@@ -23,8 +23,8 @@ from .seeds import CONFIRMATORY_ENTROPY
 RUN_ENV = "GRREXP_RUN"
 STAGE_DIRS = {"run": "run"}
 STEM = re.compile(r"^[A-Za-z0-9_-]+$")
-MODULES = {12: "grrexp.e12", 24: "grrexp.e24_v2", 25: "grrexp.e25"}
-APP_FILES = {exp: f"apps/e{exp}_v2.py" for exp in MODULES}
+MODULES = {12: "grrexp.e12", 24: "grrexp.e24_v2", 25: "grrexp.e25", 26: "grrexp.e26"}
+APP_FILES = {12: "apps/e12_v2.py", 24: "apps/e24_v2.py", 25: "apps/e25_v2.py", 26: "apps/e26.py"}
 
 
 def clean(value):
@@ -77,7 +77,9 @@ def package_versions():
 
 def stage_dir(exp, stage="run"):
     if exp not in APP_FILES or stage != "run":
-        raise ValueError("only the three retained experiments and stage 'run' are supported")
+        raise ValueError("only the registered experiments and stage 'run' are supported")
+    if exp == 26:
+        return env.RESULTS_DIR / "threshold_20261020_v15" / "E26" / "run"
     return env.RESULTS_DIR / "programme_20261018_uv_marimo_v2" / f"E{exp}" / "run"
 
 
@@ -189,7 +191,7 @@ def warning_counts(value):
 def execute(exp, directory, *, n_jobs=2):
     """Execute the full experiment design and retain its computational provenance."""
     if exp not in APP_FILES:
-        raise ValueError("choose E-12, E-24 or E-25")
+        raise ValueError("choose E-12, E-24, E-25 or E-26")
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
@@ -259,10 +261,18 @@ def execute(exp, directory, *, n_jobs=2):
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+        if hasattr(module, "additional_figures"):
+            for name, extra in module.additional_figures(summary).items():
+                if not STEM.fullmatch(name):
+                    raise ValueError(f"invalid figure name: {name}")
+                extra.savefig(directory / (name + ".pdf"), bbox_inches="tight")
+                plt.close(extra)
         if exp == 25:
             write_json(
                 directory / "moment_facts.json", [module.moment_facts(b) for b in module.B_VALUES]
             )
+        elif exp == 26:
+            write_json(directory / "moment_facts.json", module.moment_facts())
         elif exp in (12, 24):
             write_json(
                 directory / "target.json",

@@ -21,7 +21,7 @@ class RunError(RuntimeError):
 
 def run(exp, app_file=None, *, directory=None, n_jobs=2):
     if exp not in outputs.APP_FILES:
-        raise ValueError("choose E-12, E-24 or E-25")
+        raise ValueError("choose E-12, E-24, E-25 or E-26")
     if not isinstance(n_jobs, int) or isinstance(n_jobs, bool) or not 1 <= n_jobs <= 4:
         raise ValueError("n_jobs must be an integer in 1..4")
     app_file = outputs.APP_FILES[exp] if app_file is None else app_file
@@ -78,7 +78,7 @@ def run(exp, app_file=None, *, directory=None, n_jobs=2):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Run one of the three complete paper experiments.")
+    parser = argparse.ArgumentParser(description="Run a complete paper experiment.")
     parser.add_argument("experiment", choices=[f"E-{exp}" for exp in outputs.APP_FILES])
     parser.add_argument("--n-jobs", type=int, choices=range(1, 5), default=2)
     parser.add_argument("--output", type=Path)

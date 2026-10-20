@@ -57,3 +57,11 @@ def test_fold_ids_balanced_partition() -> None:
 def test_e25_stream_key():
     expected = np.random.default_rng(np.random.SeedSequence(20261007, spawn_key=(25, 5, 499, 0)))
     np.testing.assert_array_equal(seeds.Seeds(25).data(5, 499).random(5), expected.random(5))
+
+
+def test_e26_stream_key_preserves_full_replication_range():
+    for stream in (0, 1):
+        expected = np.random.default_rng(
+            np.random.SeedSequence(20261007, spawn_key=(26, 11, 999, stream))
+        )
+        np.testing.assert_array_equal(seeds.rng(26, 11, 999, stream).random(8), expected.random(8))
