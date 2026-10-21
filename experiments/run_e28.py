@@ -15,7 +15,7 @@ from pathlib import Path
 from run_e27 import THREAD_VARIABLES, _worker, _write_shard
 
 
-def _verify_source(root, expected_commit):
+def _verify_source(root, expected_commit, extra_paths=()):
     if (
         not isinstance(expected_commit, str)
         or re.fullmatch(r"[0-9a-fA-F]{40}", expected_commit) is None
@@ -50,7 +50,7 @@ def _verify_source(root, expected_commit):
     if current_paths != committed_paths:
         raise RuntimeError("Python source files differ from the expected reviewed source commit")
     hashes = {}
-    for name in sorted(committed_paths | set(pins)):
+    for name in sorted(committed_paths | set(pins) | set(extra_paths)):
         committed = subprocess.run(
             ["git", "show", f"{expected_commit}:{name}"],
             cwd=root,
