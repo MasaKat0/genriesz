@@ -1,0 +1,25 @@
+\begin{tabular}{llrrr}
+\hline
+Regression & Loss & Coverage & Bias & RMSE \\
+\hline
+\multicolumn{5}{l}{Linear regression, $N=524288$} \\
+Isotropic & SQ & 0.426 & -0.0271 & 0.0332 \\
+Isotropic & UKL & 0.943 & -0.0009 & 0.0108 \\
+Anisotropic & SQ & 0.951 & -0.0009 & 0.0139 \\
+Anisotropic & UKL & 0.944 & 0.0001 & 0.0110 \\
+Prediction CV & SQ & 0.942 & 0.0002 & 0.0120 \\
+Prediction CV & UKL & 0.944 & 0.0001 & 0.0106 \\
+Validation selection & Selected & 0.942 & 0.0001 & 0.0108 \\
+Oracle & Oracle & 0.944 & 0.0001 & 0.0106 \\
+\hline
+\multicolumn{5}{l}{Nonlinear regression, $N=524288$} \\
+Isotropic & SQ & 0.004 & -0.1201 & 0.1361 \\
+Isotropic & UKL & 0.923 & -0.0050 & 0.0136 \\
+Anisotropic & SQ & 0.921 & -0.0068 & 0.0159 \\
+Anisotropic & UKL & 0.946 & -0.0002 & 0.0114 \\
+Prediction CV & SQ & 0.004 & -0.1201 & 0.1361 \\
+Prediction CV & UKL & 0.923 & -0.0050 & 0.0136 \\
+Validation selection & Selected & 0.923 & -0.0051 & 0.0137 \\
+Oracle & Oracle & 0.953 & 0.0001 & 0.0109 \\
+\hline
+\end{tabular}
