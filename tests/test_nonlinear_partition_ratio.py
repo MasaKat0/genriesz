@@ -252,3 +252,27 @@ def test_tiny_positive_penalty_does_not_overflow_empty_source_bound():
         beta, info = nr._solve_profile(p)
     assert info["status"] == "ok", info
     np.testing.assert_array_equal(beta, [2., .49])
+
+
+def test_sq_profile_retains_stationary_root_when_objectives_round_equal():
+    b0 = .270000004
+    penalty = float(2 * np.exp(2 + b0) / b0)
+    profile = nr._CellProfile([], np.exp([-1.]), "SQ", 1., penalty, source_size=4096)
+    midpoint = (.05 + .49) / 2
+    root = nr._root_candidate(profile, .05, .49)
+    assert root is not None
+    assert profile.at(midpoint)[0] == profile.at(root)[0]
+    midpoint_coefficient = np.array([profile.at(midpoint)[2], midpoint])
+    bad = nr._fit_info(profile, midpoint_coefficient, profile.at(midpoint)[0], 0)
+    assert bad["status"] == "stationarity_not_met"
+    assert bad["stationarity_scaled"] > bad["gradient_tolerance"]
+    coefficient, info = nr._solve_profile(profile)
+    assert info["status"] == "ok", info
+    np.testing.assert_allclose(coefficient, [2., b0], rtol=0, atol=2e-14)
+    assert info["objective_tolerance"] == 1e-12
+    assert info["gradient_tolerance"] == 1e-8
+    assert info["gap"] <= info["objective_tolerance"] * (1 + abs(info["objective"]))
+    assert info["gap"] >= -info["bound_roundoff_tolerance"]
+    assert info["stationarity_scaled"] <= info["gradient_tolerance"]
+    assert info["gradient"][0] < 0
+    assert coefficient[0] == 2.

@@ -180,6 +180,16 @@ def _fit_info(profile, coefficient, lower, nodes, forced_status=None):
     return info
 
 
+def _candidate_key(profile, b):
+    value, _, a = profile.at(b)
+    info = _base_fit_info(profile, np.array([a, b]), value, 0)
+    tolerance = min(GRADIENT_TOL, profile.source_size**-1)
+    stationary = np.isfinite(info["stationarity_scaled"]) and (
+        info["stationarity_scaled"] <= tolerance
+    )
+    return not stationary, value, b, a
+
+
 def _solve_profile(profile):
     lo, hi = map(float, profile.bounds[1])
     if not len(profile.vt):
@@ -190,7 +200,7 @@ def _solve_profile(profile):
     root = _root_candidate(profile, lo, hi)
     if root is not None:
         candidates.append(root)
-    best = min(candidates, key=lambda b: (profile.at(b)[0], b, profile.at(b)[2]))
+    best = min(candidates, key=lambda b: _candidate_key(profile, b))
     if profile.arm == "UKL0":
         lower = max(
             profile.at(b)[0] + profile.at(b)[1] * ((lo if profile.at(b)[1] >= 0 else hi) - b)
@@ -225,7 +235,7 @@ def _solve_profile(profile):
             root = _root_candidate(profile, a, b)
             if root is not None:
                 tests.append(root)
-            best = min([best, *tests], key=lambda x: (profile.at(x)[0], x, profile.at(x)[2]))
+            best = min([best, *tests], key=lambda x: _candidate_key(profile, x))
             heapq.heappush(heap, (_sq_bound(profile, a, b), a, b))
             nodes += 1
     lower = min(terminal_lower, heap[0][0] if heap else np.inf)
